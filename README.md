@@ -106,6 +106,20 @@ internal/metrics
 - `MM_METRICS_ADDR`
 - `MM_READINESS_MISSING_QUOTE_TIMEOUT_SECONDS`
 - `MM_SOAK_LOG_INTERVAL_SECONDS`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BASE_URL`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_API_KEY`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_CHAIN_ID`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SELL_TOKEN`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BUY_TOKEN`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_AMOUNT`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_TIMEOUT_MS`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_AGE_SECONDS`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_DEVIATION_BPS`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SPREAD_MULTIPLIER`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER`
 
 ## Auth And Signing
 
@@ -211,6 +225,74 @@ Reference price selection is:
 The bot also computes a local reference from the market itself. If local price deviates from anchor by more than `MM_MAX_ANCHOR_DEVIATION_BPS`, quoting halts and managed orders are canceled.
 
 Anchor freshness is tracked independently from exchange market-data freshness. `MM_STALE_ANCHOR_TIMEOUT_SECONDS` controls how long the bot will tolerate an old anchor before halting with `anchor data stale`.
+
+### USDC/cNGN Spot External Bootstrap Anchor
+
+`USDCcNGN-SPOT` has a narrow bootstrap-only external anchor path to seed an otherwise empty local spot book.
+
+It is enabled only with:
+
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED=true`
+- `MM_MARKET_SYMBOL=USDCcNGN-SPOT`
+
+The bot then uses the configured external anchor as an indicative mark when and only when the local spot market has no usable local reference.
+
+External-anchor selection for `USDCcNGN-SPOT` is:
+
+1. local mid from top of book
+2. local last trade
+3. external bootstrap anchor
+4. otherwise halt with `reference price unavailable`
+
+This path does not apply to:
+
+- `USDCcNGN-APR30-2026`
+- any other future market
+- any other spot market
+
+Bootstrap settings:
+
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER`
+  - `0x`
+    - uses the 0x read-only price endpoint
+  - `cngn-price-oracle`
+    - reads the Base Chainlink cNGN/USD oracle described in `wrappedcbdc/cngn-price-oracle`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BASE_URL`
+  - for `0x`: base price endpoint, for example a proxied 0x price endpoint
+  - for `cngn-price-oracle`: not required by the on-chain oracle path
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_API_KEY`
+  - optional direct 0x API key header for the read-only price endpoint
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_CHAIN_ID`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SELL_TOKEN`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BUY_TOKEN`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_AMOUNT`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_TIMEOUT_MS`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_AGE_SECONDS`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_DEVIATION_BPS`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SPREAD_MULTIPLIER`
+- `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER`
+
+Safety rules:
+
+- non-`200` responses are rejected
+- malformed payloads are rejected
+- zero or negative prices are rejected
+- cached anchor values older than `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_AGE_SECONDS` are rejected
+- wild moves beyond `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_DEVIATION_BPS` from the last accepted external mark are rejected
+
+For `cngn-price-oracle`, the bot reads the Base mainnet Chainlink cNGN/USD feed documented in the repo at:
+
+- contract `0xdfbb5Cbc88E382de007bfe6CE99C388176ED80aD`
+- reference endpoint shape if you run the repo's API server yourself: `GET /api/price`
+- the bot converts the on-chain feed into `cNGN per USDC` before using it as the spot bootstrap mark
+
+When the active reference source is the external bootstrap anchor:
+
+- quote spread is widened by `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SPREAD_MULTIPLIER`
+- quote size is reduced by `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER`
+
+When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops polling and using the external bootstrap anchor as soon as a usable local spot book or trade reference appears.
 
 ## Operator Modes
 
@@ -334,6 +416,12 @@ Start with:
 - `mm_bot_exchange_quote_age_seconds`
 - `mm_bot_net_inventory`
 - `mm_bot_live_quoted_spread_bps`
+- `mm_bot_external_anchor_present`
+- `mm_bot_external_anchor_age_seconds`
+- `mm_bot_external_anchor_price`
+- `mm_bot_external_anchor_refresh_total`
+- `mm_bot_external_anchor_refresh_failures_total`
+- `mm_bot_reference_source`
 
 Healthy steady-state usually looks like:
 
@@ -446,6 +534,7 @@ The harness fails loudly with actionable errors if required services are missing
 - If the deployment addresses or chain ID do not match the target environment, signed orders will be rejected.
 - If the exchange changes `/v1/orders` payload validation or market metadata format, the client must be updated.
 - If the anchor source fails and neither top-of-book nor last trade can provide a local fallback, the bot halts.
+- For `USDCcNGN-SPOT`, if the local market is empty and the external 0x bootstrap anchor is missing, stale, malformed, or rejected by the deviation guard, the bot halts with `reference price unavailable`.
 - Available-balance accounting assumes open-order reserve semantics are:
   - bid reserves quote asset `size * price`
   - ask reserves base asset `size`

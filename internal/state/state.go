@@ -17,24 +17,30 @@ type AssetPosition struct {
 }
 
 type Snapshot struct {
-	Market                string
-	BestBid               float64
-	BestAsk               float64
-	ReferencePrice        float64
-	LocalReferencePrice   float64
-	AnchorPrice           float64
-	AnchorSource          string
-	AnchorDeviationBPS    float64
-	InventoryByAsset      map[string]float64
-	Positions             map[string]AssetPosition
-	OpenOrders            []exchange.Order
-	RecentTrades          []exchange.Trade
-	LastQuoteUpdate       time.Time
-	LastMarketDataRefresh time.Time
-	LastBalanceRefresh    time.Time
-	LastAnchorRefresh     time.Time
-	LocalQuoteAge         time.Duration
-	ExchangeQuoteAge      time.Duration
+	Market                         string
+	BestBid                        float64
+	BestAsk                        float64
+	ReferencePrice                 float64
+	ReferenceSource                string
+	LocalReferencePrice            float64
+	LocalReferenceSource           string
+	AnchorPrice                    float64
+	AnchorSource                   string
+	AnchorDeviationBPS             float64
+	ExternalAnchorPrice            float64
+	LastExternalAnchorRefresh      time.Time
+	ExternalAnchorRefreshAttempted bool
+	ExternalAnchorRefreshFailed    bool
+	InventoryByAsset               map[string]float64
+	Positions                      map[string]AssetPosition
+	OpenOrders                     []exchange.Order
+	RecentTrades                   []exchange.Trade
+	LastQuoteUpdate                time.Time
+	LastMarketDataRefresh          time.Time
+	LastBalanceRefresh             time.Time
+	LastAnchorRefresh              time.Time
+	LocalQuoteAge                  time.Duration
+	ExchangeQuoteAge               time.Duration
 }
 
 func (s Snapshot) Inventory(asset string) float64 {

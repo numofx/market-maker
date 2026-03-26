@@ -26,6 +26,12 @@ type Registry struct {
 	halted                         float64
 	haltReason                     string
 	anchorPrice                    float64
+	externalAnchorPresent          float64
+	externalAnchorAgeSeconds       float64
+	externalAnchorPrice            float64
+	externalAnchorRefreshes        uint64
+	externalAnchorRefreshFailures  uint64
+	referenceSource                string
 	anchorLocalDeviationBPS        float64
 	quoteAgeSeconds                float64
 	lastKnownQuoteAge              float64
@@ -148,6 +154,30 @@ func (r *Registry) SetAnchorPrice(value float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.anchorPrice = value
+}
+
+func (r *Registry) SetExternalAnchor(present bool, ageSeconds, price float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.externalAnchorPresent = boolToFloat(present)
+	r.externalAnchorAgeSeconds = ageSeconds
+	r.externalAnchorPrice = price
+}
+
+func (r *Registry) IncExternalAnchorRefresh(success bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if success {
+		r.externalAnchorRefreshes++
+		return
+	}
+	r.externalAnchorRefreshFailures++
+}
+
+func (r *Registry) SetReferenceSource(source string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.referenceSource = source
 }
 
 func (r *Registry) SetAnchorLocalDeviationBPS(value float64) {
@@ -311,6 +341,11 @@ func (r *Registry) render() string {
 		fmt.Fprintf(&b, "mm_bot_halt_reason{reason=%q} 1\n", r.haltReason)
 	}
 	fmt.Fprintf(&b, "mm_bot_anchor_price %v\n", r.anchorPrice)
+	fmt.Fprintf(&b, "mm_bot_external_anchor_present %v\n", r.externalAnchorPresent)
+	fmt.Fprintf(&b, "mm_bot_external_anchor_age_seconds %v\n", r.externalAnchorAgeSeconds)
+	fmt.Fprintf(&b, "mm_bot_external_anchor_price %v\n", r.externalAnchorPrice)
+	fmt.Fprintf(&b, "mm_bot_external_anchor_refresh_total %d\n", r.externalAnchorRefreshes)
+	fmt.Fprintf(&b, "mm_bot_external_anchor_refresh_failures_total %d\n", r.externalAnchorRefreshFailures)
 	fmt.Fprintf(&b, "mm_bot_anchor_local_deviation_bps %v\n", r.anchorLocalDeviationBPS)
 	fmt.Fprintf(&b, "mm_bot_quote_age_seconds %v\n", r.quoteAgeSeconds)
 	fmt.Fprintf(&b, "mm_bot_last_known_quote_age_seconds %v\n", r.lastKnownQuoteAge)
@@ -330,6 +365,9 @@ func (r *Registry) render() string {
 	fmt.Fprintf(&b, "mm_bot_dependency_stale{dependency=%q} %v\n", "anchor_data", r.staleAnchorData)
 	if r.operatorMode != "" {
 		fmt.Fprintf(&b, "mm_bot_operator_mode{mode=%q} 1\n", r.operatorMode)
+	}
+	for _, source := range []string{"book", "trade", "external", "none"} {
+		fmt.Fprintf(&b, "mm_bot_reference_source{source=%q} %v\n", source, boolToFloat(r.referenceSource == source))
 	}
 
 	fillSides := make([]string, 0, len(r.fillsBySide))

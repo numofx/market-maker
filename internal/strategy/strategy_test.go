@@ -204,6 +204,141 @@ func TestOperatorModes(t *testing.T) {
 	}
 }
 
+func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	cfg := config.Config{
+		OrderSize:                  10,
+		HalfSpreadBPS:              20,
+		MaxLongInventory:           100,
+		MaxShortInventory:          -100,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{SpreadMultiplier: 2, SizeMultiplier: 0.5},
+	}
+
+	tests := []struct {
+		name       string
+		snapshot   state.Snapshot
+		wantRef    float64
+		wantSource string
+	}{
+		{
+			name: "book beats external",
+			snapshot: state.Snapshot{
+				Market:               "USDCcNGN-SPOT",
+				BestBid:              1490,
+				BestAsk:              1510,
+				ExternalAnchorPrice:  1700,
+				LocalReferenceSource: "book",
+				Positions: map[string]state.AssetPosition{
+					"USDC": {Available: 100},
+					"cNGN": {Available: 100000},
+				},
+			},
+			wantRef:    1500,
+			wantSource: "book",
+		},
+		{
+			name: "trade beats external",
+			snapshot: state.Snapshot{
+				Market:               "USDCcNGN-SPOT",
+				RecentTrades:         []exchange.Trade{{Price: 1550}},
+				ExternalAnchorPrice:  1700,
+				LocalReferenceSource: "trade",
+				Positions: map[string]state.AssetPosition{
+					"USDC": {Available: 100},
+					"cNGN": {Available: 100000},
+				},
+			},
+			wantRef:    1550,
+			wantSource: "trade",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := BuildQuotes(cfg, spec, tt.snapshot)
+			if err != nil {
+				t.Fatalf("BuildQuotes() error = %v", err)
+			}
+			assertClose(t, got.ReferencePrice, tt.wantRef)
+			if got.ReferenceSource != tt.wantSource {
+				t.Fatalf("reference source = %q want %q", got.ReferenceSource, tt.wantSource)
+			}
+		})
+	}
+}
+
+func TestExternalBootstrapMultipliersOnlyApplyWhenExternalActive(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	cfg := config.Config{
+		OrderSize:         10,
+		HalfSpreadBPS:     20,
+		MaxLongInventory:  100,
+		MaxShortInventory: -100,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			SpreadMultiplier: 2,
+			SizeMultiplier:   0.5,
+		},
+	}
+	basePositions := map[string]state.AssetPosition{
+		"USDC": {Available: 100},
+		"cNGN": {Available: 100000},
+	}
+
+	local, err := BuildQuotes(cfg, spec, state.Snapshot{
+		Market:               "USDCcNGN-SPOT",
+		BestBid:              1499,
+		BestAsk:              1501,
+		LocalReferenceSource: "book",
+		Positions:            basePositions,
+	})
+	if err != nil {
+		t.Fatalf("local BuildQuotes() error = %v", err)
+	}
+	external, err := BuildQuotes(cfg, spec, state.Snapshot{
+		Market:              "USDCcNGN-SPOT",
+		ExternalAnchorPrice: 1500,
+		Positions:           basePositions,
+	})
+	if err != nil {
+		t.Fatalf("external BuildQuotes() error = %v", err)
+	}
+	if external.ReferenceSource != "external" {
+		t.Fatalf("reference source = %q want external", external.ReferenceSource)
+	}
+	if !(external.Bid.Price < local.Bid.Price && external.Ask.Price > local.Ask.Price) {
+		t.Fatalf("expected wider external spread, local bid/ask=%v/%v external=%v/%v", local.Bid.Price, local.Ask.Price, external.Bid.Price, external.Ask.Price)
+	}
+	assertClose(t, external.Bid.Size, 5)
+	assertClose(t, external.Ask.Size, 5)
+}
+
+func TestNonSpotMarketsUnchangedAndStillPreferConfiguredAnchor(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	cfg := config.Config{
+		OrderSize:         10,
+		HalfSpreadBPS:     20,
+		MaxLongInventory:  100,
+		MaxShortInventory: -100,
+	}
+	got, err := BuildQuotes(cfg, spec, state.Snapshot{
+		Market:      spec.Symbol,
+		BestBid:     1499,
+		BestAsk:     1501,
+		AnchorPrice: 1600,
+		Positions: map[string]state.AssetPosition{
+			"USDC": {Available: 100},
+			"cNGN": {Available: 100000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildQuotes() error = %v", err)
+	}
+	assertClose(t, got.ReferencePrice, 1600)
+	if got.ReferenceSource != "none" {
+		t.Fatalf("reference source = %q want none for unchanged non-spot anchor path", got.ReferenceSource)
+	}
+}
+
 func assertClose(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-6 {

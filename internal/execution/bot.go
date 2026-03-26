@@ -73,7 +73,7 @@ func NewBot(cfg config.Config, client exchange.Client, spec exchange.MarketSpec,
 		cfg:       cfg,
 		client:    client,
 		spec:      spec,
-		loader:    marketdata.NewLoader(client, spec, marketdata.NewAnchorSource(cfg)),
+		loader:    marketdata.NewLoaderWithSpotExternal(client, spec, marketdata.NewAnchorSource(cfg), marketdata.NewUSDCCNGNSpotExternalAnchor(cfg), cfg.USDCCNGNSpotExternalAnchor.BootstrapOnly),
 		syncer:    NewSyncer(client, spec, cfg, m, logger),
 		metrics:   m,
 		logger:    logger,
@@ -107,6 +107,7 @@ func (b *Bot) Initialize(ctx context.Context) error {
 		return fmt.Errorf("build startup quotes: %w", err)
 	}
 	b.applyDerivedState(&snapshot, quotes)
+	b.logReferenceSourceTransition(b.snapshot, snapshot)
 	b.updateReadiness(snapshot, quotes)
 	if b.cfg.OperatorMode == config.ModeDryRunHealth {
 		b.setHealthyState(snapshot, "")
@@ -157,6 +158,7 @@ func (b *Bot) RunCycle(ctx context.Context) error {
 		return err
 	}
 	b.applyDerivedState(&snapshot, quotes)
+	b.logReferenceSourceTransition(b.snapshot, snapshot)
 	b.updateReadiness(snapshot, quotes)
 
 	riskDecision := risk.Evaluate(b.cfg, b.spec, snapshot)
@@ -268,7 +270,9 @@ func (b *Bot) LastReconciliationResult() ReconciliationResult {
 
 func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result) {
 	snapshot.ReferencePrice = quotes.ReferencePrice
+	snapshot.ReferenceSource = quotes.ReferenceSource
 	snapshot.LocalReferencePrice = quotes.LocalReferencePrice
+	snapshot.LocalReferenceSource = quotes.LocalReferenceSource
 	snapshot.AnchorPrice = quotes.AnchorPrice
 	snapshot.AnchorDeviationBPS = 0
 	snapshot.LocalQuoteAge = 0
@@ -280,6 +284,7 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 		snapshot.AnchorDeviationBPS = mathAbs(snapshot.LocalReferencePrice-snapshot.AnchorPrice) / snapshot.AnchorPrice * 10000
 	}
 	b.metrics.SetLastReferencePrice(snapshot.ReferencePrice)
+	b.metrics.SetReferenceSource(quotes.ReferenceSource)
 	b.metrics.SetAnchorPrice(snapshot.AnchorPrice)
 	b.metrics.SetAnchorLocalDeviationBPS(snapshot.AnchorDeviationBPS)
 	b.metrics.SetInventory(b.spec.BaseAsset, snapshot.Inventory(b.spec.BaseAsset))
@@ -298,7 +303,7 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 		b.metrics.SetLastAnchorRefresh(float64(snapshot.LastAnchorRefresh.Unix()))
 	}
 	now := time.Now().UTC()
-	var mdAge, balAge, anchorAge float64
+	var mdAge, balAge, anchorAge, externalAge float64
 	if !snapshot.LastMarketDataRefresh.IsZero() {
 		mdAge = now.Sub(snapshot.LastMarketDataRefresh).Seconds()
 	}
@@ -308,6 +313,13 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 	if !snapshot.LastAnchorRefresh.IsZero() {
 		anchorAge = now.Sub(snapshot.LastAnchorRefresh).Seconds()
 	}
+	if !snapshot.LastExternalAnchorRefresh.IsZero() {
+		externalAge = now.Sub(snapshot.LastExternalAnchorRefresh).Seconds()
+	}
+	if snapshot.ExternalAnchorRefreshAttempted {
+		b.metrics.IncExternalAnchorRefresh(!snapshot.ExternalAnchorRefreshFailed)
+	}
+	b.metrics.SetExternalAnchor(snapshot.ExternalAnchorPrice > 0, externalAge, snapshot.ExternalAnchorPrice)
 	b.metrics.SetFreshnessAges(mdAge, balAge, anchorAge)
 	if quotes.Bid != nil && quotes.Ask != nil && quotes.ReferencePrice > 0 {
 		b.metrics.SetLiveQuotedSpreadBPS((quotes.Ask.Price - quotes.Bid.Price) / quotes.ReferencePrice * 10000)
@@ -326,6 +338,23 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 	netInv := mathAbs(snapshot.Inventory(b.spec.BaseAsset))
 	if netInv > b.maxNetInventory {
 		b.maxNetInventory = netInv
+	}
+}
+
+func (b *Bot) logReferenceSourceTransition(prev state.Snapshot, next state.Snapshot) {
+	if prev.ReferenceSource == next.ReferenceSource {
+		return
+	}
+	b.logger.Info("reference source changed", "market", b.spec.Symbol, "from", prev.ReferenceSource, "to", next.ReferenceSource)
+	if b.spec.Symbol != "USDCcNGN-SPOT" {
+		return
+	}
+	if next.ReferenceSource == "external" {
+		b.logger.Info("entered external-anchor bootstrap mode", "market", b.spec.Symbol, "source", b.cfg.USDCCNGNSpotExternalAnchor.Provider, "price", next.ReferencePrice)
+		return
+	}
+	if prev.ReferenceSource == "external" && (next.ReferenceSource == "book" || next.ReferenceSource == "trade") {
+		b.logger.Info("exited external-anchor bootstrap mode", "market", b.spec.Symbol, "new_source", next.ReferenceSource, "price", next.ReferencePrice)
 	}
 }
 

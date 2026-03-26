@@ -16,42 +16,81 @@ type Quote struct {
 }
 
 type Result struct {
-	ReferencePrice      float64
-	LocalReferencePrice float64
-	AnchorPrice         float64
-	Bid                 *Quote
-	Ask                 *Quote
-	SkewBPS             float64
+	ReferencePrice       float64
+	ReferenceSource      string
+	LocalReferencePrice  float64
+	LocalReferenceSource string
+	AnchorPrice          float64
+	Bid                  *Quote
+	Ask                  *Quote
+	SkewBPS              float64
 }
 
-func ComputeReferencePrice(snapshot state.Snapshot) float64 {
-	if snapshot.AnchorPrice > 0 {
-		return snapshot.AnchorPrice
+func ComputeReferencePrice(snapshot state.Snapshot) (float64, string) {
+	if snapshot.Market == "USDCcNGN-SPOT" {
+		localRef, localSource := ComputeLocalReference(snapshot)
+		if localRef > 0 {
+			return localRef, localSource
+		}
+		if snapshot.ExternalAnchorPrice > 0 {
+			return snapshot.ExternalAnchorPrice, "external"
+		}
+		return 0, "none"
 	}
-	return ComputeLocalReferencePrice(snapshot)
+	if snapshot.AnchorPrice > 0 {
+		return snapshot.AnchorPrice, "none"
+	}
+	localRef := ComputeLocalReferencePrice(snapshot)
+	if localRef > 0 {
+		return localRef, snapshot.LocalReferenceSource
+	}
+	return 0, "none"
 }
 
 func ComputeLocalReferencePrice(snapshot state.Snapshot) float64 {
+	price, _ := ComputeLocalReference(snapshot)
+	return price
+}
+
+func ComputeLocalReference(snapshot state.Snapshot) (float64, string) {
+	if snapshot.LocalReferencePrice > 0 {
+		if snapshot.LocalReferenceSource == "" {
+			return snapshot.LocalReferencePrice, "book"
+		}
+		return snapshot.LocalReferencePrice, snapshot.LocalReferenceSource
+	}
 	if snapshot.BestBid > 0 && snapshot.BestAsk > 0 {
-		return (snapshot.BestBid + snapshot.BestAsk) / 2
+		return (snapshot.BestBid + snapshot.BestAsk) / 2, "book"
 	}
 	if len(snapshot.RecentTrades) > 0 {
-		return snapshot.RecentTrades[0].Price
+		return snapshot.RecentTrades[0].Price, "trade"
 	}
-	return 0
+	return 0, "none"
 }
 
 func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot) (Result, error) {
-	ref := ComputeReferencePrice(snapshot)
-	localRef := ComputeLocalReferencePrice(snapshot)
-	result := Result{ReferencePrice: ref, LocalReferencePrice: localRef, AnchorPrice: snapshot.AnchorPrice}
+	ref, refSource := ComputeReferencePrice(snapshot)
+	localRef, localSource := ComputeLocalReference(snapshot)
+	result := Result{
+		ReferencePrice:       ref,
+		ReferenceSource:      refSource,
+		LocalReferencePrice:  localRef,
+		LocalReferenceSource: localSource,
+		AnchorPrice:          snapshot.AnchorPrice,
+	}
 	if ref <= 0 {
 		return result, nil
 	}
 
 	inventory := snapshot.Inventory(spec.BaseAsset)
 	skewBPS := inventorySkew(inventory, cfg.MaxLongInventory, cfg.MaxShortInventory, cfg.InventorySkewBPS)
-	halfSpread := cfg.HalfSpreadBPS / 10000.0
+	halfSpreadBPS := cfg.HalfSpreadBPS
+	orderSize := cfg.OrderSize
+	if snapshot.Market == "USDCcNGN-SPOT" && refSource == "external" {
+		halfSpreadBPS *= cfg.USDCCNGNSpotExternalAnchor.SpreadMultiplier
+		orderSize *= cfg.USDCCNGNSpotExternalAnchor.SizeMultiplier
+	}
+	halfSpread := halfSpreadBPS / 10000.0
 	skew := skewBPS / 10000.0
 
 	bidPrice := roundDown(ref*(1-halfSpread-skew), spec.TickSize)
@@ -69,8 +108,8 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 		maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide/bidPrice)
 		maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide/askPrice)
 	}
-	bidSize := roundDown(minFloat(cfg.OrderSize, maxBidSize), spec.SizeStep)
-	askSize := roundDown(minFloat(cfg.OrderSize, maxAskSize), spec.SizeStep)
+	bidSize := roundDown(minFloat(orderSize, maxBidSize), spec.SizeStep)
+	askSize := roundDown(minFloat(orderSize, maxAskSize), spec.SizeStep)
 
 	if bidSize >= spec.MinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}

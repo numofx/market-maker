@@ -96,6 +96,25 @@ type Config struct {
 	MetricsAddr                  string
 	ReadinessMissingQuoteTimeout time.Duration
 	SoakLogInterval              time.Duration
+	USDCCNGNSpotExternalAnchor   USDCCNGNSpotExternalAnchorConfig
+}
+
+type USDCCNGNSpotExternalAnchorConfig struct {
+	Enabled          bool
+	Provider         string
+	BaseURL          string
+	APIKey           string
+	RPCURL           string
+	ChainID          int64
+	SellToken        string
+	BuyToken         string
+	Amount           string
+	Timeout          time.Duration
+	MaxAge           time.Duration
+	MaxDeviationBPS  float64
+	BootstrapOnly    bool
+	SpreadMultiplier float64
+	SizeMultiplier   float64
 }
 
 func Load() (Config, error) {
@@ -148,6 +167,23 @@ func Load() (Config, error) {
 		MetricsAddr:                  envString("MM_METRICS_ADDR", defaultMetricsAddr),
 		ReadinessMissingQuoteTimeout: time.Duration(envInt("MM_READINESS_MISSING_QUOTE_TIMEOUT_SECONDS", 0)) * time.Second,
 		SoakLogInterval:              time.Duration(envInt("MM_SOAK_LOG_INTERVAL_SECONDS", defaultSoakLogInterval)) * time.Second,
+		USDCCNGNSpotExternalAnchor: USDCCNGNSpotExternalAnchorConfig{
+			Enabled:          envBool("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED", false),
+			Provider:         envString("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER", "0x"),
+			BaseURL:          strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BASE_URL")),
+			APIKey:           strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_API_KEY")),
+			RPCURL:           strings.TrimSpace(os.Getenv("MM_RPC_URL")),
+			ChainID:          int64(envInt("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_CHAIN_ID", 8453)),
+			SellToken:        strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SELL_TOKEN")),
+			BuyToken:         strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BUY_TOKEN")),
+			Amount:           strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_AMOUNT")),
+			Timeout:          time.Duration(envInt("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_TIMEOUT_MS", 1500)) * time.Millisecond,
+			MaxAge:           time.Duration(envInt("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_AGE_SECONDS", 30)) * time.Second,
+			MaxDeviationBPS:  envFloat("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_DEVIATION_BPS", 500),
+			BootstrapOnly:    envBool("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY", true),
+			SpreadMultiplier: envFloat("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SPREAD_MULTIPLIER", 2.0),
+			SizeMultiplier:   envFloat("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER", 0.5),
+		},
 	}
 
 	if cfg.APIBaseURL == "" {
@@ -199,6 +235,46 @@ func Load() (Config, error) {
 	}
 	if cfg.AnchorSourceType == "http" && cfg.AnchorURL == "" {
 		return Config{}, fmt.Errorf("MM_ANCHOR_URL is required when MM_ANCHOR_SOURCE_TYPE=http")
+	}
+	if cfg.USDCCNGNSpotExternalAnchor.Enabled {
+		if cfg.MarketSymbol != "USDCcNGN-SPOT" {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED is only supported for MM_MARKET_SYMBOL=USDCcNGN-SPOT")
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.Provider != "0x" && cfg.USDCCNGNSpotExternalAnchor.Provider != "cngn-price-oracle" {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER must be one of 0x, cngn-price-oracle")
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.Provider == "0x" {
+			if cfg.USDCCNGNSpotExternalAnchor.BaseURL == "" {
+				return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BASE_URL is required when external anchor provider is 0x")
+			}
+			if cfg.USDCCNGNSpotExternalAnchor.SellToken == "" {
+				return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SELL_TOKEN is required when external anchor provider is 0x")
+			}
+			if cfg.USDCCNGNSpotExternalAnchor.BuyToken == "" {
+				return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BUY_TOKEN is required when external anchor provider is 0x")
+			}
+			if cfg.USDCCNGNSpotExternalAnchor.Amount == "" {
+				return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_AMOUNT is required when external anchor provider is 0x")
+			}
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.Provider == "cngn-price-oracle" && cfg.USDCCNGNSpotExternalAnchor.RPCURL == "" {
+			return Config{}, fmt.Errorf("MM_RPC_URL is required when external anchor provider is cngn-price-oracle")
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.Timeout <= 0 {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_TIMEOUT_MS must be > 0")
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.MaxAge <= 0 {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_AGE_SECONDS must be > 0")
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.MaxDeviationBPS < 0 {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_MAX_DEVIATION_BPS must be >= 0")
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.SpreadMultiplier < 1 {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SPREAD_MULTIPLIER must be >= 1")
+		}
+		if cfg.USDCCNGNSpotExternalAnchor.SizeMultiplier <= 0 || cfg.USDCCNGNSpotExternalAnchor.SizeMultiplier > 1 {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER must be > 0 and <= 1")
+		}
 	}
 
 	level, err := parseLevel(envString("MM_LOG_LEVEL", defaultLogLevel))

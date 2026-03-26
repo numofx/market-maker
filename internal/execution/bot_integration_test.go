@@ -14,6 +14,7 @@ import (
 
 	"github.com/numofx/market-maker/internal/config"
 	"github.com/numofx/market-maker/internal/exchange"
+	"github.com/numofx/market-maker/internal/marketdata"
 	"github.com/numofx/market-maker/internal/metrics"
 	"github.com/numofx/market-maker/internal/state"
 )
@@ -39,9 +40,26 @@ func (c *integrationClient) GetMarket(context.Context, string) (exchange.MarketS
 	return c.spec, nil
 }
 
+type fakeSpotExternalAnchor struct {
+	quotes []marketdata.ExternalAnchorQuote
+	idx    int
+}
+
+func (f *fakeSpotExternalAnchor) Fetch(context.Context) marketdata.ExternalAnchorQuote {
+	if len(f.quotes) == 0 {
+		return marketdata.ExternalAnchorQuote{}
+	}
+	if f.idx >= len(f.quotes) {
+		return f.quotes[len(f.quotes)-1]
+	}
+	quote := f.quotes[f.idx]
+	f.idx++
+	return quote
+}
+
 func TestStartupReconciliationCancelsExistingOrders(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
 		mockClient: mockClient{
 			openOrders: []exchange.Order{
 				{ID: "mm:USDCcNGN-SPOT:buy:1", Side: exchange.SideBuy, Nonce: "1", Managed: true},
@@ -142,7 +160,7 @@ func TestCancelReplaceAfterRestartAllocatesNewNonces(t *testing.T) {
 
 func TestNoDuplicateQuotesOnPartialFailure(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
 		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
 		balances: []exchange.Balance{
 			{Asset: "USDC", Total: 0, Available: 0},
@@ -150,7 +168,7 @@ func TestNoDuplicateQuotesOnPartialFailure(t *testing.T) {
 		},
 	}
 	cfg := config.Config{
-		MarketSymbol:         "USDCcNGN-SPOT",
+		MarketSymbol:         "USDCcNGN-APR30-2026",
 		StateFile:            filepath.Join(t.TempDir(), "state.json"),
 		OrderSize:            10,
 		HalfSpreadBPS:        10,
@@ -207,6 +225,170 @@ func TestHaltedWhenBalancesInsufficient(t *testing.T) {
 	}
 	if len(client.cancelled) != 2 {
 		t.Fatalf("expected kill switch cancel-all, got %d", len(client.cancelled))
+	}
+}
+
+func TestEmptySpotMarketUsesFreshExternalAnchor(t *testing.T) {
+	client := &integrationClient{
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		balances: []exchange.Balance{
+			{Asset: "USDC", Total: 0, Available: 100},
+			{Asset: "cNGN", Total: 100000, Available: 100000},
+		},
+	}
+	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
+		Price:            1500,
+		Present:          true,
+		FetchedAt:        time.Now().UTC(),
+		RefreshAttempted: true,
+	}}}
+	cfg := config.Config{
+		MarketSymbol:         "USDCcNGN-SPOT",
+		StateFile:            filepath.Join(t.TempDir(), "state.json"),
+		OrderSize:            10,
+		HalfSpreadBPS:        10,
+		MaxLongInventory:     100,
+		MaxShortInventory:    -100,
+		QuoteRefreshInterval: 0,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			Enabled:          true,
+			Provider:         "0x",
+			BaseURL:          "https://example.invalid/price",
+			ChainID:          8453,
+			SellToken:        "0xsell",
+			BuyToken:         "0xbuy",
+			Amount:           "1000000",
+			Timeout:          time.Second,
+			MaxAge:           time.Minute,
+			MaxDeviationBPS:  500,
+			BootstrapOnly:    true,
+			SpreadMultiplier: 2,
+			SizeMultiplier:   0.5,
+		},
+	}
+	reg := metrics.New()
+	bot := NewBot(cfg, client, client.spec, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg), anchor, true)
+	if err := bot.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle() error = %v", err)
+	}
+	if bot.snapshot.ReferenceSource != "external" {
+		t.Fatalf("reference source = %q want external", bot.snapshot.ReferenceSource)
+	}
+	if len(client.placed) != 2 {
+		t.Fatalf("placements = %d want 2", len(client.placed))
+	}
+	rr := httptest.NewRecorder()
+	reg.ReadyHandler().ServeHTTP(rr, httptest.NewRequest("GET", "/readyz", nil))
+	if rr.Code != 200 {
+		t.Fatalf("readyz = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestEmptySpotMarketInvalidExternalAnchorHalts(t *testing.T) {
+	client := &integrationClient{
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		balances: []exchange.Balance{
+			{Asset: "USDC", Total: 100, Available: 100},
+			{Asset: "cNGN", Total: 100000, Available: 100000},
+		},
+	}
+	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
+		RefreshAttempted: true,
+		RefreshFailed:    true,
+	}}}
+	cfg := config.Config{
+		MarketSymbol:         "USDCcNGN-SPOT",
+		StateFile:            filepath.Join(t.TempDir(), "state.json"),
+		OrderSize:            10,
+		HalfSpreadBPS:        10,
+		MaxLongInventory:     100,
+		MaxShortInventory:    -100,
+		QuoteRefreshInterval: 0,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			Enabled:          true,
+			Provider:         "0x",
+			BaseURL:          "https://example.invalid/price",
+			ChainID:          8453,
+			SellToken:        "0xsell",
+			BuyToken:         "0xbuy",
+			Amount:           "1000000",
+			Timeout:          time.Second,
+			MaxAge:           time.Minute,
+			MaxDeviationBPS:  500,
+			BootstrapOnly:    true,
+			SpreadMultiplier: 2,
+			SizeMultiplier:   0.5,
+		},
+	}
+	reg := metrics.New()
+	bot := NewBot(cfg, client, client.spec, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg), anchor, true)
+	if err := bot.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle() error = %v", err)
+	}
+	if !bot.currentHalted {
+		t.Fatal("expected halted bot")
+	}
+	if bot.persisted.LastHaltReason != "reference price unavailable" {
+		t.Fatalf("halt reason = %q", bot.persisted.LastHaltReason)
+	}
+}
+
+func TestBootstrapOnlySwitchesFromExternalToLocal(t *testing.T) {
+	client := &integrationClient{
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		balances: []exchange.Balance{
+			{Asset: "USDC", Total: 100, Available: 100},
+			{Asset: "cNGN", Total: 100000, Available: 100000},
+		},
+	}
+	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
+		Price:            1500,
+		Present:          true,
+		FetchedAt:        time.Now().UTC(),
+		RefreshAttempted: true,
+	}}}
+	cfg := config.Config{
+		MarketSymbol:         "USDCcNGN-SPOT",
+		StateFile:            filepath.Join(t.TempDir(), "state.json"),
+		OrderSize:            10,
+		HalfSpreadBPS:        10,
+		MaxLongInventory:     100,
+		MaxShortInventory:    -100,
+		QuoteRefreshInterval: 0,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			Enabled:          true,
+			Provider:         "0x",
+			BaseURL:          "https://example.invalid/price",
+			ChainID:          8453,
+			SellToken:        "0xsell",
+			BuyToken:         "0xbuy",
+			Amount:           "1000000",
+			Timeout:          time.Second,
+			MaxAge:           time.Minute,
+			MaxDeviationBPS:  500,
+			BootstrapOnly:    true,
+			SpreadMultiplier: 2,
+			SizeMultiplier:   0.5,
+		},
+	}
+	bot := NewBot(cfg, client, client.spec, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg), anchor, true)
+	if err := bot.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle() error = %v", err)
+	}
+	if bot.snapshot.ReferenceSource != "external" {
+		t.Fatalf("first source = %q want external", bot.snapshot.ReferenceSource)
+	}
+	client.book = exchange.Book{Bids: []exchange.BookLevel{{Price: 1499}}, Asks: []exchange.BookLevel{{Price: 1501}}}
+	client.openOrders = nil
+	client.placed = nil
+	if err := bot.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle() second error = %v", err)
+	}
+	if bot.snapshot.ReferenceSource != "book" {
+		t.Fatalf("second source = %q want book", bot.snapshot.ReferenceSource)
 	}
 }
 
@@ -313,7 +495,7 @@ func TestStaleDependencyLoadErrorCancelsManagedOrders(t *testing.T) {
 
 func TestStaleAnchorIsolatedFromExchangeMarketData(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
 		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
 		balances: []exchange.Balance{
 			{Asset: "USDC", Total: 100, Available: 100},
@@ -324,7 +506,7 @@ func TestStaleAnchorIsolatedFromExchangeMarketData(t *testing.T) {
 		},
 	}
 	cfg := config.Config{
-		MarketSymbol:         "USDCcNGN-SPOT",
+		MarketSymbol:         "USDCcNGN-APR30-2026",
 		StateFile:            filepath.Join(t.TempDir(), "state.json"),
 		OrderSize:            10,
 		HalfSpreadBPS:        10,
@@ -342,6 +524,8 @@ func TestStaleAnchorIsolatedFromExchangeMarketData(t *testing.T) {
 		LastMarketDataRefresh: time.Now().UTC(),
 		LastBalanceRefresh:    time.Now().UTC(),
 		LastAnchorRefresh:     time.Now().UTC().Add(-2 * time.Second),
+		AnchorSource:          "http",
+		AnchorPrice:           100,
 		InventoryByAsset:      map[string]float64{"USDC": 0},
 	}
 
