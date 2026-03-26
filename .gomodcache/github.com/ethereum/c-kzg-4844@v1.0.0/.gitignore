@@ -1,0 +1,23 @@
+test_c_kzg_4844
+test_c_kzg_4844_*
+coverage.html
+analysis-report/
+*.profraw
+*.profdata
+*.prof
+*.o
+*.s
+*.a
+*.out
+.vscode/
+.idea/
+*bindings/*/*.so
+*bindings/rust/target
+__pycache__
+.DS_Store
+
+# nimble build dir
+build/
+
+# ccls cache dir
+.ccls-cache/

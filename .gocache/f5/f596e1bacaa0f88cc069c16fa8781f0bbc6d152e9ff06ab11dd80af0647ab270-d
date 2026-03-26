@@ -1,0 +1,6 @@
+./bot.go
+./reconcile.go
+./sync.go
+./bot_integration_test.go
+./reconcile_test.go
+./sync_test.go
