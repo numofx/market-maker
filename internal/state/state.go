@@ -17,15 +17,24 @@ type AssetPosition struct {
 }
 
 type Snapshot struct {
-	Market           string
-	BestBid          float64
-	BestAsk          float64
-	ReferencePrice   float64
-	InventoryByAsset map[string]float64
-	Positions        map[string]AssetPosition
-	OpenOrders       []exchange.Order
-	RecentTrades     []exchange.Trade
-	LastQuoteUpdate  time.Time
+	Market                string
+	BestBid               float64
+	BestAsk               float64
+	ReferencePrice        float64
+	LocalReferencePrice   float64
+	AnchorPrice           float64
+	AnchorSource          string
+	AnchorDeviationBPS    float64
+	InventoryByAsset      map[string]float64
+	Positions             map[string]AssetPosition
+	OpenOrders            []exchange.Order
+	RecentTrades          []exchange.Trade
+	LastQuoteUpdate       time.Time
+	LastMarketDataRefresh time.Time
+	LastBalanceRefresh    time.Time
+	LastAnchorRefresh     time.Time
+	LocalQuoteAge         time.Duration
+	ExchangeQuoteAge      time.Duration
 }
 
 func (s Snapshot) Inventory(asset string) float64 {
@@ -37,8 +46,14 @@ func (s Snapshot) Position(asset string) AssetPosition {
 }
 
 type Persistent struct {
-	NextNonceBase   uint64            `json:"next_nonce_base"`
-	LastNonceBySide map[string]uint64 `json:"last_nonce_by_side"`
+	NextNonceBase         uint64             `json:"next_nonce_base"`
+	LastNonceBySide       map[string]uint64  `json:"last_nonce_by_side"`
+	LastSubmittedBidOrder string             `json:"last_submitted_bid_order_id,omitempty"`
+	LastSubmittedAskOrder string             `json:"last_submitted_ask_order_id,omitempty"`
+	LastAdoptedBidOrder   string             `json:"last_adopted_bid_order_id,omitempty"`
+	LastAdoptedAskOrder   string             `json:"last_adopted_ask_order_id,omitempty"`
+	LastHaltReason        string             `json:"last_halt_reason,omitempty"`
+	LastInventorySnapshot map[string]float64 `json:"last_inventory_snapshot,omitempty"`
 }
 
 type Store struct {
@@ -64,12 +79,18 @@ func (s *Store) Load() (Persistent, error) {
 	if out.LastNonceBySide == nil {
 		out.LastNonceBySide = map[string]uint64{}
 	}
+	if out.LastInventorySnapshot == nil {
+		out.LastInventorySnapshot = map[string]float64{}
+	}
 	return out, nil
 }
 
 func (s *Store) Save(value Persistent) error {
 	if value.LastNonceBySide == nil {
 		value.LastNonceBySide = map[string]uint64{}
+	}
+	if value.LastInventorySnapshot == nil {
+		value.LastInventorySnapshot = map[string]float64{}
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err

@@ -1,0 +1,8 @@
+
+# local runtime
+.env
+.mm-bot-state.json
+
+# go build cache
+.gocache/
+.mm-bot-state.json

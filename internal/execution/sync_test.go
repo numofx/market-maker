@@ -4,7 +4,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/numofx/market-maker/internal/config"
 	"github.com/numofx/market-maker/internal/exchange"
@@ -68,6 +71,57 @@ func TestShouldCancel(t *testing.T) {
 	}
 }
 
+func TestEvaluateCancelSuppression(t *testing.T) {
+	now := time.Now().UTC()
+	current := &exchange.Order{ID: "b1", Side: exchange.SideBuy, Price: 100, Size: 1, CreatedAt: now.Add(-2 * time.Second)}
+	target := &strategy.Quote{Side: exchange.SideBuy, Price: 100.3, Size: 1}
+
+	tests := []struct {
+		name         string
+		cfg          config.Config
+		wantSuppress string
+		wantCancel   bool
+	}{
+		{
+			name: "replace suppressed by minimum lifetime",
+			cfg: config.Config{
+				CancelStaleOrderThreshold: 20,
+				MinQuoteLifetime:          5 * time.Second,
+			},
+			wantSuppress: "minimum_lifetime_not_met",
+		},
+		{
+			name: "replace suppressed by minimum move threshold",
+			cfg: config.Config{
+				CancelStaleOrderThreshold: 20,
+				MinReplaceMoveBPS:         40,
+			},
+			wantSuppress: "minimum_move_not_met",
+		},
+		{
+			name: "replace allowed when guards satisfied",
+			cfg: config.Config{
+				CancelStaleOrderThreshold: 20,
+				MinQuoteLifetime:          time.Second,
+				MinReplaceMoveBPS:         20,
+			},
+			wantCancel: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decision := evaluateCancel(current, target, nil, tt.cfg, time.Time{}, now)
+			if decision.SuppressReason != tt.wantSuppress {
+				t.Fatalf("suppress reason = %q want %q", decision.SuppressReason, tt.wantSuppress)
+			}
+			if decision.Cancel != tt.wantCancel {
+				t.Fatalf("cancel = %v want %v", decision.Cancel, tt.wantCancel)
+			}
+		})
+	}
+}
+
 func TestSync(t *testing.T) {
 	client := &mockClient{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -124,5 +178,72 @@ func TestSync(t *testing.T) {
 				t.Fatalf("cancels = %d want %d", len(client.cancelled), tt.wantCancels)
 			}
 		})
+	}
+}
+
+func TestSyncCancelRateLimit(t *testing.T) {
+	client := &mockClient{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT"}, config.Config{
+		CancelStaleOrderThreshold: 10,
+		MaxCancelsPerMinute:       1,
+	}, metrics.New(), logger)
+	syncer.cancelTimestamps = []time.Time{time.Now().UTC().Add(-10 * time.Second)}
+
+	_, err := syncer.Sync(context.Background(), state.Snapshot{
+		Market: "USDCcNGN-SPOT",
+		OpenOrders: []exchange.Order{
+			{ID: "b1", Side: exchange.SideBuy, Price: 100, Size: 1, CreatedAt: time.Now().UTC().Add(-time.Minute)},
+		},
+	}, strategy.Result{
+		Bid: &strategy.Quote{Side: exchange.SideBuy, Price: 101, Size: 1},
+	}, map[exchange.Side]Identity{
+		exchange.SideBuy: {OrderID: "bid", Nonce: "10"},
+	})
+	if err == nil {
+		t.Fatal("expected cancel rate limit error")
+	}
+	if _, ok := err.(*CancelRateLimitError); !ok {
+		t.Fatalf("expected CancelRateLimitError, got %T", err)
+	}
+}
+
+func TestCancelMetricsByCategory(t *testing.T) {
+	client := &mockClient{
+		openOrders: []exchange.Order{
+			{ID: "b1", Side: exchange.SideBuy, Price: 100, Size: 1, CreatedAt: time.Now().UTC().Add(-time.Minute)},
+		},
+	}
+	reg := metrics.New()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT"}, config.Config{
+		CancelStaleOrderThreshold: 10,
+		MaxCancelsPerMinute:       10,
+	}, reg, logger)
+
+	_, err := syncer.Sync(context.Background(), state.Snapshot{
+		Market:     "USDCcNGN-SPOT",
+		OpenOrders: client.openOrders,
+	}, strategy.Result{
+		Bid: &strategy.Quote{Side: exchange.SideBuy, Price: 101, Size: 1},
+	}, map[exchange.Side]Identity{
+		exchange.SideBuy: {OrderID: "bid", Nonce: "10"},
+	})
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	client.openOrders = []exchange.Order{{ID: "risk-bid", Side: exchange.SideBuy}, {ID: "risk-ask", Side: exchange.SideSell}}
+	if err := syncer.CancelAll(context.Background(), "USDCcNGN-SPOT", cancelCategoryRiskTriggered); err != nil {
+		t.Fatalf("CancelAll() error = %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, `category="replace_driven"`) {
+		t.Fatalf("metrics missing replace_driven category: %s", body)
+	}
+	if !strings.Contains(body, `category="risk_triggered"`) {
+		t.Fatalf("metrics missing risk_triggered category: %s", body)
 	}
 }

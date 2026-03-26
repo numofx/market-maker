@@ -154,6 +154,56 @@ func TestAvailableBalanceCapsQuoteSize(t *testing.T) {
 	}
 }
 
+func TestOperatorModes(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	baseCfg := config.Config{
+		OrderSize:         10,
+		HalfSpreadBPS:     20,
+		InventorySkewBPS:  0,
+		MaxLongInventory:  100,
+		MaxShortInventory: -100,
+	}
+	snapshot := state.Snapshot{
+		BestBid:          99,
+		BestAsk:          101,
+		InventoryByAsset: map[string]float64{"USDC": 0},
+		Positions: map[string]state.AssetPosition{
+			"USDC": {Available: 100},
+			"cNGN": {Available: 100000},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		mode    config.OperatorMode
+		wantBid bool
+		wantAsk bool
+	}{
+		{name: "normal", mode: config.ModeNormal, wantBid: true, wantAsk: true},
+		{name: "bid only", mode: config.ModeBidOnly, wantBid: true, wantAsk: false},
+		{name: "ask only", mode: config.ModeAskOnly, wantBid: false, wantAsk: true},
+		{name: "pause", mode: config.ModePause, wantBid: false, wantAsk: false},
+		{name: "dry run health", mode: config.ModeDryRunHealth, wantBid: false, wantAsk: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseCfg
+			cfg.OperatorMode = tt.mode
+			got, err := BuildQuotes(cfg, spec, snapshot)
+			if err != nil {
+				t.Fatalf("BuildQuotes() error = %v", err)
+			}
+			if (got.Bid != nil) != tt.wantBid {
+				t.Fatalf("bid present = %v want %v", got.Bid != nil, tt.wantBid)
+			}
+			if (got.Ask != nil) != tt.wantAsk {
+				t.Fatalf("ask present = %v want %v", got.Ask != nil, tt.wantAsk)
+			}
+		})
+	}
+}
+
 func assertClose(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-6 {

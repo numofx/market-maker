@@ -1,4 +1,0 @@
-./bot.go
-./sync.go
-./bot_integration_test.go
-./sync_test.go

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -238,7 +239,7 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 		markets:     make(map[string]MarketSpec),
 	}
 
-	quoteAsset, err := client.readAddressCall(ctx, client.tradeModule, "quoteAsset", "function quoteAsset() view returns (address)")
+	quoteAsset, err := client.readAddressCall(ctx, client.tradeModule, "quoteAsset", `{"name":"quoteAsset","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]}`)
 	if err != nil {
 		return nil, fmt.Errorf("read quoteAsset: %w", err)
 	}
@@ -429,7 +430,7 @@ func (c *HTTPClient) ListOpenOrders(ctx context.Context, market string) ([]Order
 	}
 
 	rows, err := c.pg.Query(ctx, `
-select order_id, side, limit_price, desired_amount, nonce, owner_address, created_at, subaccount_id
+select order_id, side, limit_price, desired_amount, filled_amount, nonce, owner_address, created_at, subaccount_id
 from active_orders
 where owner_address = $1 and asset_address = $2 and sub_id = $3 and status = 'active'
 order by created_at asc
@@ -446,25 +447,30 @@ order by created_at asc
 			side          string
 			limitPrice    string
 			desiredAmount string
+			filledAmount  string
 			nonce         string
 			owner         string
 			createdAt     time.Time
 			subaccountID  string
 		)
-		if err := rows.Scan(&orderID, &side, &limitPrice, &desiredAmount, &nonce, &owner, &createdAt, &subaccountID); err != nil {
+		if err := rows.Scan(&orderID, &side, &limitPrice, &desiredAmount, &filledAmount, &nonce, &owner, &createdAt, &subaccountID); err != nil {
 			return nil, fmt.Errorf("scan order: %w", err)
 		}
 		price, err := strconv.ParseFloat(limitPrice, 64)
 		if err != nil {
 			return nil, fmt.Errorf("parse order price: %w", err)
 		}
+		remainingRaw, err := subtractRaw(desiredAmount, filledAmount)
+		if err != nil {
+			return nil, fmt.Errorf("compute remaining size: %w", err)
+		}
 		out = append(out, Order{
 			ID:         orderID,
 			Market:     market,
 			Side:       Side(side),
 			Price:      price,
-			Size:       rawToFloat(desiredAmount),
-			RawSize:    desiredAmount,
+			Size:       rawToFloat(remainingRaw),
+			RawSize:    remainingRaw,
 			Nonce:      nonce,
 			Owner:      owner,
 			CreatedAt:  createdAt,
@@ -662,7 +668,7 @@ func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float6
 		return nil, fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
 	}
 	callABI, err := abi.JSON(strings.NewReader(`[
-{"name":"getAccountBalances","type":"function","stateMutability":"view","inputs":[{"name":"accountId","type":"uint256"}],"outputs":[{"name":"","type":"tuple[]","components":[{"name":"asset","type":"address"},{"name":"subId","type":"uint96"},{"name":"balance","type":"int256"},{"name":"order","type":"uint16"}]}]},
+{"name":"getAccountBalances","type":"function","stateMutability":"view","inputs":[{"name":"accountId","type":"uint256"}],"outputs":[{"name":"assetBalances","type":"tuple[]","components":[{"name":"asset","type":"address"},{"name":"subId","type":"uint256"},{"name":"balance","type":"int256"}]}]},
 {"name":"quoteAsset","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]}
 ]`))
 	if err != nil {
@@ -682,20 +688,18 @@ func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float6
 	}
 	type balanceRow struct {
 		Asset   common.Address `json:"asset"`
-		SubID   *big.Int       `json:"subId"`
+		SubId   *big.Int       `json:"subId"`
 		Balance *big.Int       `json:"balance"`
-		Order   uint16         `json:"order"`
 	}
 	items, ok := values[0].([]struct {
 		Asset   common.Address `json:"asset"`
-		SubID   *big.Int       `json:"subId"`
+		SubId   *big.Int       `json:"subId"`
 		Balance *big.Int       `json:"balance"`
-		Order   uint16         `json:"order"`
 	})
 	positions := make(map[string]float64)
 	if ok {
 		for _, item := range items {
-			positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubID.String()] = rawBigToFloat(item.Balance)
+			positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubId.String()] = rawBigToFloat(item.Balance)
 		}
 		return positions, nil
 	}
@@ -705,7 +709,7 @@ func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float6
 		return nil, fmt.Errorf("unexpected balance payload %T", values[0])
 	}
 	for _, item := range generic {
-		positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubID.String()] = rawBigToFloat(item.Balance)
+		positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubId.String()] = rawBigToFloat(item.Balance)
 	}
 	return positions, nil
 }
@@ -721,20 +725,77 @@ func (c *HTTPClient) readAddressCall(ctx context.Context, address common.Address
 	}
 	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(address, input), nil)
 	if err != nil {
+		c.logRPCCallFailure(ctx, address, method, input, nil, err)
 		return common.Address{}, err
 	}
 	values, err := parsed.Unpack(method, output)
 	if err != nil {
+		c.logRPCCallFailure(ctx, address, method, input, output, err)
 		return common.Address{}, err
 	}
 	if len(values) != 1 {
+		c.logRPCCallFailure(ctx, address, method, input, output, fmt.Errorf("unexpected output count %d", len(values)))
 		return common.Address{}, fmt.Errorf("unexpected output count")
 	}
 	addr, ok := values[0].(common.Address)
 	if !ok {
+		c.logRPCCallFailure(ctx, address, method, input, output, fmt.Errorf("unexpected address output %T", values[0]))
 		return common.Address{}, fmt.Errorf("unexpected address output %T", values[0])
 	}
 	return addr, nil
+}
+
+func (c *HTTPClient) logRPCCallFailure(ctx context.Context, address common.Address, method string, input, output []byte, callErr error) {
+	status, body, probeErr := c.rawRPCProbe(ctx, address, input)
+	attrs := []any{
+		"rpc_url", c.cfg.RPCURL,
+		"http_method", http.MethodPost,
+		"contract_address", address.Hex(),
+		"abi_method", method,
+		"call_data", hexutil.Encode(input),
+		"ethclient_error", callErr.Error(),
+		"probe_status", status,
+		"probe_raw_body", body,
+		"call_output", hexutil.Encode(output),
+	}
+	if probeErr != nil {
+		attrs = append(attrs, "probe_error", probeErr.Error())
+	}
+	slog.Error("rpc call decode failure", attrs...)
+}
+
+func (c *HTTPClient) rawRPCProbe(ctx context.Context, to common.Address, data []byte) (int, string, error) {
+	if !strings.HasPrefix(c.cfg.RPCURL, "http://") && !strings.HasPrefix(c.cfg.RPCURL, "https://") {
+		return 0, "", fmt.Errorf("rpc url %q is not http(s)", c.cfg.RPCURL)
+	}
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "eth_call",
+		"params": []any{
+			map[string]string{
+				"to":   to.Hex(),
+				"data": hexutil.Encode(data),
+			},
+			"latest",
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.RPCURL, bytes.NewReader(body))
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	return resp.StatusCode, string(raw), nil
 }
 
 func (c *HTTPClient) signAction(action map[string]string) (string, error) {
@@ -961,6 +1022,22 @@ func floatToRaw(value float64) string {
 
 func normalizePrice(price float64) string {
 	return strconv.FormatFloat(price, 'f', -1, 64)
+}
+
+func subtractRaw(left, right string) (string, error) {
+	leftInt, ok := new(big.Int).SetString(strings.TrimSpace(left), 10)
+	if !ok {
+		return "", fmt.Errorf("invalid raw decimal %q", left)
+	}
+	rightInt, ok := new(big.Int).SetString(strings.TrimSpace(right), 10)
+	if !ok {
+		return "", fmt.Errorf("invalid raw decimal %q", right)
+	}
+	result := new(big.Int).Sub(leftInt, rightInt)
+	if result.Sign() < 0 {
+		return "", fmt.Errorf("negative remaining amount")
+	}
+	return result.String(), nil
 }
 
 func dedupeBalances(items []Balance) []Balance {

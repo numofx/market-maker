@@ -16,13 +16,22 @@ type Quote struct {
 }
 
 type Result struct {
-	ReferencePrice float64
-	Bid            *Quote
-	Ask            *Quote
-	SkewBPS        float64
+	ReferencePrice      float64
+	LocalReferencePrice float64
+	AnchorPrice         float64
+	Bid                 *Quote
+	Ask                 *Quote
+	SkewBPS             float64
 }
 
 func ComputeReferencePrice(snapshot state.Snapshot) float64 {
+	if snapshot.AnchorPrice > 0 {
+		return snapshot.AnchorPrice
+	}
+	return ComputeLocalReferencePrice(snapshot)
+}
+
+func ComputeLocalReferencePrice(snapshot state.Snapshot) float64 {
 	if snapshot.BestBid > 0 && snapshot.BestAsk > 0 {
 		return (snapshot.BestBid + snapshot.BestAsk) / 2
 	}
@@ -34,7 +43,8 @@ func ComputeReferencePrice(snapshot state.Snapshot) float64 {
 
 func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot) (Result, error) {
 	ref := ComputeReferencePrice(snapshot)
-	result := Result{ReferencePrice: ref}
+	localRef := ComputeLocalReferencePrice(snapshot)
+	result := Result{ReferencePrice: ref, LocalReferencePrice: localRef, AnchorPrice: snapshot.AnchorPrice}
 	if ref <= 0 {
 		return result, nil
 	}
@@ -55,17 +65,48 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 
 	maxBidSize := quoteAvailable / bidPrice
 	maxAskSize := baseAvailable
+	if cfg.MaxNotionalPerSide > 0 {
+		maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide/bidPrice)
+		maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide/askPrice)
+	}
 	bidSize := roundDown(minFloat(cfg.OrderSize, maxBidSize), spec.SizeStep)
 	askSize := roundDown(minFloat(cfg.OrderSize, maxAskSize), spec.SizeStep)
 
-	if bidSize >= spec.MinSize && inventory+bidSize <= cfg.MaxLongInventory {
+	if bidSize >= spec.MinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}
 	}
-	if askSize >= spec.MinSize && inventory-askSize >= cfg.MaxShortInventory {
+	if askSize >= spec.MinSize && inventory-askSize >= effectiveMaxShort(cfg) {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
+	}
+
+	switch cfg.OperatorMode {
+	case config.ModePause, config.ModeDryRunHealth:
+		result.Bid = nil
+		result.Ask = nil
+	case config.ModeBidOnly:
+		result.Ask = nil
+	case config.ModeAskOnly:
+		result.Bid = nil
 	}
 	result.SkewBPS = skewBPS
 	return result, nil
+}
+
+func effectiveMaxLong(cfg config.Config) float64 {
+	if cfg.MaxNetInventory > 0 && (cfg.MaxLongInventory == 0 || cfg.MaxNetInventory < cfg.MaxLongInventory) {
+		return cfg.MaxNetInventory
+	}
+	return cfg.MaxLongInventory
+}
+
+func effectiveMaxShort(cfg config.Config) float64 {
+	if cfg.MaxNetInventory > 0 {
+		netShort := -cfg.MaxNetInventory
+		if cfg.MaxShortInventory == 0 || netShort > cfg.MaxShortInventory {
+			return netShort
+		}
+	}
+	return cfg.MaxShortInventory
 }
 
 func inventorySkew(inventory, maxLong, maxShort, maxSkewBPS float64) float64 {

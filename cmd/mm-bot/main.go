@@ -82,6 +82,11 @@ func main() {
 
 	pollTicker := time.NewTicker(cfg.PollInterval)
 	defer pollTicker.Stop()
+	var soakTicker *time.Ticker
+	if cfg.SoakLogInterval > 0 {
+		soakTicker = time.NewTicker(cfg.SoakLogInterval)
+		defer soakTicker.Stop()
+	}
 
 	logger.Info("market maker started", "market", spec.Symbol, "dry_run", cfg.DryRun, "subaccount_id", cfg.SubaccountID)
 	if err := bot.RunCycle(ctx); err != nil {
@@ -92,6 +97,7 @@ func main() {
 		select {
 		case <-ctx.Done():
 			logger.Info("shutdown requested")
+			logger.Info("shutdown summary", "summary", bot.ShutdownSummaryLine())
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = metricsServer.Shutdown(shutdownCtx)
@@ -100,13 +106,23 @@ func main() {
 			if err := bot.RunCycle(ctx); err != nil {
 				logger.Error("run cycle failed", "error", err)
 			}
+		case <-soakTick(soakTicker):
+			logger.Info("soak status", "status", bot.SoakStatusLine())
 		}
 	}
 }
 
 func metricsMux(reg *metrics.Registry) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/healthz", metrics.HealthHandler())
+	mux.Handle("/healthz", reg.HealthHandler())
+	mux.Handle("/readyz", reg.ReadyHandler())
 	mux.Handle("/metrics", reg.Handler())
 	return mux
+}
+
+func soakTick(t *time.Ticker) <-chan time.Time {
+	if t == nil {
+		return nil
+	}
+	return t.C
 }
