@@ -154,6 +154,39 @@ func TestAvailableBalanceCapsQuoteSize(t *testing.T) {
 	}
 }
 
+func TestExistingOpenOrdersReuseReservedCapacity(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	cfg := config.Config{
+		OrderSize:         2,
+		HalfSpreadBPS:     50,
+		InventorySkewBPS:  0,
+		MaxLongInventory:  100,
+		MaxShortInventory: -100,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			SpreadMultiplier: 1,
+			SizeMultiplier:   1,
+		},
+	}
+	got, err := BuildQuotes(cfg, spec, state.Snapshot{
+		Market:               "USDCcNGN-SPOT",
+		ExternalAnchorPrice:  1380,
+		InventoryByAsset:     map[string]float64{"USDC": 0},
+		Positions:            map[string]state.AssetPosition{"USDC": {Available: 0}, "cNGN": {Available: 0}},
+		OpenOrders: []exchange.Order{
+			{ID: "bid-1", Side: exchange.SideBuy, Price: 1373.1, Size: 2},
+			{ID: "ask-1", Side: exchange.SideSell, Price: 1386.9, Size: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildQuotes() error = %v", err)
+	}
+	if got.Bid == nil || got.Ask == nil {
+		t.Fatalf("expected both quotes to remain targetable with reusable reserved capacity, got bid=%v ask=%v", got.Bid, got.Ask)
+	}
+	assertClose(t, got.Bid.Size, 2)
+	assertClose(t, got.Ask.Size, 2)
+}
+
 func TestOperatorModes(t *testing.T) {
 	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
 	baseCfg := config.Config{

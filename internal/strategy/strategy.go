@@ -101,6 +101,9 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 
 	baseAvailable := snapshot.Position(spec.BaseAsset).Available
 	quoteAvailable := snapshot.Position(spec.QuoteAsset).Available
+	reusableBase, reusableQuote := reusableCapacity(spec, snapshot.OpenOrders)
+	baseAvailable += reusableBase
+	quoteAvailable += reusableQuote
 
 	maxBidSize := quoteAvailable / bidPrice
 	maxAskSize := baseAvailable
@@ -129,6 +132,18 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 	}
 	result.SkewBPS = skewBPS
 	return result, nil
+}
+
+func reusableCapacity(spec exchange.MarketSpec, orders []exchange.Order) (base, quote float64) {
+	for _, order := range orders {
+		switch order.Side {
+		case exchange.SideBuy:
+			quote += order.Size * order.Price
+		case exchange.SideSell:
+			base += order.Size
+		}
+	}
+	return base, quote
 }
 
 func effectiveMaxLong(cfg config.Config) float64 {

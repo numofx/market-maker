@@ -34,6 +34,7 @@ func main() {
 		APIBaseURL:         cfg.APIBaseURL,
 		RPCURL:             cfg.RPCURL,
 		DatabaseURL:        cfg.DatabaseURL,
+		MarketSymbol:       cfg.MarketSymbol,
 		ChainID:            cfg.ChainID,
 		MatchingRepoPath:   cfg.MatchingRepoPath,
 		RiskCoreRepoPath:   cfg.RiskCoreRepoPath,
