@@ -122,6 +122,37 @@ func TestEvaluateCancelSuppression(t *testing.T) {
 	}
 }
 
+func TestEvaluateCancelIgnoresDustSizeMismatch(t *testing.T) {
+	now := time.Now().UTC()
+	current := &exchange.Order{ID: "b1", Side: exchange.SideBuy, Price: 100, Size: 2.036266, CreatedAt: now.Add(-10 * time.Second)}
+	target := &strategy.Quote{Side: exchange.SideBuy, Price: 100, Size: 2.036287}
+
+	decision := evaluateCancel(current, target, nil, config.Config{
+		CancelStaleOrderThreshold: 10,
+		AdoptSizeTolerance:        0.000001,
+	}, time.Time{}, now)
+	if decision.Cancel {
+		t.Fatalf("expected dust size mismatch to be kept, got cancel reason %q", decision.Reason)
+	}
+	if decision.Suppress {
+		t.Fatalf("expected keep, not suppress, got %q", decision.SuppressReason)
+	}
+}
+
+func TestEvaluateCancelReplacesMaterialSizeMismatch(t *testing.T) {
+	now := time.Now().UTC()
+	current := &exchange.Order{ID: "b1", Side: exchange.SideBuy, Price: 100, Size: 2.046505, CreatedAt: now.Add(-10 * time.Second)}
+	target := &strategy.Quote{Side: exchange.SideBuy, Price: 100, Size: 2.036266}
+
+	decision := evaluateCancel(current, target, nil, config.Config{
+		CancelStaleOrderThreshold: 10,
+		AdoptSizeTolerance:        0.000001,
+	}, time.Time{}, now)
+	if !decision.Cancel || decision.Reason != "size_mismatch" {
+		t.Fatalf("expected material size mismatch replace, got cancel=%v reason=%q", decision.Cancel, decision.Reason)
+	}
+}
+
 func TestSync(t *testing.T) {
 	client := &mockClient{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

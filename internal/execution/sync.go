@@ -30,6 +30,7 @@ const (
 	cancelCategoryStartupReconcile = "startup_reconciliation"
 	cancelCategoryRiskTriggered    = "risk_triggered"
 	cancelCategoryKillSwitch       = "kill_switch"
+	sizeDustToleranceBPS           = 5.0
 )
 
 type SyncResult struct {
@@ -165,7 +166,7 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 	if current.Side != target.Side {
 		return cancelDecision{Cancel: true, Reason: "side_mismatch"}
 	}
-	if math.Abs(current.Size-target.Size) > 1e-9 {
+	if sizeMismatchRequiresReplace(current.Size, target.Size, cfg) {
 		return cancelDecision{Cancel: true, Reason: "size_mismatch", EnforceRateLimit: true}
 	}
 	drift := priceDriftBPS(current.Price, target.Price)
@@ -188,6 +189,16 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 		}
 	}
 	return cancelDecision{}
+}
+
+func sizeMismatchRequiresReplace(current, target float64, cfg config.Config) bool {
+	diff := math.Abs(current - target)
+	if diff <= 1e-9 {
+		return false
+	}
+	absTolerance := cfg.AdoptSizeTolerance
+	relativeTolerance := math.Max(math.Abs(current), math.Abs(target)) * (sizeDustToleranceBPS / 10000.0)
+	return diff > math.Max(absTolerance, relativeTolerance)
 }
 
 func priceDriftBPS(current, target float64) float64 {

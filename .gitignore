@@ -8,3 +8,5 @@
 .mm-bot-state.json
 .env
 mm-bot
+
+.gomodcache/
