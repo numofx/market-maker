@@ -45,10 +45,13 @@ func ReconcileStartup(
 	if riskDecision.Halt {
 		for _, order := range snapshot.OpenOrders {
 			result.RejectedReasons[order.ID] = "risk_halt:" + riskDecision.Reason
-			if err := cancelStartupOrder(ctx, client, cfg, order, logger, "risk_halt"); err != nil {
+			cancelled, err := cancelStartupOrder(ctx, client, cfg, order, logger, "risk_halt")
+			if err != nil {
 				return result, nil, err
 			}
-			result.CanceledOrderIDs = append(result.CanceledOrderIDs, order.ID)
+			if cancelled {
+				result.CanceledOrderIDs = append(result.CanceledOrderIDs, order.ID)
+			}
 		}
 		sort.Strings(result.CanceledOrderIDs)
 		return result, nil, nil
@@ -105,10 +108,13 @@ func ReconcileStartup(
 
 	for id := range cancelSet {
 		order := orderByID[id]
-		if err := cancelStartupOrder(ctx, client, cfg, order, logger, result.RejectedReasons[id]); err != nil {
+		cancelled, err := cancelStartupOrder(ctx, client, cfg, order, logger, result.RejectedReasons[id])
+		if err != nil {
 			return result, nil, err
 		}
-		result.CanceledOrderIDs = append(result.CanceledOrderIDs, id)
+		if cancelled {
+			result.CanceledOrderIDs = append(result.CanceledOrderIDs, id)
+		}
 	}
 	sort.Strings(result.CanceledOrderIDs)
 
@@ -178,13 +184,17 @@ func quoteForSide(result strategy.Result, side exchange.Side) *strategy.Quote {
 	return result.Ask
 }
 
-func cancelStartupOrder(ctx context.Context, client exchange.Client, cfg config.Config, order exchange.Order, logger *slog.Logger, reason string) error {
+func cancelStartupOrder(ctx context.Context, client exchange.Client, cfg config.Config, order exchange.Order, logger *slog.Logger, reason string) (bool, error) {
+	if isProtectedOrderID(cfg, order.ID) {
+		logger.Info("startup order action", "action", "skip_cancel_protected", "order_id", order.ID, "reason", reason)
+		return false, nil
+	}
 	logger.Info("startup order action", "action", "cancel", "order_id", order.ID, "side", order.Side, "price", order.Price, "size", order.Size, "reason", reason)
 	if cfg.DryRun {
-		return nil
+		return true, nil
 	}
-	if err := client.CancelOrder(ctx, order.ID); err != nil {
-		return fmt.Errorf("cancel startup order %s: %w", order.ID, err)
+	if err := client.CancelOrder(ctx, order.ID, reason); err != nil {
+		return false, fmt.Errorf("cancel startup order %s: %w", order.ID, err)
 	}
-	return nil
+	return true, nil
 }

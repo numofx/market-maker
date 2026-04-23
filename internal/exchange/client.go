@@ -104,8 +104,8 @@ type Client interface {
 	GetBalances(ctx context.Context) ([]Balance, error)
 	ListOpenOrders(ctx context.Context, market string) ([]Order, error)
 	PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest) (Order, error)
-	CancelOrder(ctx context.Context, orderID string) error
-	CancelAllOrders(ctx context.Context, market string) error
+	CancelOrder(ctx context.Context, orderID string, reason string) error
+	CancelAllOrders(ctx context.Context, market string, reason string) error
 	GetMarket(ctx context.Context, market string) (MarketSpec, error)
 }
 
@@ -128,6 +128,8 @@ type ClientConfig struct {
 	RecipientID        string
 	WorstFee           string
 	OrderExpirySeconds int64
+	ServiceName        string
+	ProtectedPrefixes  []string
 }
 
 type PlaceOrderRequest struct {
@@ -609,7 +611,11 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	}, nil
 }
 
-func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string) error {
+func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string, reason string) error {
+	if isProtectedOrderID(orderID, c.cfg.ProtectedPrefixes) {
+		slog.Info("skip protected order cancel", "order_id", orderID, "reason", reason)
+		return nil
+	}
 	orders, err := c.lookupOrderByID(ctx, orderID)
 	if err != nil {
 		return err
@@ -617,21 +623,70 @@ func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string) error {
 	body := map[string]string{
 		"owner_address": c.cfg.OwnerAddress,
 		"nonce":         orders.Nonce,
+		"reason":        machineCancelReason(c.cfg.ServiceName, reason),
+		"service":       normalizeCancelToken(c.cfg.ServiceName),
 	}
 	return c.post(ctx, "/v1/orders/cancel", body, nil)
 }
 
-func (c *HTTPClient) CancelAllOrders(ctx context.Context, market string) error {
+func (c *HTTPClient) CancelAllOrders(ctx context.Context, market string, reason string) error {
 	orders, err := c.ListOpenOrders(ctx, market)
 	if err != nil {
 		return err
 	}
 	for _, order := range orders {
-		if err := c.CancelOrder(ctx, order.ID); err != nil && !strings.Contains(err.Error(), "active order not found") {
+		if err := c.CancelOrder(ctx, order.ID, reason); err != nil && !strings.Contains(err.Error(), "active order not found") {
 			return err
 		}
 	}
 	return nil
+}
+
+func machineCancelReason(service string, reason string) string {
+	serviceToken := normalizeCancelToken(service)
+	if serviceToken == "" {
+		serviceToken = "unknown_service"
+	}
+	reasonToken := normalizeCancelToken(reason)
+	if reasonToken == "" {
+		reasonToken = "unspecified"
+	}
+	return "bot." + serviceToken + "." + reasonToken
+}
+
+func normalizeCancelToken(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, " ", "_")
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	return strings.Trim(b.String(), "_.-")
+}
+
+func isProtectedOrderID(orderID string, prefixes []string) bool {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" || len(prefixes) == 0 {
+		return false
+	}
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			continue
+		}
+		if strings.HasPrefix(orderID, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *HTTPClient) lookupOrderByID(ctx context.Context, orderID string) (Order, error) {

@@ -96,6 +96,8 @@ type Config struct {
 	MetricsAddr                  string
 	ReadinessMissingQuoteTimeout time.Duration
 	SoakLogInterval              time.Duration
+	ServiceName                  string
+	ProtectedOrderIDPrefixes     []string
 	USDCCNGNSpotExternalAnchor   USDCCNGNSpotExternalAnchorConfig
 }
 
@@ -167,6 +169,8 @@ func Load() (Config, error) {
 		MetricsAddr:                  envString("MM_METRICS_ADDR", defaultMetricsAddr),
 		ReadinessMissingQuoteTimeout: time.Duration(envInt("MM_READINESS_MISSING_QUOTE_TIMEOUT_SECONDS", 0)) * time.Second,
 		SoakLogInterval:              time.Duration(envInt("MM_SOAK_LOG_INTERVAL_SECONDS", defaultSoakLogInterval)) * time.Second,
+		ServiceName:                  envStringFallback([]string{"MM_SERVICE_NAME", "RAILWAY_SERVICE_NAME"}, "market-maker"),
+		ProtectedOrderIDPrefixes:     envCSV("MM_PROTECTED_ORDER_ID_PREFIXES", []string{"validation:", "test:"}),
 		USDCCNGNSpotExternalAnchor: USDCCNGNSpotExternalAnchorConfig{
 			Enabled:          envBool("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED", false),
 			Provider:         envString("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER", "0x"),
@@ -335,6 +339,26 @@ func envBool(key string, fallback bool) bool {
 		panic(fmt.Sprintf("%s must be a bool: %v", key, err))
 	}
 	return value
+}
+
+func envCSV(key string, fallback []string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return append([]string(nil), fallback...)
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		token := strings.TrimSpace(part)
+		if token == "" {
+			continue
+		}
+		out = append(out, token)
+	}
+	if len(out) == 0 {
+		return append([]string(nil), fallback...)
+	}
+	return out
 }
 
 func parseLevel(raw string) (slog.Level, error) {

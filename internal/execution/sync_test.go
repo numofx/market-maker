@@ -28,7 +28,7 @@ func (m *mockClient) GetBook(context.Context, string) (exchange.Book, error) {
 }
 func (m *mockClient) GetTrades(context.Context, string) ([]exchange.Trade, error) { return nil, nil }
 func (m *mockClient) GetBalances(context.Context) ([]exchange.Balance, error)     { return nil, nil }
-func (m *mockClient) CancelAllOrders(_ context.Context, _ string) error {
+func (m *mockClient) CancelAllOrders(_ context.Context, _ string, _ string) error {
 	for _, order := range m.openOrders {
 		m.cancelled = append(m.cancelled, order.ID)
 	}
@@ -44,7 +44,7 @@ func (m *mockClient) PlaceLimitOrder(_ context.Context, req exchange.PlaceOrderR
 	m.placed = append(m.placed, req)
 	return exchange.Order{ID: req.OrderID, Nonce: req.Nonce, Side: req.Side, Price: req.Price, Size: req.Size}, m.placeErr
 }
-func (m *mockClient) CancelOrder(_ context.Context, orderID string) error {
+func (m *mockClient) CancelOrder(_ context.Context, orderID string, _ string) error {
 	m.cancelled = append(m.cancelled, orderID)
 	return nil
 }
@@ -276,5 +276,31 @@ func TestCancelMetricsByCategory(t *testing.T) {
 	}
 	if !strings.Contains(body, `category="risk_triggered"`) {
 		t.Fatalf("metrics missing risk_triggered category: %s", body)
+	}
+}
+
+func TestSyncSkipsProtectedOrderCancels(t *testing.T) {
+	client := &mockClient{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT"}, config.Config{
+		CancelStaleOrderThreshold: 10,
+		ProtectedOrderIDPrefixes:  []string{"validation:"},
+	}, metrics.New(), logger)
+
+	_, err := syncer.Sync(context.Background(), state.Snapshot{
+		Market: "USDCcNGN-SPOT",
+		OpenOrders: []exchange.Order{
+			{ID: "validation:cross-1", Side: exchange.SideBuy, Price: 100, Size: 1, CreatedAt: time.Now().UTC().Add(-time.Minute)},
+		},
+	}, strategy.Result{
+		Bid: &strategy.Quote{Side: exchange.SideBuy, Price: 101, Size: 1},
+	}, map[exchange.Side]Identity{
+		exchange.SideBuy: {OrderID: "bid", Nonce: "10"},
+	})
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(client.cancelled) != 0 {
+		t.Fatalf("protected order should not be canceled, got %#v", client.cancelled)
 	}
 }

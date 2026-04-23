@@ -133,6 +133,8 @@ func newEnvironment(ctx context.Context, cfg config.Config, intCfg integrationCo
 		RecipientID:        cfg.RecipientID,
 		WorstFee:           cfg.WorstFee,
 		OrderExpirySeconds: cfg.OrderExpirySeconds,
+		ServiceName:        cfg.ServiceName,
+		ProtectedPrefixes:  cfg.ProtectedOrderIDPrefixes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init bot client: %w", err)
@@ -156,6 +158,8 @@ func newEnvironment(ctx context.Context, cfg config.Config, intCfg integrationCo
 		RecipientID:        intCfg.TakerRecipientID,
 		WorstFee:           cfg.WorstFee,
 		OrderExpirySeconds: cfg.OrderExpirySeconds,
+		ServiceName:        "integration-taker",
+		ProtectedPrefixes:  cfg.ProtectedOrderIDPrefixes,
 	})
 	if err != nil {
 		botClient.Close()
@@ -519,10 +523,10 @@ func loadIntegrationConfig() (integrationConfig, error) {
 
 func ensureCleanMarket(ctx context.Context, env *environment, requireEmptyBook bool) error {
 	env.logger.Info("phase", "name", "clean_market", "scenario", env.intCfg.Scenario)
-	if err := env.botClient.CancelAllOrders(ctx, env.spec.Symbol); err != nil {
+	if err := env.botClient.CancelAllOrders(ctx, env.spec.Symbol, "integration_cleanup"); err != nil {
 		return fmt.Errorf("cancel bot orders: %w", err)
 	}
-	if err := env.takerClient.CancelAllOrders(ctx, env.spec.Symbol); err != nil {
+	if err := env.takerClient.CancelAllOrders(ctx, env.spec.Symbol, "integration_cleanup"); err != nil {
 		return fmt.Errorf("cancel taker orders: %w", err)
 	}
 	if err := waitForStage(ctx, env, "wait_own_orders_cleared", func() (bool, map[string]any, error) {

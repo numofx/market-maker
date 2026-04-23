@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/numofx/market-maker/internal/config"
@@ -60,16 +61,14 @@ func (s *Syncer) CancelAll(ctx context.Context, market string, category string) 
 		s.metrics.IncErrors()
 		return err
 	}
-	if err := s.client.CancelAllOrders(ctx, market); err != nil {
-		s.metrics.IncErrors()
-		return err
-	}
-	for range orders {
-		s.metrics.IncCancels()
-		if category != "" {
-			s.metrics.IncCancelCategory(category)
+	for _, order := range orders {
+		if err := s.cancel(ctx, order.ID, "cancel_all", false, category); err != nil {
+			if strings.Contains(err.Error(), "active order not found") {
+				continue
+			}
+			s.metrics.IncErrors()
+			return err
 		}
-		s.recordCancel()
 	}
 	return nil
 }
@@ -209,6 +208,10 @@ func priceDriftBPS(current, target float64) float64 {
 }
 
 func (s *Syncer) cancel(ctx context.Context, orderID string, reason string, recordRate bool, category string) error {
+	if isProtectedOrderID(s.cfg, orderID) {
+		s.logger.Info("skip protected order cancel", "order_id", orderID, "reason", reason)
+		return nil
+	}
 	s.logger.Info("cancel order", "order_id", orderID, "reason", reason)
 	if s.cfg.DryRun {
 		if recordRate {
@@ -221,7 +224,7 @@ func (s *Syncer) cancel(ctx context.Context, orderID string, reason string, reco
 		}
 		return nil
 	}
-	if err := s.client.CancelOrder(ctx, orderID); err != nil {
+	if err := s.client.CancelOrder(ctx, orderID, reason); err != nil {
 		s.metrics.IncErrors()
 		return fmt.Errorf("cancel order %s: %w", orderID, err)
 	}
