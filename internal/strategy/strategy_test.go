@@ -168,10 +168,10 @@ func TestExistingOpenOrdersReuseReservedCapacity(t *testing.T) {
 		},
 	}
 	got, err := BuildQuotes(cfg, spec, state.Snapshot{
-		Market:               "USDCcNGN-SPOT",
-		ExternalAnchorPrice:  1380,
-		InventoryByAsset:     map[string]float64{"USDC": 0},
-		Positions:            map[string]state.AssetPosition{"USDC": {Available: 0}, "cNGN": {Available: 0}},
+		Market:              "USDCcNGN-SPOT",
+		ExternalAnchorPrice: 1380,
+		InventoryByAsset:    map[string]float64{"USDC": 0},
+		Positions:           map[string]state.AssetPosition{"USDC": {Available: 0}, "cNGN": {Available: 0}},
 		OpenOrders: []exchange.Order{
 			{ID: "bid-1", Side: exchange.SideBuy, Price: 1373.1, Size: 2},
 			{ID: "ask-1", Side: exchange.SideSell, Price: 1386.9, Size: 2},
@@ -185,6 +185,96 @@ func TestExistingOpenOrdersReuseReservedCapacity(t *testing.T) {
 	}
 	assertClose(t, got.Bid.Size, 2)
 	assertClose(t, got.Ask.Size, 2)
+}
+
+func TestQuoteSuppressionReasons(t *testing.T) {
+	spec := exchange.MarketSpec{
+		Symbol:       "USDCcNGN-SPOT",
+		BaseAsset:    "USDC",
+		QuoteAsset:   "cNGN",
+		AssetAddress: "0xe4b6e05b9910ab08a947a20faecc4524bf8a7f7e",
+		QuoteAddress: "0x1917960763bf3a0dfa10a05f0a112e828c1a934f",
+		TickSize:     0.01,
+		SizeStep:     0.1,
+		MinSize:      0.1,
+	}
+	cfg := config.Config{
+		SubaccountID:      "6",
+		OrderSize:         5,
+		HalfSpreadBPS:     20,
+		MaxLongInventory:  100,
+		MaxShortInventory: -100,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			SpreadMultiplier: 2,
+			SizeMultiplier:   0.1,
+		},
+	}
+
+	t.Run("no base inventory suppresses ask", func(t *testing.T) {
+		got, err := BuildQuotes(cfg, spec, state.Snapshot{
+			Market:              "USDCcNGN-SPOT",
+			ExternalAnchorPrice: 1353.0884,
+			InventoryByAsset:    map[string]float64{"USDC": 0},
+			Positions: map[string]state.AssetPosition{
+				"USDC": {Available: 0},
+				"cNGN": {Available: 1000},
+			},
+		})
+		if err != nil {
+			t.Fatalf("BuildQuotes() error = %v", err)
+		}
+		if got.Ask != nil {
+			t.Fatalf("ask = %#v want nil", got.Ask)
+		}
+		if got.AskSuppression == nil || got.AskSuppression.Reason != "missing_spot_asset_inventory" {
+			t.Fatalf("ask suppression = %#v", got.AskSuppression)
+		}
+		if got.AskSuppression.SpotAssetAddress != spec.AssetAddress {
+			t.Fatalf("spot asset address = %q want %q", got.AskSuppression.SpotAssetAddress, spec.AssetAddress)
+		}
+	})
+
+	t.Run("insufficient quote capacity suppresses bid", func(t *testing.T) {
+		got, err := BuildQuotes(cfg, spec, state.Snapshot{
+			Market:              "USDCcNGN-SPOT",
+			ExternalAnchorPrice: 1353.0884,
+			InventoryByAsset:    map[string]float64{"USDC": 1},
+			Positions: map[string]state.AssetPosition{
+				"USDC": {Available: 1},
+				"cNGN": {Available: 100},
+			},
+		})
+		if err != nil {
+			t.Fatalf("BuildQuotes() error = %v", err)
+		}
+		if got.Bid != nil {
+			t.Fatalf("bid = %#v want nil", got.Bid)
+		}
+		if got.BidSuppression == nil || got.BidSuppression.Reason != "insufficient_quote_capacity" {
+			t.Fatalf("bid suppression = %#v", got.BidSuppression)
+		}
+		if got.BidSuppression.AvailableCapacity != 100 {
+			t.Fatalf("available capacity = %v want 100", got.BidSuppression.AvailableCapacity)
+		}
+	})
+
+	t.Run("valid anchor and balances produce both sides", func(t *testing.T) {
+		got, err := BuildQuotes(cfg, spec, state.Snapshot{
+			Market:              "USDCcNGN-SPOT",
+			ExternalAnchorPrice: 1353.0884,
+			InventoryByAsset:    map[string]float64{"USDC": 5},
+			Positions: map[string]state.AssetPosition{
+				"USDC": {Available: 5},
+				"cNGN": {Available: 5000},
+			},
+		})
+		if err != nil {
+			t.Fatalf("BuildQuotes() error = %v", err)
+		}
+		if got.Bid == nil || got.Ask == nil {
+			t.Fatalf("expected bid and ask, got bid=%#v ask=%#v suppressions=%#v/%#v", got.Bid, got.Ask, got.BidSuppression, got.AskSuppression)
+		}
+	})
 }
 
 func TestOperatorModes(t *testing.T) {

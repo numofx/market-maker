@@ -64,6 +64,13 @@ type Balance struct {
 	Total     float64 `json:"total"`
 }
 
+type RawBalance struct {
+	Asset       string
+	SubID       string
+	RawBalance  string
+	HumanAmount float64
+}
+
 type Order struct {
 	ID         string    `json:"id"`
 	Market     string    `json:"market"`
@@ -79,15 +86,26 @@ type Order struct {
 }
 
 type MarketSpec struct {
-	Symbol       string
-	BaseAsset    string
-	QuoteAsset   string
-	AssetAddress string
-	QuoteAddress string
-	SubID        string
-	TickSize     float64
-	SizeStep     float64
-	MinSize      float64
+	Symbol         string
+	BaseAsset      string
+	QuoteAsset     string
+	AssetAddress   string
+	QuoteAddress   string
+	SubID          string
+	TickSize       float64
+	SizeStep       float64
+	MinSize        float64
+	OrderEntrySpec string
+}
+
+type AssetCodeCheck struct {
+	MarketSymbol string
+	EnvVar       string
+	Role         string
+	Address      string
+	RPCLabel     string
+	HasCode      bool
+	CodeBytes    int
 }
 
 type spotUIPresentation struct {
@@ -284,6 +302,72 @@ func (c *HTTPClient) GetMarket(ctx context.Context, market string) (MarketSpec, 
 	return spec, nil
 }
 
+func (c *HTTPClient) ValidateMarketAssets(ctx context.Context, spec MarketSpec) ([]AssetCodeCheck, error) {
+	checks := []AssetCodeCheck{
+		{
+			MarketSymbol: spec.Symbol,
+			EnvVar:       assetAddressEnvVar(spec),
+			Role:         "base_asset",
+			Address:      spec.AssetAddress,
+			RPCLabel:     c.cfg.RPCURL,
+		},
+		{
+			MarketSymbol: spec.Symbol,
+			EnvVar:       "TRADE_MODULE_QUOTE_ASSET",
+			Role:         "quote_asset",
+			Address:      spec.QuoteAddress,
+			RPCLabel:     c.cfg.RPCURL,
+		},
+	}
+	for i := range checks {
+		address := common.HexToAddress(checks[i].Address)
+		code, err := c.rpc.CodeAt(ctx, address, nil)
+		if err != nil {
+			return checks, fmt.Errorf("check %s code at %s: %w", checks[i].Role, checks[i].Address, err)
+		}
+		checks[i].HasCode = len(code) > 0
+		checks[i].CodeBytes = len(code)
+		attrs := []any{
+			"market", checks[i].MarketSymbol,
+			"role", checks[i].Role,
+			"env_var", checks[i].EnvVar,
+			"address", checks[i].Address,
+			"rpc_label", checks[i].RPCLabel,
+			"has_code", checks[i].HasCode,
+			"code_bytes", checks[i].CodeBytes,
+		}
+		if checks[i].HasCode {
+			slog.Info("market token code check passed", attrs...)
+			continue
+		}
+		slog.Error("market token address has no code", attrs...)
+	}
+	if err := assetCodeReadinessError(checks); err != nil {
+		return checks, err
+	}
+	return checks, nil
+}
+
+func assetCodeReadinessError(checks []AssetCodeCheck) error {
+	var missing []string
+	for _, check := range checks {
+		if !check.HasCode {
+			missing = append(missing, fmt.Sprintf("%s=%s", check.EnvVar, check.Address))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("selected market token_address_has_no_code: %s", strings.Join(missing, ", "))
+}
+
+func assetAddressEnvVar(spec MarketSpec) string {
+	if spec.Symbol == "USDCcNGN-SPOT" {
+		return "CNGN_SPOT_ASSET_ADDRESS"
+	}
+	return "MARKET_ASSET_ADDRESS"
+}
+
 func (c *HTTPClient) GetBook(ctx context.Context, market string) (Book, error) {
 	spec, err := c.GetMarket(ctx, market)
 	if err != nil {
@@ -367,7 +451,7 @@ func (c *HTTPClient) GetTrades(ctx context.Context, market string) ([]Trade, err
 }
 
 func (c *HTTPClient) GetBalances(ctx context.Context) ([]Balance, error) {
-	positions, err := c.readAccountBalances(ctx)
+	positions, rawBalances, err := c.readAccountBalances(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -408,6 +492,17 @@ where owner_address = $1 and status = 'active'
 		return nil, err
 	}
 	baseKey, quoteKey := balanceKeys(spec)
+	for _, row := range rawBalances {
+		role := "unmapped"
+		key := strings.ToLower(row.Asset) + "|" + row.SubID
+		switch key {
+		case baseKey:
+			role = "base"
+		case quoteKey:
+			role = "quote"
+		}
+		slog.Info("subaccount balance observed", "market", spec.Symbol, "subaccount_id", c.cfg.SubaccountID, "asset_address", row.Asset, "sub_id", row.SubID, "raw_balance", row.RawBalance, "amount", row.HumanAmount, "role", role)
+	}
 	out := make([]Balance, 0, 2)
 	baseTotal := positions[baseKey]
 	baseReserved := exposures[baseKey]
@@ -732,6 +827,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		AssetAddress     string `json:"asset_address"`
 		SubID            string `json:"sub_id"`
 		TickSize         string `json:"tick_size"`
+		OrderEntrySpec   string `json:"order_entry_spec"`
 	}
 	if err := c.get(ctx, "/v1/markets", nil, &resp); err != nil {
 		return err
@@ -739,13 +835,14 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	for _, item := range resp {
 		tickSize, _ := strconv.ParseFloat(item.TickSize, 64)
 		spec := MarketSpec{
-			Symbol:       item.Market,
-			BaseAsset:    item.BaseAssetSymbol,
-			QuoteAsset:   item.QuoteAssetSymbol,
-			AssetAddress: strings.ToLower(item.AssetAddress),
-			SubID:        defaultString(item.SubID, "0"),
-			TickSize:     tickSize,
-			QuoteAddress: strings.ToLower(c.quoteAsset.Hex()),
+			Symbol:         item.Market,
+			BaseAsset:      item.BaseAssetSymbol,
+			QuoteAsset:     item.QuoteAssetSymbol,
+			AssetAddress:   strings.ToLower(item.AssetAddress),
+			SubID:          defaultString(item.SubID, "0"),
+			TickSize:       tickSize,
+			QuoteAddress:   strings.ToLower(c.quoteAsset.Hex()),
+			OrderEntrySpec: item.OrderEntrySpec,
 		}
 		switch item.Market {
 		case "USDCcNGN-SPOT":
@@ -782,29 +879,29 @@ func (c *HTTPClient) marketForBalances() (MarketSpec, error) {
 	return MarketSpec{}, fmt.Errorf("no market available for balance mapping")
 }
 
-func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float64, error) {
+func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float64, []RawBalance, error) {
 	subaccountID, ok := new(big.Int).SetString(c.cfg.SubaccountID, 10)
 	if !ok {
-		return nil, fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
+		return nil, nil, fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
 	}
 	callABI, err := abi.JSON(strings.NewReader(`[
 {"name":"getAccountBalances","type":"function","stateMutability":"view","inputs":[{"name":"accountId","type":"uint256"}],"outputs":[{"name":"assetBalances","type":"tuple[]","components":[{"name":"asset","type":"address"},{"name":"subId","type":"uint256"},{"name":"balance","type":"int256"}]}]},
 {"name":"quoteAsset","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]}
 ]`))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	input, err := callABI.Pack("getAccountBalances", subaccountID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(c.subAccounts, input), nil)
 	if err != nil {
-		return nil, fmt.Errorf("getAccountBalances rpc: %w", err)
+		return nil, nil, fmt.Errorf("getAccountBalances rpc: %w", err)
 	}
 	values, err := callABI.Unpack("getAccountBalances", output)
 	if err != nil {
-		return nil, fmt.Errorf("decode account balances: %w", err)
+		return nil, nil, fmt.Errorf("decode account balances: %w", err)
 	}
 	type balanceRow struct {
 		Asset   common.Address `json:"asset"`
@@ -817,21 +914,26 @@ func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float6
 		Balance *big.Int       `json:"balance"`
 	})
 	positions := make(map[string]float64)
+	raw := make([]RawBalance, 0)
 	if ok {
 		for _, item := range items {
-			positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubId.String()] = rawBigToFloat(item.Balance)
+			amount := rawBigToFloat(item.Balance)
+			positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubId.String()] = amount
+			raw = append(raw, RawBalance{Asset: item.Asset.Hex(), SubID: item.SubId.String(), RawBalance: item.Balance.String(), HumanAmount: amount})
 		}
-		return positions, nil
+		return positions, raw, nil
 	}
 
 	generic, ok := values[0].([]balanceRow)
 	if !ok {
-		return nil, fmt.Errorf("unexpected balance payload %T", values[0])
+		return nil, nil, fmt.Errorf("unexpected balance payload %T", values[0])
 	}
 	for _, item := range generic {
-		positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubId.String()] = rawBigToFloat(item.Balance)
+		amount := rawBigToFloat(item.Balance)
+		positions[strings.ToLower(item.Asset.Hex())+"|"+item.SubId.String()] = amount
+		raw = append(raw, RawBalance{Asset: item.Asset.Hex(), SubID: item.SubId.String(), RawBalance: item.Balance.String(), HumanAmount: amount})
 	}
-	return positions, nil
+	return positions, raw, nil
 }
 
 func (c *HTTPClient) readAddressCall(ctx context.Context, address common.Address, method string, abiJSON string) (common.Address, error) {

@@ -21,6 +21,10 @@ type Identity struct {
 	Nonce   string
 }
 
+type marketAssetValidator interface {
+	ValidateMarketAssets(context.Context, exchange.MarketSpec) ([]exchange.AssetCodeCheck, error)
+}
+
 type Bot struct {
 	cfg     config.Config
 	client  exchange.Client
@@ -85,6 +89,13 @@ func NewBot(cfg config.Config, client exchange.Client, spec exchange.MarketSpec,
 
 func (b *Bot) Initialize(ctx context.Context) error {
 	b.metrics.SetOperatorMode(string(b.cfg.OperatorMode))
+	b.logger.Info("selected market metadata", marketMetadataAttrs(b.spec)...)
+	if validator, ok := b.client.(marketAssetValidator); ok {
+		if _, err := validator.ValidateMarketAssets(ctx, b.spec); err != nil {
+			b.metrics.SetReadiness(false, "token_address_has_no_code")
+			return err
+		}
+	}
 	if b.store != nil {
 		persisted, err := b.store.Load()
 		if err != nil {
@@ -137,6 +148,21 @@ func (b *Bot) Initialize(ctx context.Context) error {
 	}
 	b.snapshot = snapshot
 	return nil
+}
+
+func marketMetadataAttrs(spec exchange.MarketSpec) []any {
+	return []any{
+		"market", spec.Symbol,
+		"base_asset", spec.BaseAsset,
+		"quote_asset", spec.QuoteAsset,
+		"asset_address", spec.AssetAddress,
+		"quote_address", spec.QuoteAddress,
+		"sub_id", spec.SubID,
+		"tick_size", spec.TickSize,
+		"size_step", spec.SizeStep,
+		"min_size", spec.MinSize,
+		"order_entry_spec", spec.OrderEntrySpec,
+	}
 }
 
 func (b *Bot) RunCycle(ctx context.Context) error {
@@ -200,6 +226,8 @@ func (b *Bot) RunCycle(ctx context.Context) error {
 		return err
 	}
 	b.logger.Info("quote decision", "reference_price", quotes.ReferencePrice, "skew_bps", quotes.SkewBPS, "bid", describeQuote(quotes.Bid), "ask", describeQuote(quotes.Ask))
+	b.logQuoteSuppression(quotes.BidSuppression)
+	b.logQuoteSuppression(quotes.AskSuppression)
 	result, err := b.syncer.Sync(ctx, snapshot, quotes, ids)
 	if err != nil {
 		if rateErr, ok := err.(*CancelRateLimitError); ok {
@@ -262,6 +290,38 @@ func describeQuote(q *strategy.Quote) any {
 		return "none"
 	}
 	return map[string]any{"side": q.Side, "price": q.Price, "size": q.Size}
+}
+
+func (b *Bot) logQuoteSuppression(s *strategy.Suppression) {
+	if s == nil {
+		return
+	}
+	b.logger.Warn("quote side suppressed",
+		"side", s.Side,
+		"reason", s.Reason,
+		"market", s.Market,
+		"subaccount_id", s.SubaccountID,
+		"anchor_price", s.AnchorPrice,
+		"reference_price", s.ReferencePrice,
+		"reference_source", s.ReferenceSource,
+		"required_capacity", s.RequiredCapacity,
+		"available_capacity", s.AvailableCapacity,
+		"configured_order_size", s.ConfiguredOrderSize,
+		"effective_order_size", s.EffectiveOrderSize,
+		"min_order_size", s.MinOrderSize,
+		"candidate_size", s.CandidateSize,
+		"size_step", s.SizeStep,
+		"inventory", s.Inventory,
+		"max_inventory", s.MaxInventory,
+		"spot_asset_address", s.SpotAssetAddress,
+		"quote_asset_address", s.QuoteAssetAddress,
+		"base_asset", s.BaseAsset,
+		"quote_asset", s.QuoteAsset,
+		"dependency_stale", s.DependencyStale,
+		"external_anchor_failed", s.ExternalAnchorFailed,
+		"dry_run", s.DryRun,
+		"operator_mode", s.OperatorMode,
+	)
 }
 
 func (b *Bot) LastReconciliationResult() ReconciliationResult {

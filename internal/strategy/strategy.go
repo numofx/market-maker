@@ -15,6 +15,33 @@ type Quote struct {
 	Size  float64
 }
 
+type Suppression struct {
+	Side                 exchange.Side
+	Reason               string
+	Market               string
+	SubaccountID         string
+	AnchorPrice          float64
+	ReferencePrice       float64
+	ReferenceSource      string
+	RequiredCapacity     float64
+	AvailableCapacity    float64
+	ConfiguredOrderSize  float64
+	EffectiveOrderSize   float64
+	MinOrderSize         float64
+	CandidateSize        float64
+	SizeStep             float64
+	Inventory            float64
+	MaxInventory         float64
+	SpotAssetAddress     string
+	QuoteAssetAddress    string
+	BaseAsset            string
+	QuoteAsset           string
+	DependencyStale      bool
+	ExternalAnchorFailed bool
+	DryRun               bool
+	OperatorMode         string
+}
+
 type Result struct {
 	ReferencePrice       float64
 	ReferenceSource      string
@@ -23,6 +50,8 @@ type Result struct {
 	AnchorPrice          float64
 	Bid                  *Quote
 	Ask                  *Quote
+	BidSuppression       *Suppression
+	AskSuppression       *Suppression
 	SkewBPS              float64
 }
 
@@ -79,6 +108,8 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 		AnchorPrice:          snapshot.AnchorPrice,
 	}
 	if ref <= 0 {
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "no_anchor", 0, 0, 0, 0, 0, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "no_anchor", 0, 0, 0, 0, 0, false)
 		return result, nil
 	}
 
@@ -116,22 +147,108 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 
 	if bidSize >= spec.MinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}
+	} else {
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, spec.MinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), spec.MinSize*bidPrice, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
 	if askSize >= spec.MinSize && inventory-askSize >= effectiveMaxShort(cfg) {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
+	} else {
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, baseAvailable, inventory, effectiveMaxShort(cfg)), spec.MinSize, baseAvailable, orderSize, askSize, askPrice, false)
 	}
 
 	switch cfg.OperatorMode {
 	case config.ModePause, config.ModeDryRunHealth:
 		result.Bid = nil
 		result.Ask = nil
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, baseAvailable, orderSize, askSize, askPrice, false)
 	case config.ModeBidOnly:
 		result.Ask = nil
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, baseAvailable, orderSize, askSize, askPrice, false)
 	case config.ModeAskOnly:
 		result.Bid = nil
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
 	result.SkewBPS = skewBPS
 	return result, nil
+}
+
+func bidSuppressionReason(orderSize, bidSize, minSize, maxBidSize, quoteAvailable, inventory, maxLong float64) string {
+	if orderSize < minSize {
+		return "min_order_size_not_met"
+	}
+	if maxBidSize < minSize || bidSize < minSize {
+		return "insufficient_quote_capacity"
+	}
+	if inventory+bidSize > maxLong {
+		return "max_long_inventory"
+	}
+	if quoteAvailable <= 0 {
+		return "insufficient_quote_capacity"
+	}
+	return "bid_quote_suppressed"
+}
+
+func askSuppressionReason(orderSize, askSize, minSize, maxAskSize, baseAvailable, inventory, maxShort float64) string {
+	if orderSize < minSize {
+		return "min_order_size_not_met"
+	}
+	if baseAvailable <= 0 {
+		return "missing_spot_asset_inventory"
+	}
+	if maxAskSize < minSize || askSize < minSize {
+		return "insufficient_base_capacity"
+	}
+	if inventory-askSize < maxShort {
+		return "max_short_inventory"
+	}
+	return "ask_quote_suppressed"
+}
+
+func baseSuppression(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot, side exchange.Side, reason string, requiredCapacity, availableCapacity, effectiveOrderSize, candidateSize, price float64, dependencyStale bool) *Suppression {
+	return &Suppression{
+		Side:                 side,
+		Reason:               reason,
+		Market:               spec.Symbol,
+		SubaccountID:         cfg.SubaccountID,
+		AnchorPrice:          snapshot.AnchorPrice,
+		ReferencePrice:       ComputeReferencePriceValue(snapshot),
+		ReferenceSource:      ComputeReferencePriceSource(snapshot),
+		RequiredCapacity:     requiredCapacity,
+		AvailableCapacity:    availableCapacity,
+		ConfiguredOrderSize:  cfg.OrderSize,
+		EffectiveOrderSize:   effectiveOrderSize,
+		MinOrderSize:         spec.MinSize,
+		CandidateSize:        candidateSize,
+		SizeStep:             spec.SizeStep,
+		Inventory:            snapshot.Inventory(spec.BaseAsset),
+		MaxInventory:         maxInventoryForSide(cfg, side),
+		SpotAssetAddress:     spec.AssetAddress,
+		QuoteAssetAddress:    spec.QuoteAddress,
+		BaseAsset:            spec.BaseAsset,
+		QuoteAsset:           spec.QuoteAsset,
+		DependencyStale:      dependencyStale,
+		ExternalAnchorFailed: snapshot.ExternalAnchorRefreshFailed,
+		DryRun:               cfg.DryRun,
+		OperatorMode:         string(cfg.OperatorMode),
+	}
+}
+
+func ComputeReferencePriceValue(snapshot state.Snapshot) float64 {
+	price, _ := ComputeReferencePrice(snapshot)
+	return price
+}
+
+func ComputeReferencePriceSource(snapshot state.Snapshot) string {
+	_, source := ComputeReferencePrice(snapshot)
+	return source
+}
+
+func maxInventoryForSide(cfg config.Config, side exchange.Side) float64 {
+	if side == exchange.SideBuy {
+		return effectiveMaxLong(cfg)
+	}
+	return effectiveMaxShort(cfg)
 }
 
 func reusableCapacity(spec exchange.MarketSpec, orders []exchange.Order) (base, quote float64) {

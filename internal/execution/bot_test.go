@@ -8,6 +8,39 @@ import (
 	"github.com/numofx/market-maker/internal/state"
 )
 
+func TestMarketMetadataAttrsIncludesExecutionMetadata(t *testing.T) {
+	spec := exchange.MarketSpec{
+		Symbol:         "USDCcNGN-SPOT",
+		BaseAsset:      "USDC",
+		QuoteAsset:     "cNGN",
+		AssetAddress:   "0xe4b6e05b9910ab08a947a20faecc4524bf8a7f7e",
+		QuoteAddress:   "0x1917960763bf3a0dfa10a05f0a112e828c1a934f",
+		SubID:          "0",
+		TickSize:       0.01,
+		SizeStep:       0.000001,
+		MinSize:        0.000001,
+		OrderEntrySpec: "usdc_cngn_spot_v1",
+	}
+	attrs := marketMetadataAttrs(spec)
+	values := map[string]any{}
+	for i := 0; i+1 < len(attrs); i += 2 {
+		values[attrs[i].(string)] = attrs[i+1]
+	}
+	for key, want := range map[string]any{
+		"market":           spec.Symbol,
+		"asset_address":    spec.AssetAddress,
+		"quote_address":    spec.QuoteAddress,
+		"sub_id":           spec.SubID,
+		"size_step":        spec.SizeStep,
+		"min_size":         spec.MinSize,
+		"order_entry_spec": spec.OrderEntrySpec,
+	} {
+		if values[key] != want {
+			t.Fatalf("%s = %#v want %#v", key, values[key], want)
+		}
+	}
+}
+
 func TestObserveOrderStateFills(t *testing.T) {
 	tests := []struct {
 		name         string
