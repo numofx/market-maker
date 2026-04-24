@@ -460,8 +460,8 @@ func (c *HTTPClient) GetBalances(ctx context.Context) ([]Balance, error) {
 	rows, err := c.pg.Query(ctx, `
 select side, desired_amount, limit_price, asset_address, sub_id
 from active_orders
-where owner_address = $1 and status = 'active'
-`, c.cfg.OwnerAddress)
+where owner_address = $1 and subaccount_id = $2 and status = 'active'
+`, c.cfg.OwnerAddress, c.cfg.SubaccountID)
 	if err != nil {
 		return nil, fmt.Errorf("query exposures: %w", err)
 	}
@@ -1235,7 +1235,13 @@ func rawBigToFloat(value *big.Int) float64 {
 }
 
 func floatToRaw(value float64) string {
-	rat := new(big.Rat).SetFloat64(value)
+	// Convert through a decimal string to avoid float64 binary drift
+	// (e.g. 0.1 becoming 0.10000000000000000555...).
+	normalized := normalizeDecimalString(strconv.FormatFloat(value, 'f', 18, 64))
+	rat, ok := new(big.Rat).SetString(normalized)
+	if !ok {
+		rat = new(big.Rat).SetFloat64(value)
+	}
 	rat.Mul(rat, new(big.Rat).SetInt(decimalScale))
 	out := new(big.Int)
 	ratNum := new(big.Int).Set(rat.Num())
