@@ -176,7 +176,7 @@ func Load() (Config, error) {
 			Provider:         envString("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER", "0x"),
 			BaseURL:          strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BASE_URL")),
 			APIKey:           strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_API_KEY")),
-			RPCURL:           strings.TrimSpace(os.Getenv("MM_RPC_URL")),
+			RPCURL:           envStringFallback([]string{"MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_RPC_URL", "MM_RPC_URL"}, ""),
 			ChainID:          int64(envInt("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_CHAIN_ID", 8453)),
 			SellToken:        strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SELL_TOKEN")),
 			BuyToken:         strings.TrimSpace(os.Getenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BUY_TOKEN")),

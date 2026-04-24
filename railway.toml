@@ -1,0 +1,9 @@
+[build]
+builder = "RAILPACK"
+buildCommand = "go build -o out ./cmd/mm-bot"
+
+[deploy]
+startCommand = "./out"
+runtime = "V2"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
