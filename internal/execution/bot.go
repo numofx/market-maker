@@ -305,6 +305,8 @@ func (b *Bot) logQuoteSuppression(s *strategy.Suppression) {
 		"reference_price", s.ReferencePrice,
 		"reference_source", s.ReferenceSource,
 		"required_capacity", s.RequiredCapacity,
+		"total_capacity", s.TotalCapacity,
+		"reserved_capacity", s.ReservedCapacity,
 		"available_capacity", s.AvailableCapacity,
 		"configured_order_size", s.ConfiguredOrderSize,
 		"effective_order_size", s.EffectiveOrderSize,

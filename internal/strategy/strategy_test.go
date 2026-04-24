@@ -234,6 +234,30 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 		}
 	})
 
+	t.Run("reserved base suppresses ask with capacity reason", func(t *testing.T) {
+		got, err := BuildQuotes(cfg, spec, state.Snapshot{
+			Market:              "USDCcNGN-SPOT",
+			ExternalAnchorPrice: 1353.0884,
+			InventoryByAsset:    map[string]float64{"USDC": 365.57},
+			Positions: map[string]state.AssetPosition{
+				"USDC": {Total: 365.57, Reserved: 365.57, Available: 0},
+				"cNGN": {Available: 1000},
+			},
+		})
+		if err != nil {
+			t.Fatalf("BuildQuotes() error = %v", err)
+		}
+		if got.Ask != nil {
+			t.Fatalf("ask = %#v want nil", got.Ask)
+		}
+		if got.AskSuppression == nil || got.AskSuppression.Reason != "insufficient_base_capacity" {
+			t.Fatalf("ask suppression = %#v", got.AskSuppression)
+		}
+		if got.AskSuppression.TotalCapacity != 365.57 || got.AskSuppression.ReservedCapacity != 365.57 {
+			t.Fatalf("ask capacity = total %v reserved %v", got.AskSuppression.TotalCapacity, got.AskSuppression.ReservedCapacity)
+		}
+	})
+
 	t.Run("insufficient quote capacity suppresses bid", func(t *testing.T) {
 		got, err := BuildQuotes(cfg, spec, state.Snapshot{
 			Market:              "USDCcNGN-SPOT",

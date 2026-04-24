@@ -507,6 +507,7 @@ where owner_address = $1 and status = 'active'
 	baseTotal := positions[baseKey]
 	baseReserved := exposures[baseKey]
 	baseAvailable := maxFloat(0, baseTotal-baseReserved)
+	slog.Info("subaccount balance mapped", "market", spec.Symbol, "subaccount_id", c.cfg.SubaccountID, "asset", spec.BaseAsset, "asset_address", strings.Split(baseKey, "|")[0], "sub_id", strings.Split(baseKey, "|")[1], "total", baseTotal, "reserved", baseReserved, "available", baseAvailable)
 	out = append(out, Balance{
 		Asset:     spec.BaseAsset,
 		Total:     baseTotal,
@@ -517,6 +518,7 @@ where owner_address = $1 and status = 'active'
 	quoteTotal := positions[quoteKey]
 	quoteReserved := exposures[quoteKey]
 	quoteAvailable := maxFloat(0, quoteTotal-quoteReserved)
+	slog.Info("subaccount balance mapped", "market", spec.Symbol, "subaccount_id", c.cfg.SubaccountID, "asset", spec.QuoteAsset, "asset_address", strings.Split(quoteKey, "|")[0], "sub_id", strings.Split(quoteKey, "|")[1], "total", quoteTotal, "reserved", quoteReserved, "available", quoteAvailable)
 	out = append(out, Balance{
 		Asset:     spec.QuoteAsset,
 		Total:     quoteTotal,

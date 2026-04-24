@@ -24,6 +24,8 @@ type Suppression struct {
 	ReferencePrice       float64
 	ReferenceSource      string
 	RequiredCapacity     float64
+	TotalCapacity        float64
+	ReservedCapacity     float64
 	AvailableCapacity    float64
 	ConfiguredOrderSize  float64
 	EffectiveOrderSize   float64
@@ -108,8 +110,8 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 		AnchorPrice:          snapshot.AnchorPrice,
 	}
 	if ref <= 0 {
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "no_anchor", 0, 0, 0, 0, 0, false)
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "no_anchor", 0, 0, 0, 0, 0, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "no_anchor", 0, 0, 0, 0, 0, 0, 0, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "no_anchor", 0, 0, 0, 0, 0, 0, 0, false)
 		return result, nil
 	}
 
@@ -130,8 +132,10 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 		return result, fmt.Errorf("calculated invalid quote prices")
 	}
 
-	baseAvailable := snapshot.Position(spec.BaseAsset).Available
-	quoteAvailable := snapshot.Position(spec.QuoteAsset).Available
+	basePosition := snapshot.Position(spec.BaseAsset)
+	quotePosition := snapshot.Position(spec.QuoteAsset)
+	baseAvailable := basePosition.Available
+	quoteAvailable := quotePosition.Available
 	reusableBase, reusableQuote := reusableCapacity(spec, snapshot.OpenOrders)
 	baseAvailable += reusableBase
 	quoteAvailable += reusableQuote
@@ -148,26 +152,26 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 	if bidSize >= spec.MinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}
 	} else {
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, spec.MinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), spec.MinSize*bidPrice, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, spec.MinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
 	if askSize >= spec.MinSize && inventory-askSize >= effectiveMaxShort(cfg) {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
 	} else {
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, baseAvailable, inventory, effectiveMaxShort(cfg)), spec.MinSize, baseAvailable, orderSize, askSize, askPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, effectiveMaxShort(cfg)), spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	}
 
 	switch cfg.OperatorMode {
 	case config.ModePause, config.ModeDryRunHealth:
 		result.Bid = nil
 		result.Ask = nil
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quoteAvailable, orderSize, bidSize, bidPrice, false)
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, baseAvailable, orderSize, askSize, askPrice, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	case config.ModeBidOnly:
 		result.Ask = nil
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, baseAvailable, orderSize, askSize, askPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	case config.ModeAskOnly:
 		result.Bid = nil
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
 	result.SkewBPS = skewBPS
 	return result, nil
@@ -189,12 +193,15 @@ func bidSuppressionReason(orderSize, bidSize, minSize, maxBidSize, quoteAvailabl
 	return "bid_quote_suppressed"
 }
 
-func askSuppressionReason(orderSize, askSize, minSize, maxAskSize, baseAvailable, inventory, maxShort float64) string {
+func askSuppressionReason(orderSize, askSize, minSize, maxAskSize, baseAvailable, baseTotal, inventory, maxShort float64) string {
 	if orderSize < minSize {
 		return "min_order_size_not_met"
 	}
-	if baseAvailable <= 0 {
+	if baseTotal <= 0 {
 		return "missing_spot_asset_inventory"
+	}
+	if baseAvailable <= 0 {
+		return "insufficient_base_capacity"
 	}
 	if maxAskSize < minSize || askSize < minSize {
 		return "insufficient_base_capacity"
@@ -205,7 +212,7 @@ func askSuppressionReason(orderSize, askSize, minSize, maxAskSize, baseAvailable
 	return "ask_quote_suppressed"
 }
 
-func baseSuppression(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot, side exchange.Side, reason string, requiredCapacity, availableCapacity, effectiveOrderSize, candidateSize, price float64, dependencyStale bool) *Suppression {
+func baseSuppression(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot, side exchange.Side, reason string, requiredCapacity, totalCapacity, reservedCapacity, availableCapacity, effectiveOrderSize, candidateSize, price float64, dependencyStale bool) *Suppression {
 	return &Suppression{
 		Side:                 side,
 		Reason:               reason,
@@ -215,6 +222,8 @@ func baseSuppression(cfg config.Config, spec exchange.MarketSpec, snapshot state
 		ReferencePrice:       ComputeReferencePriceValue(snapshot),
 		ReferenceSource:      ComputeReferencePriceSource(snapshot),
 		RequiredCapacity:     requiredCapacity,
+		TotalCapacity:        totalCapacity,
+		ReservedCapacity:     reservedCapacity,
 		AvailableCapacity:    availableCapacity,
 		ConfiguredOrderSize:  cfg.OrderSize,
 		EffectiveOrderSize:   effectiveOrderSize,
