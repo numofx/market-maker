@@ -420,6 +420,10 @@ func (c *HTTPClient) GetBook(ctx context.Context, market string) (Book, error) {
 }
 
 func (c *HTTPClient) GetTrades(ctx context.Context, market string) ([]Trade, error) {
+	spec, err := c.GetMarket(ctx, market)
+	if err != nil {
+		return nil, err
+	}
 	var resp struct {
 		Trades []struct {
 			TradeID       int64  `json:"trade_id"`
@@ -442,7 +446,7 @@ func (c *HTTPClient) GetTrades(ctx context.Context, market string) ([]Trade, err
 		out = append(out, Trade{
 			ID:        item.TradeID,
 			Price:     price,
-			Size:      rawToFloat(item.Size),
+			Size:      rawOrderSizeToFloat(spec, item.Size),
 			Side:      item.AggressorSide,
 			CreatedAt: tm,
 		})
@@ -475,7 +479,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 		if err := rows.Scan(&side, &rawSize, &price, &assetAddress, &subID); err != nil {
 			return nil, fmt.Errorf("scan exposure: %w", err)
 		}
-		size := rawToFloat(rawSize)
+		size := rawOrderSizeToFloat(c.marketSpecForAsset(assetAddress, subID), rawSize)
 		px, err := strconv.ParseFloat(price, 64)
 		if err != nil {
 			return nil, fmt.Errorf("parse exposure price: %w", err)
@@ -504,7 +508,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 		slog.Info("subaccount balance observed", "market", spec.Symbol, "subaccount_id", c.cfg.SubaccountID, "asset_address", row.Asset, "sub_id", row.SubID, "raw_balance", row.RawBalance, "amount", row.HumanAmount, "role", role)
 	}
 	out := make([]Balance, 0, 2)
-	baseTotal := positions[baseKey]
+	baseTotal := rawPositionToMarketSize(spec, positions[baseKey])
 	baseReserved := exposures[baseKey]
 	baseAvailable := maxFloat(0, baseTotal-baseReserved)
 	slog.Info("subaccount balance mapped", "market", spec.Symbol, "subaccount_id", c.cfg.SubaccountID, "asset", spec.BaseAsset, "asset_address", strings.Split(baseKey, "|")[0], "sub_id", strings.Split(baseKey, "|")[1], "total", baseTotal, "reserved", baseReserved, "available", baseAvailable)
@@ -537,9 +541,9 @@ func (c *HTTPClient) ListOpenOrders(ctx context.Context, market string) ([]Order
 	rows, err := c.pg.Query(ctx, `
 select order_id, side, limit_price, desired_amount, filled_amount, nonce, owner_address, created_at, subaccount_id
 from active_orders
-where owner_address = $1 and asset_address = $2 and sub_id = $3 and status = 'active'
+where owner_address = $1 and asset_address = $2 and sub_id = $3 and subaccount_id = $4 and status = 'active'
 order by created_at asc
-`, c.cfg.OwnerAddress, strings.ToLower(spec.AssetAddress), spec.SubID)
+`, c.cfg.OwnerAddress, strings.ToLower(spec.AssetAddress), spec.SubID, c.cfg.SubaccountID)
 	if err != nil {
 		return nil, fmt.Errorf("query open orders: %w", err)
 	}
@@ -570,7 +574,7 @@ order by created_at asc
 			return nil, fmt.Errorf("compute remaining size: %w", err)
 		}
 		sideValue := Side(side)
-		size := rawToFloat(remainingRaw)
+		size := rawOrderSizeToFloat(spec, remainingRaw)
 		if spec.Symbol == "USDCcNGN-SPOT" {
 			sideValue, price, size, err = spotUIFromEngine(sideValue, price, size)
 			if err != nil {
@@ -608,6 +612,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	engineAmount := req.Size
 	payloadSide := req.Side
 	payloadDesiredAmount := floatToRaw(req.Size)
+	signedDesiredAmount := marketSizeToRawOrder(spec, req.Size)
 	payloadLimitPrice := normalizePrice(req.Price)
 	payload := map[string]any{}
 	if spec.Symbol == "USDCcNGN-SPOT" {
@@ -617,6 +622,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		}
 		payloadSide = engineSide
 		payloadDesiredAmount = floatToRaw(engineAmount)
+		signedDesiredAmount = payloadDesiredAmount
 		payloadLimitPrice = normalizePrice(enginePrice)
 		payload["order_entry_spec"] = "usdc_cngn_spot_v1"
 		payload["ui_intent"] = map[string]string{
@@ -625,7 +631,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 			"size":  normalizePrice(req.Size),
 		}
 	}
-	actionData, err := encodeTradeData(spec.AssetAddress, spec.SubID, enginePrice, payloadDesiredAmount, c.cfg.RecipientID, engineSide == SideBuy, c.cfg.WorstFee)
+	actionData, err := encodeTradeData(spec.AssetAddress, spec.SubID, enginePrice, signedDesiredAmount, c.cfg.RecipientID, engineSide == SideBuy, c.cfg.WorstFee)
 	if err != nil {
 		return Order{}, err
 	}
@@ -684,7 +690,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	}
 
 	price, _ := strconv.ParseFloat(resp.Order.LimitPrice, 64)
-	size := rawToFloat(resp.Order.DesiredAmount)
+	size := rawOrderSizeToFloat(spec, resp.Order.DesiredAmount)
 	side := resp.Order.Side
 	if spec.Symbol == "USDCcNGN-SPOT" {
 		side, price, size, err = spotUIFromEngine(resp.Order.Side, price, size)
@@ -788,7 +794,7 @@ func isProtectedOrderID(orderID string, prefixes []string) bool {
 
 func (c *HTTPClient) lookupOrderByID(ctx context.Context, orderID string) (Order, error) {
 	row := c.pg.QueryRow(ctx, `
-select order_id, side, limit_price, desired_amount, nonce, owner_address, created_at, subaccount_id
+select order_id, side, limit_price, desired_amount, nonce, owner_address, created_at, subaccount_id, asset_address, sub_id
 from active_orders
 where order_id = $1 and owner_address = $2
 `, orderID, c.cfg.OwnerAddress)
@@ -801,12 +807,14 @@ where order_id = $1 and owner_address = $2
 		owner         string
 		createdAt     time.Time
 		subaccountID  string
+		assetAddress  string
+		subID         string
 	)
-	if err := row.Scan(&id, &side, &limitPrice, &desiredAmount, &nonce, &owner, &createdAt, &subaccountID); err != nil {
+	if err := row.Scan(&id, &side, &limitPrice, &desiredAmount, &nonce, &owner, &createdAt, &subaccountID, &assetAddress, &subID); err != nil {
 		return Order{}, fmt.Errorf("lookup order %s: %w", orderID, err)
 	}
 	price, _ := strconv.ParseFloat(limitPrice, 64)
-	size := rawToFloat(desiredAmount)
+	size := rawOrderSizeToFloat(c.marketSpecForAsset(assetAddress, subID), desiredAmount)
 	sideValue := Side(side)
 	return Order{
 		ID:         id,
@@ -1250,6 +1258,41 @@ func floatToRaw(value float64) string {
 	return out.String()
 }
 
+func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
+	size := rawToFloat(raw)
+	if usesContractLots(spec) {
+		return size * spec.SizeStep
+	}
+	return size
+}
+
+func marketSizeToRawOrder(spec MarketSpec, size float64) string {
+	if usesContractLots(spec) {
+		return floatToRaw(size / spec.SizeStep)
+	}
+	return floatToRaw(size)
+}
+
+func rawPositionToMarketSize(spec MarketSpec, position float64) float64 {
+	if usesContractLots(spec) {
+		return position * spec.SizeStep
+	}
+	return position
+}
+
+func usesContractLots(spec MarketSpec) bool {
+	return spec.Symbol != "" && spec.Symbol != "USDCcNGN-SPOT" && spec.SizeStep > 0
+}
+
+func (c *HTTPClient) marketSpecForAsset(assetAddress, subID string) MarketSpec {
+	for _, spec := range c.markets {
+		if strings.EqualFold(spec.AssetAddress, assetAddress) && spec.SubID == subID {
+			return spec
+		}
+	}
+	return MarketSpec{}
+}
+
 func normalizePrice(price float64) string {
 	return strconv.FormatFloat(price, 'f', -1, 64)
 }
@@ -1286,7 +1329,7 @@ func parsePresentedBookLevel(spec MarketSpec, rawPrice, rawAmount string, spot *
 	if err != nil {
 		return BookLevel{}, "", fmt.Errorf("parse book price: %w", err)
 	}
-	return BookLevel{Price: price, Size: rawToFloat(rawAmount)}, fallbackSide, nil
+	return BookLevel{Price: price, Size: rawOrderSizeToFloat(spec, rawAmount)}, fallbackSide, nil
 }
 
 func balanceKeys(spec MarketSpec) (string, string) {
