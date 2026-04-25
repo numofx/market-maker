@@ -1,0 +1,2 @@
+[start]
+cmd = "go run ./cmd/mm-bot"

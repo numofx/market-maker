@@ -372,6 +372,56 @@ export MM_MARKET_SYMBOL=USDCcNGN-SPOT
 go run ./cmd/mm-bot
 ```
 
+### Futures Fair-Value HTTP Anchor
+
+For futures markets (for example `USDCcNGN-APR30-2026`), run a local anchor service that derives fair value from spot:
+
+`fair = spot * exp(r * T) + carry_abs + spot * (carry_bps / 10000)`
+
+where:
+
+- `spot` comes from `USDCcNGN-SPOT` top-of-book mid (or last trade fallback)
+- `r` is `FAIR_ANCHOR_RATE_APR`
+- `T` is years until `FAIR_ANCHOR_EXPIRY_UTC`
+
+Start the anchor service:
+
+```bash
+export PORT=8080
+export FAIR_ANCHOR_API_BASE_URL=https://<your-markets-service-public-url>
+export FAIR_ANCHOR_FUTURES_SYMBOL=USDCcNGN-APR30-2026
+export FAIR_ANCHOR_EXPIRY_UTC=2026-04-30T00:00:00Z
+export FAIR_ANCHOR_RATE_APR=0.08
+export FAIR_ANCHOR_CARRY_ABS=0
+export FAIR_ANCHOR_CARRY_BPS=0
+
+go run ./cmd/fair-anchor
+```
+
+Point the market maker to this HTTP anchor:
+
+```bash
+export MM_MARKET_SYMBOL=USDCcNGN-APR30-2026
+export MM_OPERATOR_MODE=normal
+export MM_DRY_RUN=false
+export MM_ANCHOR_SOURCE_TYPE=http
+export MM_ANCHOR_URL=http://<fair-anchor-service-internal-domain>/price?market=USDCcNGN-APR30-2026
+
+go run ./cmd/mm-bot
+```
+
+Sanity-check the anchor output:
+
+```bash
+curl -s "http://127.0.0.1:8090/price?market=USDCcNGN-APR30-2026"
+```
+
+Health-check anchor usability (fails closed with `503` if spot/fair cannot be produced):
+
+```bash
+curl -s -i "http://127.0.0.1:8090/healthz"
+```
+
 Health and metrics:
 
 - `GET /healthz`
