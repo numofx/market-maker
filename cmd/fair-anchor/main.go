@@ -29,6 +29,9 @@ type config struct {
 	AllowAnyMarket           bool
 	GuardedFallbackEnabled   bool
 	GuardedFallbackSpotPrice float64
+	StrailsAPIURL            string
+	StrailsAPIKey            string
+	StrailsPair              string
 }
 
 type bookResponse struct {
@@ -145,7 +148,7 @@ func (h *handler) price(w http.ResponseWriter, r *http.Request) {
 	if market == "" {
 		market = h.cfg.FuturesSymbol
 	}
-	if !h.cfg.AllowAnyMarket && market != h.cfg.FuturesSymbol {
+	if !h.cfg.AllowAnyMarket && market != h.cfg.FuturesSymbol && market != h.cfg.SpotSymbol {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unsupported market %q", market)})
 		return
 	}
@@ -156,6 +159,19 @@ func (h *handler) price(w http.ResponseWriter, r *http.Request) {
 	spot, source, _, err := h.resolveSpot(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// The spot anchor is the resolved spot price itself — no carry adjustment.
+	if market == h.cfg.SpotSymbol {
+		writeJSON(w, http.StatusOK, anchorResponse{
+			Price:       spot,
+			Spot:        spot,
+			Fair:        spot,
+			Source:      source,
+			Market:      market,
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
 		return
 	}
 
@@ -202,6 +218,14 @@ func (h *handler) resolveSpot(ctx context.Context) (float64, string, bool, error
 }
 
 func (h *handler) fetchSpot(ctx context.Context) (float64, string, error) {
+	if h.cfg.StrailsAPIURL != "" && h.cfg.StrailsAPIKey != "" {
+		mid, err := h.fetchStrailsMid(ctx)
+		if err == nil {
+			return mid, "strails_mid", nil
+		}
+		slog.Warn("strails spot source unavailable, falling back", "error", err)
+	}
+
 	book, err := h.getBook(ctx, h.cfg.SpotSymbol)
 	if err == nil {
 		bestBid, bidOK := topBookPrice(book.Bids)
@@ -226,6 +250,87 @@ func (h *handler) fetchSpot(ctx context.Context) (float64, string, error) {
 		return 0, "", fmt.Errorf("latest spot trade too old: %s", time.Since(trades[0].CreatedAt).Round(time.Second))
 	}
 	return spotPrice, "spot_last_trade", nil
+}
+
+type strailsBookOrder struct {
+	Price  string `json:"price"`
+	Status string `json:"status"`
+}
+
+type strailsBookResponse struct {
+	Data struct {
+		BuyOrders  []strailsBookOrder `json:"buyOrders"`
+		SellOrders []strailsBookOrder `json:"sellOrders"`
+	} `json:"data"`
+}
+
+// Plausibility bounds for cNGN per USDC; anything outside indicates an inverted or
+// scaled quote and must not anchor our quotes. Mirrors the trading-app guard.
+const (
+	strailsMinPlausiblePrice = 100
+	strailsMaxPlausiblePrice = 100000
+)
+
+// fetchStrailsMid anchors the spot market to StablesRail's live FX orderbook mid.
+// StablesRail is an LP quote board, so sides can cross or empty out; every failure
+// mode returns an error so callers fall back (and the MM suppresses quotes) instead
+// of anchoring to a broken price.
+func (h *handler) fetchStrailsMid(ctx context.Context) (float64, error) {
+	u := strings.TrimRight(h.cfg.StrailsAPIURL, "/") + "/fx/orderbook?pair=" + url.QueryEscape(h.cfg.StrailsPair) + "&limit=10"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("x-api-key", h.cfg.StrailsAPIKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("strails orderbook returned %d", resp.StatusCode)
+	}
+
+	var body strailsBookResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, err
+	}
+
+	bestBid, bidOK := bestStrailsPrice(body.Data.BuyOrders, true)
+	bestAsk, askOK := bestStrailsPrice(body.Data.SellOrders, false)
+	if !bidOK || !askOK {
+		return 0, fmt.Errorf("strails book has an empty side")
+	}
+	if bestBid < strailsMinPlausiblePrice || bestAsk > strailsMaxPlausiblePrice {
+		return 0, fmt.Errorf("strails prices implausible: bid %v ask %v", bestBid, bestAsk)
+	}
+	if bestBid >= bestAsk {
+		return 0, fmt.Errorf("strails book is crossed: bid %v ask %v", bestBid, bestAsk)
+	}
+	return (bestBid + bestAsk) / 2.0, nil
+}
+
+// bestStrailsPrice scans a quote-board side because StablesRail does not guarantee
+// order: highest active buy or lowest active sell.
+func bestStrailsPrice(quoteBoard []strailsBookOrder, wantHighest bool) (float64, bool) {
+	best := 0.0
+	found := false
+	for _, order := range quoteBoard {
+		if order.Status != "" && order.Status != "active" {
+			continue
+		}
+		price, err := strconv.ParseFloat(strings.TrimSpace(order.Price), 64)
+		if err != nil || price <= 0 {
+			continue
+		}
+		if !found || (wantHighest && price > best) || (!wantHighest && price < best) {
+			best = price
+			found = true
+		}
+	}
+	return best, found
 }
 
 func topBookPrice(levels []bookLevel) (float64, bool) {
@@ -336,6 +441,9 @@ func loadConfig() (config, error) {
 		AllowAnyMarket:           envBool("FAIR_ANCHOR_ALLOW_ANY_MARKET", false),
 		GuardedFallbackEnabled:   envBool("FAIR_ANCHOR_GUARDED_FALLBACK_ENABLED", false),
 		GuardedFallbackSpotPrice: envFloat("FAIR_ANCHOR_GUARDED_FALLBACK_SPOT_PRICE", 0),
+		StrailsAPIURL:            strings.TrimSpace(os.Getenv("FAIR_ANCHOR_STRAILS_API_URL")),
+		StrailsAPIKey:            strings.TrimSpace(os.Getenv("FAIR_ANCHOR_STRAILS_API_KEY")),
+		StrailsPair:              envString("FAIR_ANCHOR_STRAILS_PAIR", "CNGN-USDC"),
 	}
 	if cfg.APIBaseURL == "" {
 		return config{}, fmt.Errorf("FAIR_ANCHOR_API_BASE_URL is required")
