@@ -111,7 +111,7 @@ func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), h.cfg.Timeout)
 	defer cancel()
 
-	spot, source, usedFallback, err := h.resolveSpot(ctx)
+	spot, source, usedFallback, err := h.resolveSpot(ctx, true)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"ok":    false,
@@ -156,7 +156,8 @@ func (h *handler) price(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), h.cfg.Timeout)
 	defer cancel()
 
-	spot, source, _, err := h.resolveSpot(ctx)
+	// Serving the spot market's own anchor from our own book would be circular.
+	spot, source, _, err := h.resolveSpot(ctx, market != h.cfg.SpotSymbol)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
@@ -205,8 +206,8 @@ func (h *handler) computeFair(spot float64) (float64, float64) {
 	return tYears, spot*math.Exp(h.cfg.RateAPR*tYears) + h.cfg.CarryAbsolute + spot*(h.cfg.CarryBPS/10000.0)
 }
 
-func (h *handler) resolveSpot(ctx context.Context) (float64, string, bool, error) {
-	spot, source, err := h.fetchSpot(ctx)
+func (h *handler) resolveSpot(ctx context.Context, allowOwnBook bool) (float64, string, bool, error) {
+	spot, source, err := h.fetchSpot(ctx, allowOwnBook)
 	if err == nil {
 		return spot, source, false, nil
 	}
@@ -217,13 +218,27 @@ func (h *handler) resolveSpot(ctx context.Context) (float64, string, bool, error
 	return 0, "", false, err
 }
 
-func (h *handler) fetchSpot(ctx context.Context) (float64, string, error) {
+// fetchSpot resolves the external spot price. allowOwnBook gates the fallback to our
+// own spot book/trades: it is safe when anchoring the futures market, but for the
+// spot market itself it would be circular — the MM would anchor to its own resting
+// quotes, self-confirming any price and defeating the staleness/deviation guards —
+// so spot-anchor callers must pass false and fail instead.
+func (h *handler) fetchSpot(ctx context.Context, allowOwnBook bool) (float64, string, error) {
+	var strailsErr error
 	if h.cfg.StrailsAPIURL != "" && h.cfg.StrailsAPIKey != "" {
 		mid, err := h.fetchStrailsMid(ctx)
 		if err == nil {
 			return mid, "strails_mid", nil
 		}
-		slog.Warn("strails spot source unavailable, falling back", "error", err)
+		strailsErr = err
+		slog.Warn("strails spot source unavailable", "error", err)
+	}
+
+	if !allowOwnBook {
+		if strailsErr != nil {
+			return 0, "", fmt.Errorf("strails anchor unavailable and own-book fallback is disabled for the spot anchor: %w", strailsErr)
+		}
+		return 0, "", errors.New("strails anchor is not configured and own-book fallback is disabled for the spot anchor")
 	}
 
 	book, err := h.getBook(ctx, h.cfg.SpotSymbol)

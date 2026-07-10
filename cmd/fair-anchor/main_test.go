@@ -71,6 +71,22 @@ func TestFetchStrailsMidRejectsBrokenBooks(t *testing.T) {
 	}
 }
 
+func TestSpotAnchorNeverFallsBackToOwnBook(t *testing.T) {
+	// Broken strails + own-book fallback disallowed must error, not anchor circularly.
+	stub := strailsStub(t, `{"data":{"buyOrders":[],"sellOrders":[]}}`)
+	defer stub.Close()
+
+	h := strailsHandler(stub.URL)
+	if _, _, err := h.fetchSpot(context.Background(), false); err == nil {
+		t.Fatal("spot anchor must fail rather than fall back to our own book")
+	}
+
+	h.cfg.StrailsAPIURL = ""
+	if _, _, err := h.fetchSpot(context.Background(), false); err == nil {
+		t.Fatal("unconfigured strails must fail the spot anchor")
+	}
+}
+
 func TestFetchStrailsMidRequiresAuth(t *testing.T) {
 	stub := strailsStub(t, `{}`)
 	defer stub.Close()
