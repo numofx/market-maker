@@ -168,13 +168,15 @@ func TestNoDuplicateQuotesOnPartialFailure(t *testing.T) {
 		},
 	}
 	cfg := config.Config{
-		MarketSymbol:         "USDCcNGN-APR30-2026",
-		StateFile:            filepath.Join(t.TempDir(), "state.json"),
-		OrderSize:            10,
-		HalfSpreadBPS:        10,
-		MaxLongInventory:     100,
-		MaxShortInventory:    -100,
-		QuoteRefreshInterval: 0,
+		MarketSymbol:              "USDCcNGN-APR30-2026",
+		StateFile:                 filepath.Join(t.TempDir(), "state.json"),
+		OrderSize:                 10,
+		HalfSpreadBPS:             10,
+		MaxLongInventory:          100,
+		MaxShortInventory:         -100,
+		QuoteRefreshInterval:      0,
+		CancelStaleOrderThreshold: 20,
+		AdoptSizeTolerance:        0.01,
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bot := NewBot(cfg, client, client.spec, metrics.New(), logger, state.NewStore(cfg.StateFile))
@@ -182,7 +184,10 @@ func TestNoDuplicateQuotesOnPartialFailure(t *testing.T) {
 	if err := bot.RunCycle(context.Background()); err != nil {
 		t.Fatalf("RunCycle() error = %v", err)
 	}
-	client.openOrders = []exchange.Order{{ID: client.placed[0].OrderID, Side: exchange.SideBuy, Nonce: client.placed[0].Nonce, Price: client.placed[0].Price, Size: client.placed[0].Size}}
+	// The future is cash-margined, so cycle 1 quotes BOTH sides even with zero base
+	// inventory. Simulate a partial failure where only the bid actually rested; the
+	// live bid must be adopted (not duplicated) while the missing ask is placed.
+	client.openOrders = []exchange.Order{{ID: client.placed[0].OrderID, Side: exchange.SideBuy, Nonce: client.placed[0].Nonce, Price: client.placed[0].Price, Size: client.placed[0].Size, Managed: true}}
 	before := len(client.placed)
 	if err := bot.RunCycle(context.Background()); err != nil {
 		t.Fatalf("RunCycle() second error = %v", err)

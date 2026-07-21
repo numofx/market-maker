@@ -630,6 +630,17 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 			"price": normalizePrice(req.Price),
 			"size":  normalizePrice(req.Size),
 		}
+	} else {
+		// Cash-margined / deliverable FUTURE: the request BODY carries the human-decimal
+		// contract quantity while the SIGNED action carries the on-chain wei amount. Round
+		// the requested size down to the MinSize step so markets-service normalization aligns.
+		bodyDecimal, signedWei, roundedSize, ferr := futureOrderAmounts(spec, req.Size)
+		if ferr != nil {
+			return Order{}, ferr
+		}
+		engineAmount = roundedSize
+		payloadDesiredAmount = bodyDecimal
+		signedDesiredAmount = signedWei
 	}
 	actionData, err := encodeTradeData(spec.AssetAddress, spec.SubID, enginePrice, signedDesiredAmount, c.cfg.RecipientID, engineSide == SideBuy, c.cfg.WorstFee)
 	if err != nil {
@@ -1256,6 +1267,55 @@ func floatToRaw(value float64) string {
 	ratDen := new(big.Int).Set(rat.Denom())
 	out.Quo(ratNum, ratDen)
 	return out.String()
+}
+
+// ratFromFloat converts a float64 to an exact big.Rat via its shortest decimal
+// representation, avoiding binary float drift (e.g. 0.1 -> 0.10000000000000000555).
+func ratFromFloat(value float64) *big.Rat {
+	normalized := normalizeDecimalString(strconv.FormatFloat(value, 'f', -1, 64))
+	if rat, ok := new(big.Rat).SetString(normalized); ok {
+		return rat
+	}
+	return new(big.Rat).SetFloat64(value)
+}
+
+// futureOrderAmounts derives the two amount representations a cash-margined /
+// deliverable future order requires:
+//
+//   - bodyDecimal: the human-decimal contract quantity carried in the request BODY
+//     `desired_amount`. markets-service parses this as a decimal and divides it by the
+//     instrument MinSize (the atomic step) to obtain an integer atomic contract count.
+//   - signedWei: the on-chain wei amount carried in the SIGNED action (encodeTradeData),
+//     which is 1e18 (assetDecimals) per whole contract.
+//
+// The requested size is first rounded DOWN to the MinSize step so the body always
+// normalizes to a whole atomic count and the signed amount stays an exact integer
+// multiple of that count (see markets-service inferSharedScale / validateActionDataInvariants).
+func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, signedWei string, roundedSize float64, err error) {
+	step := ratFromFloat(spec.MinSize)
+	if step.Sign() <= 0 {
+		return "", "", 0, fmt.Errorf("invalid min size %v for market %s", spec.MinSize, spec.Symbol)
+	}
+	sizeRat := ratFromFloat(size)
+	if sizeRat.Sign() < 0 {
+		return "", "", 0, fmt.Errorf("invalid order size %v", size)
+	}
+	// atomic = floor(size / step) using exact integer arithmetic.
+	atomic := new(big.Int).Quo(
+		new(big.Int).Mul(sizeRat.Num(), step.Denom()),
+		new(big.Int).Mul(sizeRat.Denom(), step.Num()),
+	)
+	if atomic.Sign() <= 0 {
+		return "", "", 0, fmt.Errorf("order size %v rounds below min size %v for market %s", size, spec.MinSize, spec.Symbol)
+	}
+	// rounded contract quantity = atomic * step
+	rounded := new(big.Rat).Mul(new(big.Rat).SetInt(atomic), step)
+	bodyDecimal = normalizeDecimalString(rounded.FloatString(assetDecimals))
+	// signed wei = rounded * 10^assetDecimals (exact, since rounded is a multiple of step)
+	weiRat := new(big.Rat).Mul(rounded, new(big.Rat).SetInt(decimalScale))
+	signedWei = new(big.Int).Quo(weiRat.Num(), weiRat.Denom()).String()
+	roundedSize, _ = rounded.Float64()
+	return bodyDecimal, signedWei, roundedSize, nil
 }
 
 func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {

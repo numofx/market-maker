@@ -486,6 +486,68 @@ func TestNonSpotMarketsUnchangedAndStillPreferConfiguredAnchor(t *testing.T) {
 	}
 }
 
+func TestCashMarginedFutureQuotesAskWithoutBaseInventory(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	cfg := config.Config{
+		OrderSize:         10,
+		HalfSpreadBPS:     20,
+		MaxLongInventory:  100,
+		MaxShortInventory: -100,
+	}
+	// Zero base-asset inventory, but cash (quote) margin is available. Selling a
+	// cash-margined future opens a SHORT backed by that cash, so the ask must NOT be
+	// suppressed for lacking base inventory (BUG 2).
+	got, err := BuildQuotes(cfg, spec, state.Snapshot{
+		Market:      spec.Symbol,
+		BestBid:     1499,
+		BestAsk:     1501,
+		AnchorPrice: 1500,
+		Positions: map[string]state.AssetPosition{
+			"USDC": {Total: 0, Reserved: 0, Available: 0},
+			"cNGN": {Total: 100000, Available: 100000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildQuotes() error = %v", err)
+	}
+	if got.Ask == nil {
+		t.Fatalf("expected ask for cash-margined future, got suppression = %#v", got.AskSuppression)
+	}
+	assertClose(t, got.Ask.Size, 10)
+	if got.Bid == nil {
+		t.Fatalf("expected bid for cash-margined future, got suppression = %#v", got.BidSuppression)
+	}
+}
+
+func TestCashMarginedFutureAskGatedByShortInventoryLimit(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	cfg := config.Config{
+		OrderSize:         10,
+		HalfSpreadBPS:     20,
+		MaxLongInventory:  100,
+		MaxShortInventory: -5, // already near the short cap
+	}
+	got, err := BuildQuotes(cfg, spec, state.Snapshot{
+		Market:      spec.Symbol,
+		AnchorPrice: 1500,
+		InventoryByAsset: map[string]float64{"USDC": 0},
+		Positions: map[string]state.AssetPosition{
+			"USDC": {Available: 0},
+			"cNGN": {Total: 100000, Available: 100000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildQuotes() error = %v", err)
+	}
+	// inventory 0, askSize 10 -> would go to -10, below MaxShortInventory -5.
+	if got.Ask != nil {
+		t.Fatalf("expected ask suppressed by short inventory limit, got %#v", got.Ask)
+	}
+	if got.AskSuppression == nil || got.AskSuppression.Reason != "max_short_inventory" {
+		t.Fatalf("ask suppression = %#v want reason max_short_inventory", got.AskSuppression)
+	}
+}
+
 func assertClose(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-6 {

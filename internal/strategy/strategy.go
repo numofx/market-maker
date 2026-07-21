@@ -140,8 +140,18 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 	baseAvailable += reusableBase
 	quoteAvailable += reusableQuote
 
+	// A cash-margined future is settled/collateralized in the quote (cash) asset: SELLING
+	// opens a SHORT backed by cash margin rather than delivering held base-asset inventory.
+	// Its ask must therefore be gated by cash/quote capacity and the short inventory limit,
+	// mirroring the bid, and must NOT be gated by base-asset availability. Spot still sells
+	// held base inventory, so its ask stays gated by baseAvailable.
+	cashMarginedFuture := isCashMarginedFuture(spec)
+
 	maxBidSize := quoteAvailable / bidPrice
 	maxAskSize := baseAvailable
+	if cashMarginedFuture {
+		maxAskSize = quoteAvailable / askPrice
+	}
 	if cfg.MaxNotionalPerSide > 0 {
 		maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide/bidPrice)
 		maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide/askPrice)
@@ -156,6 +166,9 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 	}
 	if askSize >= spec.MinSize && inventory-askSize >= effectiveMaxShort(cfg) {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
+	} else if cashMarginedFuture {
+		// Short backed by cash: report cash/quote capacity, not base-asset inventory.
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, quoteAvailable, inventory, effectiveMaxShort(cfg)), spec.MinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
 	} else {
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, effectiveMaxShort(cfg)), spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	}
@@ -191,6 +204,33 @@ func bidSuppressionReason(orderSize, bidSize, minSize, maxBidSize, quoteAvailabl
 		return "insufficient_quote_capacity"
 	}
 	return "bid_quote_suppressed"
+}
+
+// isCashMarginedFuture reports whether the market is a cash-margined future (as opposed
+// to the spot contract). The MM's MarketSpec does not carry ContractType/SettlementType,
+// so the spot symbol is the discriminator: every other configured market is a future whose
+// short side is backed by cash margin rather than held base-asset inventory.
+func isCashMarginedFuture(spec exchange.MarketSpec) bool {
+	return spec.Symbol != "" && spec.Symbol != "USDCcNGN-SPOT"
+}
+
+// futureAskSuppressionReason mirrors bidSuppressionReason for the short (sell) side of a
+// cash-margined future: the ask is limited by cash/quote capacity and the short inventory
+// limit, never by base-asset availability.
+func futureAskSuppressionReason(orderSize, askSize, minSize, maxAskSize, quoteAvailable, inventory, maxShort float64) string {
+	if orderSize < minSize {
+		return "min_order_size_not_met"
+	}
+	if maxAskSize < minSize || askSize < minSize {
+		return "insufficient_quote_capacity"
+	}
+	if inventory-askSize < maxShort {
+		return "max_short_inventory"
+	}
+	if quoteAvailable <= 0 {
+		return "insufficient_quote_capacity"
+	}
+	return "ask_quote_suppressed"
 }
 
 func askSuppressionReason(orderSize, askSize, minSize, maxAskSize, baseAvailable, baseTotal, inventory, maxShort float64) string {
