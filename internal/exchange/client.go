@@ -869,12 +869,18 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		case "USDCcNGN-SPOT":
 			spec.SizeStep = 0.000001
 			spec.MinSize = 0.000001
-		case "USDCcNGN-APR30-2026":
+		case "USDCcNGN-APR30-2026", "USDCcNGN-SEP16-2026", "USDCcNGN-NOV30-2026", "USDCcNGN-MAY31-2027":
+			// cNGN deliverable FX futures: markets-service enforces a 0.001 atomic
+			// amount step (registry MinSize) for these symbols; the order body must
+			// align to it (see futureOrderAmounts).
 			spec.SizeStep = 0.001
 			spec.MinSize = 0.001
 		default:
-			spec.SizeStep = 0.000001
-			spec.MinSize = 0.000001
+			// Any non-spot market is a future settled in 0.001 contract steps. Spot is
+			// the only 0.000001 market and is cased explicitly above, so defaulting to
+			// 0.001 keeps a newly listed future expiry aligned without a code change.
+			spec.SizeStep = 0.001
+			spec.MinSize = 0.001
 		}
 		c.markets[item.Market] = spec
 	}
