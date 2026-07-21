@@ -479,7 +479,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 		if err := rows.Scan(&side, &rawSize, &price, &assetAddress, &subID); err != nil {
 			return nil, fmt.Errorf("scan exposure: %w", err)
 		}
-		size := rawOrderSizeToFloat(c.marketSpecForAsset(assetAddress, subID), rawSize)
+		size := orderAmountToFloat(c.marketSpecForAsset(assetAddress, subID), rawSize)
 		px, err := strconv.ParseFloat(price, 64)
 		if err != nil {
 			return nil, fmt.Errorf("parse exposure price: %w", err)
@@ -574,7 +574,7 @@ order by created_at asc
 			return nil, fmt.Errorf("compute remaining size: %w", err)
 		}
 		sideValue := Side(side)
-		size := rawOrderSizeToFloat(spec, remainingRaw)
+		size := orderAmountToFloat(spec, remainingRaw)
 		if spec.Symbol == "USDCcNGN-SPOT" {
 			sideValue, price, size, err = spotUIFromEngine(sideValue, price, size)
 			if err != nil {
@@ -701,7 +701,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	}
 
 	price, _ := strconv.ParseFloat(resp.Order.LimitPrice, 64)
-	size := rawOrderSizeToFloat(spec, resp.Order.DesiredAmount)
+	size := orderAmountToFloat(spec, resp.Order.DesiredAmount)
 	side := resp.Order.Side
 	if spec.Symbol == "USDCcNGN-SPOT" {
 		side, price, size, err = spotUIFromEngine(resp.Order.Side, price, size)
@@ -825,7 +825,7 @@ where order_id = $1 and owner_address = $2
 		return Order{}, fmt.Errorf("lookup order %s: %w", orderID, err)
 	}
 	price, _ := strconv.ParseFloat(limitPrice, 64)
-	size := rawOrderSizeToFloat(c.marketSpecForAsset(assetAddress, subID), desiredAmount)
+	size := orderAmountToFloat(c.marketSpecForAsset(assetAddress, subID), desiredAmount)
 	sideValue := Side(side)
 	return Order{
 		ID:         id,
@@ -1332,6 +1332,22 @@ func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
 	return size
 }
 
+// orderAmountToFloat converts a resting ORDER's stored desired_amount into a decimal
+// contract size. markets-service stores — and presents unchanged — a future's order
+// amount as an ATOMIC COUNT (an integer number of MinSize steps), so the decimal size is
+// count * MinSize (e.g. "14" -> 0.014 at MinSize 0.001). Spot orders keep the legacy
+// wei-based scaling. NOTE: trade fills use a different (wei) scale and must NOT go through
+// here — they stay on rawOrderSizeToFloat.
+func orderAmountToFloat(spec MarketSpec, raw string) float64 {
+	if usesContractLots(spec) {
+		if n, ok := new(big.Rat).SetString(strings.TrimSpace(raw)); ok {
+			size, _ := new(big.Rat).Mul(n, ratFromFloat(spec.MinSize)).Float64()
+			return size
+		}
+	}
+	return rawOrderSizeToFloat(spec, raw)
+}
+
 func marketSizeToRawOrder(spec MarketSpec, size float64) string {
 	if usesContractLots(spec) {
 		return floatToRaw(size / spec.SizeStep)
@@ -1395,7 +1411,7 @@ func parsePresentedBookLevel(spec MarketSpec, rawPrice, rawAmount string, spot *
 	if err != nil {
 		return BookLevel{}, "", fmt.Errorf("parse book price: %w", err)
 	}
-	return BookLevel{Price: price, Size: rawOrderSizeToFloat(spec, rawAmount)}, fallbackSide, nil
+	return BookLevel{Price: price, Size: orderAmountToFloat(spec, rawAmount)}, fallbackSide, nil
 }
 
 func balanceKeys(spec MarketSpec) (string, string) {

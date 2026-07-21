@@ -44,3 +44,32 @@ func TestFutureOrderAmountsBelowMinSizeErrors(t *testing.T) {
 		t.Fatal("expected error for size below min size step")
 	}
 }
+
+// A future's resting order is stored (and presented) by markets-service as an ATOMIC
+// COUNT of MinSize steps. The read-back must recover the original decimal size, otherwise
+// the reconcile loop mistakes its own resting order for a size_mismatch and churns it.
+func TestOrderAmountToFloatFuturesAtomicCount(t *testing.T) {
+	spec := MarketSpec{Symbol: "USDCcNGN-SEP16-2026", SizeStep: 0.001, MinSize: 0.001}
+	cases := map[string]float64{
+		"14": 0.014, // the size the bot places (0.014524 rounded down)
+		"2":  0.002, // the verified first-fill size
+		"1":  0.001, // one min-size unit
+	}
+	for raw, want := range cases {
+		if got := orderAmountToFloat(spec, raw); got != want {
+			t.Fatalf("orderAmountToFloat(%q) = %v want %v", raw, got, want)
+		}
+	}
+	// Round-trip: what futureOrderAmounts sends as the body normalizes to this atomic count.
+	if got := orderAmountToFloat(spec, "14"); got != 0.014 {
+		t.Fatalf("round-trip read-back = %v want 0.014", got)
+	}
+}
+
+// Spot orders keep the legacy wei scaling and must be untouched by the futures path.
+func TestOrderAmountToFloatSpotUnchanged(t *testing.T) {
+	spec := MarketSpec{Symbol: "USDCcNGN-SPOT", SizeStep: 0.000001, MinSize: 0.000001}
+	if got, want := orderAmountToFloat(spec, "1000000000000000000"), rawOrderSizeToFloat(spec, "1000000000000000000"); got != want {
+		t.Fatalf("spot orderAmountToFloat = %v want %v (legacy)", got, want)
+	}
+}
