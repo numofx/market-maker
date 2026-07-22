@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -443,11 +444,22 @@ func (c *HTTPClient) GetTrades(ctx context.Context, market string) ([]Trade, err
 			return nil, fmt.Errorf("parse trade price: %w", err)
 		}
 		tm, _ := time.Parse(time.RFC3339Nano, item.CreatedAt)
+		side := item.AggressorSide
+		size := rawOrderSizeToFloat(spec, item.Size)
+		if spec.Symbol == "USDCcNGN-SPOT" {
+			// Spot trades are stored engine-side (price in USDC-per-cNGN, size in
+			// cNGN). Convert to UI orientation so a trade-derived reference price is
+			// comparable to quotes (cNGN per USDC).
+			side, price, size, err = spotUIFromEngine(side, price, size)
+			if err != nil {
+				return nil, fmt.Errorf("decode spot trade: %w", err)
+			}
+		}
 		out = append(out, Trade{
 			ID:        item.TradeID,
 			Price:     price,
-			Size:      rawOrderSizeToFloat(spec, item.Size),
-			Side:      item.AggressorSide,
+			Size:      size,
+			Side:      side,
 			CreatedAt: tm,
 		})
 	}
@@ -620,16 +632,21 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		if err != nil {
 			return Order{}, fmt.Errorf("translate spot order: %w", err)
 		}
-		payloadSide = engineSide
-		payloadDesiredAmount = floatToRaw(engineAmount)
-		signedDesiredAmount = payloadDesiredAmount
-		payloadLimitPrice = normalizePrice(enginePrice)
-		payload["order_entry_spec"] = "usdc_cngn_spot_v1"
-		payload["ui_intent"] = map[string]string{
-			"side":  string(req.Side),
-			"price": normalizePrice(req.Price),
-			"size":  normalizePrice(req.Size),
+		// markets-service enforces a whole-cNGN atomic step ("1") on spot
+		// desired_amount and, on the ui_intent path, recomputes ui_size*ui_price as
+		// an exact rational — an arbitrary ui price/size pair almost never multiplies
+		// to a whole number, so that path 400s. Submit the engine-native order
+		// instead (supported when order_entry_spec/ui_intent are omitted): floor the
+		// engine amount to a whole cNGN and send side/limit_price/desired_amount
+		// directly.
+		engineAmount = math.Floor(engineAmount)
+		if engineAmount < 1 {
+			return Order{}, fmt.Errorf("spot order engine amount below 1 cNGN (ui size %v at price %v)", req.Size, req.Price)
 		}
+		payloadSide = engineSide
+		payloadDesiredAmount = strconv.FormatFloat(engineAmount, 'f', -1, 64)
+		signedDesiredAmount = floatToRaw(engineAmount)
+		payloadLimitPrice = normalizePrice(enginePrice)
 	} else {
 		// Cash-margined / deliverable FUTURE: the request BODY carries the human-decimal
 		// contract quantity while the SIGNED action carries the on-chain wei amount. Round
@@ -674,15 +691,9 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	payload["expiry"] = expiry
 	payload["action_json"] = actionJSON
 	payload["signature"] = signature
-	if spec.Symbol == "USDCcNGN-SPOT" {
-		payload["side"] = ""
-		payload["desired_amount"] = ""
-		payload["limit_price"] = ""
-	} else {
-		payload["side"] = payloadSide
-		payload["desired_amount"] = payloadDesiredAmount
-		payload["limit_price"] = payloadLimitPrice
-	}
+	payload["side"] = payloadSide
+	payload["desired_amount"] = payloadDesiredAmount
+	payload["limit_price"] = payloadLimitPrice
 	var resp struct {
 		Order struct {
 			OrderID       string `json:"order_id"`
@@ -1325,6 +1336,14 @@ func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, sign
 }
 
 func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
+	if spec.Symbol == "USDCcNGN-SPOT" {
+		// Spot amounts are stored by markets-service in atomic whole-cNGN units
+		// (amount step "1"), not wei — the raw value IS the engine cNGN amount.
+		if n, ok := new(big.Rat).SetString(strings.TrimSpace(raw)); ok {
+			size, _ := n.Float64()
+			return size
+		}
+	}
 	size := rawToFloat(raw)
 	if usesContractLots(spec) {
 		return size * spec.SizeStep
