@@ -134,18 +134,30 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 
 	basePosition := snapshot.Position(spec.BaseAsset)
 	quotePosition := snapshot.Position(spec.QuoteAsset)
-	baseAvailable := basePosition.Available
-	quoteAvailable := quotePosition.Available
-	reusableBase, reusableQuote := reusableCapacity(spec, snapshot.OpenOrders)
-	baseAvailable += reusableBase
-	quoteAvailable += reusableQuote
 
-	// A cash-margined future is settled/collateralized in the quote (cash) asset: SELLING
-	// opens a SHORT backed by cash margin rather than delivering held base-asset inventory.
-	// Its ask must therefore be gated by cash/quote capacity and the short inventory limit,
-	// mirroring the bid, and must NOT be gated by base-asset availability. Spot still sells
-	// held base inventory, so its ask stays gated by baseAvailable.
+	// A cash-margined future is settled/collateralized in the quote (cash) asset: SELLING opens a
+	// SHORT backed by cash margin rather than delivering held base-asset inventory. Its ask is gated
+	// by cash/quote capacity and the short inventory limit, mirroring the bid, NOT by base-asset
+	// availability. Spot still sells held base inventory (baseAvailable).
 	cashMarginedFuture := isCashMarginedFuture(spec)
+
+	var baseAvailable, quoteAvailable float64
+	if cashMarginedFuture {
+		// The cash asset is the SHARED margin collateral for both sides, and the MM cancel-replaces
+		// its own resting orders every cycle, so the budget is the full cash Total (= Available + the
+		// margin its own resting orders reserve). Do NOT add reusableCapacity: it re-derives capacity
+		// from order NOTIONAL (size*price), but a future order reserves only MARGIN (a fraction of
+		// notional), so adding notional inflates quoteAvailable every cycle and the quote size runs
+		// away without bound. Total is stable; MaxNotionalPerSide/inventory caps bound the per-side size.
+		quoteAvailable = quotePosition.Total
+		baseAvailable = 0
+	} else {
+		baseAvailable = basePosition.Available
+		quoteAvailable = quotePosition.Available
+		reusableBase, reusableQuote := reusableCapacity(spec, snapshot.OpenOrders)
+		baseAvailable += reusableBase
+		quoteAvailable += reusableQuote
+	}
 
 	maxBidSize := quoteAvailable / bidPrice
 	maxAskSize := baseAvailable

@@ -519,6 +519,40 @@ func TestCashMarginedFutureQuotesAskWithoutBaseInventory(t *testing.T) {
 	}
 }
 
+// Regression: a cash-margined future's quote size must be bounded by the cash margin budget
+// (Total/price), NOT the notional of its own resting orders. The old code added reusableCapacity
+// (resting bid size*price) to quoteAvailable, so with the cash "Available" driven to 0 by a large
+// resting order the size ballooned to ~restingNotional/price and grew every cycle (observed live:
+// 0.014 -> 0.126). The fix uses the stable cash Total.
+func TestCashMarginedFutureCapacityDoesNotRunAwayFromRestingOrders(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	cfg := config.Config{OrderSize: 100, HalfSpreadBPS: 20, MaxLongInventory: 1000, MaxShortInventory: -1000}
+	got, err := BuildQuotes(cfg, spec, state.Snapshot{
+		Market:      spec.Symbol,
+		BestBid:     999,
+		BestAsk:     1001,
+		AnchorPrice: 1000,
+		Positions: map[string]state.AssetPosition{
+			"USDC": {Total: 0, Reserved: 0, Available: 0},
+			"cNGN": {Total: 2000, Reserved: 2000, Available: 0}, // cash fully reserved by the resting orders
+		},
+		OpenOrders: []exchange.Order{
+			{Side: exchange.SideBuy, Size: 10, Price: 1000},  // notional 10000, 5x the 2000 cash budget
+			{Side: exchange.SideSell, Size: 10, Price: 1000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildQuotes() error = %v", err)
+	}
+	// Bounded by cash Total/price (~2), NOT the resting-order notional (~10 under the old bug).
+	if got.Bid == nil || got.Bid.Size > 3 {
+		t.Fatalf("bid ran away: %#v (want size ~Total/price=2, not resting notional ~10)", got.Bid)
+	}
+	if got.Ask == nil || got.Ask.Size > 3 {
+		t.Fatalf("ask ran away: %#v (want size ~Total/price=2)", got.Ask)
+	}
+}
+
 func TestCashMarginedFutureAskGatedByShortInventoryLimit(t *testing.T) {
 	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
 	cfg := config.Config{
