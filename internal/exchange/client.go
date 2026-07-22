@@ -646,7 +646,11 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		payloadSide = engineSide
 		payloadDesiredAmount = strconv.FormatFloat(engineAmount, 'f', -1, 64)
 		signedDesiredAmount = floatToRaw(engineAmount)
-		payloadLimitPrice = normalizePrice(enginePrice)
+		// The signed action carries the price as an 18-decimal fixed-point raw value
+		// (floatToRaw). Render the SAME quantized value as the body limit_price so it
+		// aligns to the 1e-18 tick and matches the signature exactly — the float's
+		// shortest decimal form can exceed 18 decimals and get rejected.
+		payloadLimitPrice = rawPriceToDecimalString(floatToRaw(enginePrice))
 	} else {
 		// Cash-margined / deliverable FUTURE: the request BODY carries the human-decimal
 		// contract quantity while the SIGNED action carries the on-chain wei amount. Round
@@ -1396,6 +1400,17 @@ func (c *HTTPClient) marketSpecForAsset(assetAddress, subID string) MarketSpec {
 
 func normalizePrice(price float64) string {
 	return strconv.FormatFloat(price, 'f', -1, 64)
+}
+
+// rawPriceToDecimalString renders an 18-decimal fixed-point raw value (as produced
+// by floatToRaw) back as a plain decimal string, trimming trailing zeros.
+func rawPriceToDecimalString(raw string) string {
+	rat, ok := new(big.Rat).SetString(strings.TrimSpace(raw))
+	if !ok {
+		return raw
+	}
+	rat.Quo(rat, new(big.Rat).SetInt(decimalScale))
+	return normalizeDecimalString(rat.FloatString(assetDecimals))
 }
 
 func normalizeDecimalString(raw string) string {
