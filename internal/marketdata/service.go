@@ -78,16 +78,20 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 		}
 	}
 	if l.spec.Symbol == "USDCcNGN-SPOT" {
-		if !(l.spotExternalBootstrapOnly && snapshot.LocalReferencePrice > 0) {
-			ext := l.spotExternal.Fetch(ctx)
-			snapshot.ExternalAnchorRefreshAttempted = ext.RefreshAttempted
-			snapshot.ExternalAnchorRefreshFailed = ext.RefreshFailed
-			if ext.Present {
-				snapshot.ExternalAnchorPrice = ext.Price
-				snapshot.LastExternalAnchorRefresh = ext.FetchedAt
-			}
+		// Always refresh the external anchor — even when a local reference exists —
+		// so the risk layer's anchor-deviation and stale-anchor guards keep watching
+		// the oracle while the book quotes around its own mid. Reference-price
+		// selection is unchanged: local mid/trade first, external only as bootstrap
+		// (see strategy.ComputeReferencePrice). MM_..._BOOTSTRAP_ONLY now only
+		// controls reference selection semantics, not whether the oracle is polled.
+		ext := l.spotExternal.Fetch(ctx)
+		snapshot.ExternalAnchorRefreshAttempted = ext.RefreshAttempted
+		snapshot.ExternalAnchorRefreshFailed = ext.RefreshFailed
+		if ext.Present {
+			snapshot.ExternalAnchorPrice = ext.Price
+			snapshot.LastExternalAnchorRefresh = ext.FetchedAt
 		}
-		if snapshot.LocalReferencePrice <= 0 && snapshot.ExternalAnchorPrice > 0 {
+		if snapshot.ExternalAnchorPrice > 0 {
 			snapshot.AnchorPrice = snapshot.ExternalAnchorPrice
 			snapshot.AnchorSource = "external"
 			snapshot.LastAnchorRefresh = snapshot.LastExternalAnchorRefresh

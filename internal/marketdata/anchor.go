@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/numofx/market-maker/internal/config"
+	"github.com/numofx/market-maker/internal/exchange"
 )
 
 var cngnOracleABI = mustParseABI(`[
@@ -103,7 +105,89 @@ func (s HTTPAnchorSource) GetAnchorPrice(ctx context.Context, market string) (fl
 	return 0, fmt.Errorf("anchor response missing parseable price")
 }
 
-func NewAnchorSource(cfg config.Config) AnchorSource {
+// OracleCarryAnchorSource anchors a deliverable future to its carry-adjusted fair
+// value: it reads the on-chain cNGN oracle for spot (cNGN per USDC) and applies
+// continuous compounding to the market's expiry — fair = spot * e^(rate * t).
+// For a market without an expiry (spot), t = 0 and the anchor is the oracle spot.
+type OracleCarryAnchorSource struct {
+	fetcher         USDCCNGNSpotExternalAnchor
+	rateAPR         float64
+	expiryUnix      int64
+	maxAge          time.Duration
+	refreshInterval time.Duration
+
+	mu          sync.Mutex
+	lastPrice   float64
+	lastFetched time.Time
+}
+
+func (s *OracleCarryAnchorSource) Name() string { return "oracle_carry" }
+
+func (s *OracleCarryAnchorSource) GetAnchorPrice(ctx context.Context, _ string) (float64, error) {
+	spot, err := s.spotPrice(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return carryFairValue(spot, s.rateAPR, s.expiryUnix, time.Now().UTC()), nil
+}
+
+// spotPrice returns the oracle spot, throttling on-chain reads to refreshInterval
+// so a 2s quote loop does not hammer the RPC endpoint.
+func (s *OracleCarryAnchorSource) spotPrice(ctx context.Context) (float64, error) {
+	s.mu.Lock()
+	if s.lastPrice > 0 && s.refreshInterval > 0 && time.Since(s.lastFetched) < s.refreshInterval {
+		price := s.lastPrice
+		s.mu.Unlock()
+		return price, nil
+	}
+	s.mu.Unlock()
+
+	quote := s.fetcher.Fetch(ctx)
+	if !quote.Present || quote.Price <= 0 {
+		return 0, fmt.Errorf("oracle spot price unavailable")
+	}
+	if s.maxAge > 0 && !quote.FetchedAt.IsZero() && time.Since(quote.FetchedAt) > s.maxAge {
+		return 0, fmt.Errorf("oracle spot price stale: updated %s ago", time.Since(quote.FetchedAt).Round(time.Second))
+	}
+
+	s.mu.Lock()
+	s.lastPrice = quote.Price
+	s.lastFetched = time.Now()
+	s.mu.Unlock()
+	return quote.Price, nil
+}
+
+// carryFairValue computes spot * e^(rate * yearsToExpiry), clamping expired or
+// missing expiries to t = 0 (fair = spot).
+func carryFairValue(spot, rateAPR float64, expiryUnix int64, now time.Time) float64 {
+	if expiryUnix <= 0 {
+		return spot
+	}
+	tYears := time.Unix(expiryUnix, 0).Sub(now).Seconds() / (365 * 24 * 3600)
+	if tYears < 0 {
+		tYears = 0
+	}
+	return spot * math.Exp(rateAPR*tYears)
+}
+
+// newCNGNOracleFetcher builds an on-chain cNGN oracle reader independent of the
+// spot-market external-anchor gating, for use by the generic anchor sources.
+func newCNGNOracleFetcher(rpcURL string, maxAge time.Duration) USDCCNGNSpotExternalAnchor {
+	return &ZeroExUSDCCNGNSpotExternalAnchor{
+		cfg: config.USDCCNGNSpotExternalAnchorConfig{
+			Provider: "cngn-price-oracle",
+			RPCURL:   rpcURL,
+			MaxAge:   maxAge,
+			// Fetch-to-fetch glitch guard; the live quote guard is
+			// MM_MAX_ANCHOR_DEVIATION_BPS at the risk layer.
+			MaxDeviationBPS: 500,
+			Timeout:         5 * time.Second,
+		},
+		client: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func NewAnchorSource(cfg config.Config, spec exchange.MarketSpec) AnchorSource {
 	switch cfg.AnchorSourceType {
 	case "fixed":
 		return FixedAnchorSource{price: cfg.AnchorFixedPrice}
@@ -111,6 +195,14 @@ func NewAnchorSource(cfg config.Config) AnchorSource {
 		return HTTPAnchorSource{
 			baseURL: cfg.AnchorURL,
 			client:  &http.Client{Timeout: 5 * time.Second},
+		}
+	case "oracle_carry":
+		return &OracleCarryAnchorSource{
+			fetcher:         newCNGNOracleFetcher(cfg.RPCURL, cfg.AnchorOracleMaxAge),
+			rateAPR:         cfg.CarryRateAPR,
+			expiryUnix:      spec.ExpiryTimestamp,
+			maxAge:          cfg.AnchorOracleMaxAge,
+			refreshInterval: 15 * time.Second,
 		}
 	default:
 		return NoopAnchorSource{}
@@ -136,12 +228,17 @@ func (NoopUSDCCNGNSpotExternalAnchor) Fetch(context.Context) ExternalAnchorQuote
 }
 
 type ZeroExUSDCCNGNSpotExternalAnchor struct {
-	cfg      config.USDCCNGNSpotExternalAnchorConfig
-	client   *http.Client
-	mu       sync.Mutex
-	last     ExternalAnchorQuote
-	decimals *uint8
+	cfg           config.USDCCNGNSpotExternalAnchorConfig
+	client        *http.Client
+	mu            sync.Mutex
+	last          ExternalAnchorQuote
+	lastFetchWall time.Time
+	decimals      *uint8
 }
+
+// oracleRefreshThrottle bounds how often the on-chain oracle is re-read now that
+// the anchor is polled every quote cycle; cached values are served in between.
+const oracleRefreshThrottle = 15 * time.Second
 
 func NewUSDCCNGNSpotExternalAnchor(cfg config.Config) USDCCNGNSpotExternalAnchor {
 	if !cfg.USDCCNGNSpotExternalAnchor.Enabled || cfg.MarketSymbol != "USDCcNGN-SPOT" {
@@ -154,6 +251,17 @@ func NewUSDCCNGNSpotExternalAnchor(cfg config.Config) USDCCNGNSpotExternalAnchor
 }
 
 func (s *ZeroExUSDCCNGNSpotExternalAnchor) Fetch(ctx context.Context) ExternalAnchorQuote {
+	if s.cfg.Provider == "cngn-price-oracle" {
+		s.mu.Lock()
+		if s.last.Present && time.Since(s.lastFetchWall) < oracleRefreshThrottle {
+			cached := s.last
+			s.mu.Unlock()
+			cached.RefreshAttempted = false
+			cached.RefreshFailed = false
+			return cached
+		}
+		s.mu.Unlock()
+	}
 	quote, err := s.fetchFresh(ctx)
 	if err != nil {
 		s.logFailure(err)
@@ -192,6 +300,7 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) Fetch(ctx context.Context) ExternalAn
 		}
 	}
 	s.last = quote
+	s.lastFetchWall = time.Now()
 	return quote
 }
 

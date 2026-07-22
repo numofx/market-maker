@@ -97,6 +97,9 @@ type MarketSpec struct {
 	SizeStep       float64
 	MinSize        float64
 	OrderEntrySpec string
+	// ExpiryTimestamp is the market's expiry (unix seconds) from /v1/markets;
+	// zero for spot / perpetual markets.
+	ExpiryTimestamp int64
 }
 
 type AssetCodeCheck struct {
@@ -864,6 +867,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		SubID            string `json:"sub_id"`
 		TickSize         string `json:"tick_size"`
 		OrderEntrySpec   string `json:"order_entry_spec"`
+		ExpiryTimestamp  int64  `json:"expiry_timestamp"`
 	}
 	if err := c.get(ctx, "/v1/markets", nil, &resp); err != nil {
 		return err
@@ -871,14 +875,15 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	for _, item := range resp {
 		tickSize, _ := strconv.ParseFloat(item.TickSize, 64)
 		spec := MarketSpec{
-			Symbol:         item.Market,
-			BaseAsset:      item.BaseAssetSymbol,
-			QuoteAsset:     item.QuoteAssetSymbol,
-			AssetAddress:   strings.ToLower(item.AssetAddress),
-			SubID:          defaultString(item.SubID, "0"),
-			TickSize:       tickSize,
-			QuoteAddress:   strings.ToLower(c.quoteAsset.Hex()),
-			OrderEntrySpec: item.OrderEntrySpec,
+			Symbol:          item.Market,
+			BaseAsset:       item.BaseAssetSymbol,
+			QuoteAsset:      item.QuoteAssetSymbol,
+			AssetAddress:    strings.ToLower(item.AssetAddress),
+			SubID:           defaultString(item.SubID, "0"),
+			TickSize:        tickSize,
+			QuoteAddress:    strings.ToLower(c.quoteAsset.Hex()),
+			OrderEntrySpec:  item.OrderEntrySpec,
+			ExpiryTimestamp: item.ExpiryTimestamp,
 		}
 		switch item.Market {
 		case "USDCcNGN-SPOT":

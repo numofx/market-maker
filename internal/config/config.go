@@ -90,6 +90,8 @@ type Config struct {
 	AnchorSourceType             string
 	AnchorURL                    string
 	AnchorFixedPrice             float64
+	CarryRateAPR                 float64
+	AnchorOracleMaxAge           time.Duration
 	KillSwitchFile               string
 	DryRun                       bool
 	LogLevel                     slog.Level
@@ -162,6 +164,8 @@ func Load() (Config, error) {
 		CancelStaleOrderThreshold:    envFloat("MM_CANCEL_STALE_ORDER_THRESHOLD_BPS", defaultCancelStaleThreshold),
 		AdoptSizeTolerance:           envFloat("MM_ADOPT_SIZE_TOLERANCE", defaultAdoptSizeTolerance),
 		AnchorSourceType:             envString("MM_ANCHOR_SOURCE_TYPE", defaultAnchorSourceType),
+		CarryRateAPR:                 envFloat("MM_CARRY_RATE_APR", 0),
+		AnchorOracleMaxAge:           time.Duration(envInt("MM_ANCHOR_ORACLE_MAX_AGE_SECONDS", 14400)) * time.Second,
 		AnchorURL:                    strings.TrimSpace(os.Getenv("MM_ANCHOR_URL")),
 		AnchorFixedPrice:             envFloat("MM_ANCHOR_FIXED_PRICE", 0),
 		KillSwitchFile:               strings.TrimSpace(os.Getenv("MM_KILL_SWITCH_FILE")),
@@ -231,8 +235,16 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.OperatorMode = mode
-	if cfg.AnchorSourceType != "none" && cfg.AnchorSourceType != "fixed" && cfg.AnchorSourceType != "http" {
-		return Config{}, fmt.Errorf("MM_ANCHOR_SOURCE_TYPE must be one of none, fixed, http")
+	if cfg.AnchorSourceType != "none" && cfg.AnchorSourceType != "fixed" && cfg.AnchorSourceType != "http" && cfg.AnchorSourceType != "oracle_carry" {
+		return Config{}, fmt.Errorf("MM_ANCHOR_SOURCE_TYPE must be one of none, fixed, http, oracle_carry")
+	}
+	if cfg.AnchorSourceType == "oracle_carry" {
+		if cfg.CarryRateAPR < 0 {
+			return Config{}, fmt.Errorf("MM_CARRY_RATE_APR must be >= 0 when MM_ANCHOR_SOURCE_TYPE=oracle_carry")
+		}
+		if cfg.AnchorOracleMaxAge <= 0 {
+			return Config{}, fmt.Errorf("MM_ANCHOR_ORACLE_MAX_AGE_SECONDS must be > 0 when MM_ANCHOR_SOURCE_TYPE=oracle_carry")
+		}
 	}
 	if cfg.AnchorSourceType == "fixed" && cfg.AnchorFixedPrice <= 0 {
 		return Config{}, fmt.Errorf("MM_ANCHOR_FIXED_PRICE must be > 0 when MM_ANCHOR_SOURCE_TYPE=fixed")
