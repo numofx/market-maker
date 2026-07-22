@@ -273,7 +273,7 @@ func TestEmptySpotMarketUsesFreshExternalAnchor(t *testing.T) {
 	}
 	reg := metrics.New()
 	bot := NewBot(cfg, client, client.spec, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
-	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg), anchor, true)
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg, client.spec), anchor, true)
 	if err := bot.RunCycle(context.Background()); err != nil {
 		t.Fatalf("RunCycle() error = %v", err)
 	}
@@ -328,7 +328,7 @@ func TestEmptySpotMarketInvalidExternalAnchorHalts(t *testing.T) {
 	}
 	reg := metrics.New()
 	bot := NewBot(cfg, client, client.spec, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
-	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg), anchor, true)
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg, client.spec), anchor, true)
 	if err := bot.RunCycle(context.Background()); err != nil {
 		t.Fatalf("RunCycle() error = %v", err)
 	}
@@ -379,7 +379,7 @@ func TestBootstrapOnlySwitchesFromExternalToLocal(t *testing.T) {
 		},
 	}
 	bot := NewBot(cfg, client, client.spec, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
-	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg), anchor, true)
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg, client.spec), anchor, true)
 	if err := bot.RunCycle(context.Background()); err != nil {
 		t.Fatalf("RunCycle() error = %v", err)
 	}
