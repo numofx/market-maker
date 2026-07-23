@@ -52,6 +52,12 @@ type Result struct {
 	AnchorPrice          float64
 	Bid                  *Quote
 	Ask                  *Quote
+	// Bids/Asks are the full ladder, best (innermost) first. With MM_QUOTE_LEVELS=1
+	// each holds exactly the single Bid/Ask, so the syncer's per-level loop degrades
+	// to the original one-level behavior. Bid/Ask alias the best level for callers
+	// (metrics, logs, cross-quote checks) that only care about the top of book.
+	Bids                 []Quote
+	Asks                 []Quote
 	BidSuppression       *Suppression
 	AskSuppression       *Suppression
 	SkewBPS              float64
@@ -173,11 +179,13 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 
 	if bidSize >= spec.MinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}
+		result.Bids = buildLevels(cfg, spec, exchange.SideBuy, ref, halfSpread, skew, orderSize, maxBidSize, inventory, effectiveMaxLong(cfg), askPrice)
 	} else {
 		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, spec.MinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
 	if askSize >= spec.MinSize && inventory-askSize >= effectiveMaxShort(cfg) {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
+		result.Asks = buildLevels(cfg, spec, exchange.SideSell, ref, halfSpread, skew, orderSize, maxAskSize, inventory, effectiveMaxShort(cfg), bidPrice)
 	} else if cashMarginedFuture {
 		// Short backed by cash: report cash/quote capacity, not base-asset inventory.
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, quoteAvailable, inventory, effectiveMaxShort(cfg)), spec.MinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
@@ -189,13 +197,17 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 	case config.ModePause, config.ModeDryRunHealth:
 		result.Bid = nil
 		result.Ask = nil
+		result.Bids = nil
+		result.Asks = nil
 		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	case config.ModeBidOnly:
 		result.Ask = nil
+		result.Asks = nil
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	case config.ModeAskOnly:
 		result.Bid = nil
+		result.Bids = nil
 		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
 	result.SkewBPS = skewBPS
@@ -322,6 +334,64 @@ func reusableCapacity(spec exchange.MarketSpec, orders []exchange.Order) (base, 
 		}
 	}
 	return base, quote
+}
+
+// buildLevels expands the single best-level quote into a ladder of up to
+// cfg.QuoteLevels price points stepping outward from the reference by
+// LevelSpreadStepBPS each, with per-level size scaled by LevelSizeMult^level.
+// The cumulative size across all levels is bounded by the SAME budget and
+// inventory limit the single-level path uses (totalBudget / invLimit), so
+// depth grows without increasing net exposure. With QuoteLevels==1 the result
+// is exactly [{best price, best size}] — identical to the pre-ladder behavior.
+func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side, ref, halfSpread, skew, orderSize, totalBudget, inventory, invLimit, oppositePrice float64) []Quote {
+	levels := cfg.QuoteLevels
+	if levels < 1 {
+		levels = 1
+	}
+	stepFrac := cfg.LevelSpreadStepBPS / 10000.0
+	sizeMult := cfg.LevelSizeMult
+	if sizeMult <= 0 {
+		sizeMult = 1
+	}
+
+	// Remaining size budget (capacity/notional cap) and inventory headroom, both
+	// shared across the whole side's ladder.
+	remainingBudget := totalBudget
+	var remainingInv float64
+	if side == exchange.SideBuy {
+		remainingInv = invLimit - inventory // max long headroom
+	} else {
+		remainingInv = inventory - invLimit // max short headroom (invLimit is <= 0)
+	}
+
+	quotes := make([]Quote, 0, levels)
+	levelSize := orderSize
+	for k := 0; k < levels; k++ {
+		if remainingBudget < spec.MinSize || remainingInv < spec.MinSize {
+			break
+		}
+		var price float64
+		if side == exchange.SideBuy {
+			price = roundDown(ref*(1-halfSpread-skew-float64(k)*stepFrac), spec.TickSize)
+			if price <= 0 || (oppositePrice > 0 && price >= oppositePrice) {
+				break
+			}
+		} else {
+			price = roundUp(ref*(1+halfSpread-skew+float64(k)*stepFrac), spec.TickSize)
+			if price <= 0 || (oppositePrice > 0 && price <= oppositePrice) {
+				break
+			}
+		}
+		size := roundDown(minFloat(levelSize, minFloat(remainingBudget, remainingInv)), spec.SizeStep)
+		if size < spec.MinSize {
+			break
+		}
+		quotes = append(quotes, Quote{Side: side, Price: price, Size: size})
+		remainingBudget -= size
+		remainingInv -= size
+		levelSize *= sizeMult
+	}
+	return quotes
 }
 
 func effectiveMaxLong(cfg config.Config) float64 {

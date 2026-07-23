@@ -194,9 +194,9 @@ func TestSync(t *testing.T) {
 			client.openOrders = tt.openOrders
 			client.placed = nil
 			client.cancelled = nil
-			ids := map[exchange.Side]Identity{
-				exchange.SideBuy:  {OrderID: "bid", Nonce: "10"},
-				exchange.SideSell: {OrderID: "ask", Nonce: "11"},
+			ids := map[exchange.Side][]Identity{
+				exchange.SideBuy:  {{OrderID: "bid", Nonce: "10"}},
+				exchange.SideSell: {{OrderID: "ask", Nonce: "11"}},
 			}
 			_, err := syncer.Sync(context.Background(), state.Snapshot{Market: "USDCcNGN-SPOT", OpenOrders: tt.openOrders}, tt.quotes, ids)
 			if err != nil {
@@ -228,8 +228,8 @@ func TestSyncCancelRateLimit(t *testing.T) {
 		},
 	}, strategy.Result{
 		Bid: &strategy.Quote{Side: exchange.SideBuy, Price: 101, Size: 1},
-	}, map[exchange.Side]Identity{
-		exchange.SideBuy: {OrderID: "bid", Nonce: "10"},
+	}, map[exchange.Side][]Identity{
+		exchange.SideBuy: {{OrderID: "bid", Nonce: "10"}},
 	})
 	if err == nil {
 		t.Fatal("expected cancel rate limit error")
@@ -257,8 +257,8 @@ func TestCancelMetricsByCategory(t *testing.T) {
 		OpenOrders: client.openOrders,
 	}, strategy.Result{
 		Bid: &strategy.Quote{Side: exchange.SideBuy, Price: 101, Size: 1},
-	}, map[exchange.Side]Identity{
-		exchange.SideBuy: {OrderID: "bid", Nonce: "10"},
+	}, map[exchange.Side][]Identity{
+		exchange.SideBuy: {{OrderID: "bid", Nonce: "10"}},
 	})
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
@@ -294,8 +294,8 @@ func TestSyncSkipsProtectedOrderCancels(t *testing.T) {
 		},
 	}, strategy.Result{
 		Bid: &strategy.Quote{Side: exchange.SideBuy, Price: 101, Size: 1},
-	}, map[exchange.Side]Identity{
-		exchange.SideBuy: {OrderID: "bid", Nonce: "10"},
+	}, map[exchange.Side][]Identity{
+		exchange.SideBuy: {{OrderID: "bid", Nonce: "10"}},
 	})
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)

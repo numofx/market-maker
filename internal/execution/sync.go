@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -73,78 +74,131 @@ func (s *Syncer) CancelAll(ctx context.Context, market string, category string) 
 	return nil
 }
 
-func (s *Syncer) Sync(ctx context.Context, snapshot state.Snapshot, quotes strategy.Result, identities map[exchange.Side]Identity) (SyncResult, error) {
-	var (
-		existingBid *exchange.Order
-		existingAsk *exchange.Order
-		result      = SyncResult{PlacedOrderIDs: make(map[exchange.Side]string)}
-	)
+func (s *Syncer) Sync(ctx context.Context, snapshot state.Snapshot, quotes strategy.Result, identities map[exchange.Side][]Identity) (SyncResult, error) {
+	result := SyncResult{PlacedOrderIDs: make(map[exchange.Side]string)}
 
-	for i := range snapshot.OpenOrders {
-		order := snapshot.OpenOrders[i]
-		switch order.Side {
-		case exchange.SideBuy:
-			if existingBid == nil {
-				existingBid = &order
-				continue
-			}
-		case exchange.SideSell:
-			if existingAsk == nil {
-				existingAsk = &order
-				continue
-			}
-		}
-		if err := s.cancel(ctx, order.ID, "duplicate_side", false, ""); err != nil {
-			return result, err
-		}
-		result.Changed = true
+	// A ladder is the source of truth; fall back to the single Bid/Ask when only
+	// the best level was set (older callers / one-level results).
+	bidTargets := quotes.Bids
+	if len(bidTargets) == 0 && quotes.Bid != nil {
+		bidTargets = []strategy.Quote{*quotes.Bid}
+	}
+	askTargets := quotes.Asks
+	if len(askTargets) == 0 && quotes.Ask != nil {
+		askTargets = []strategy.Quote{*quotes.Ask}
 	}
 
-	targets := []struct {
-		side     exchange.Side
-		current  **exchange.Order
-		target   *strategy.Quote
-		opposite *strategy.Quote
-	}{
-		{side: exchange.SideBuy, current: &existingBid, target: quotes.Bid, opposite: quotes.Ask},
-		{side: exchange.SideSell, current: &existingAsk, target: quotes.Ask, opposite: quotes.Bid},
+	// Group resting orders by side, best price first (bids descending, asks
+	// ascending), so they pair against the target ladder by price rank.
+	existingBids, existingAsks := groupOrdersBySide(snapshot.OpenOrders)
+
+	// The cross-quote guard compares each level against the BEST opposite quote
+	// (top of book), which is the only one it could realistically cross.
+	bestBid := firstQuote(bidTargets)
+	bestAsk := firstQuote(askTargets)
+
+	if err := s.reconcileSide(ctx, snapshot, existingBids, bidTargets, bestAsk, identities[exchange.SideBuy], &result); err != nil {
+		return result, err
+	}
+	if err := s.reconcileSide(ctx, snapshot, existingAsks, askTargets, bestBid, identities[exchange.SideSell], &result); err != nil {
+		return result, err
 	}
 
-	for _, item := range targets {
-		if *item.current != nil {
-			decision := evaluateCancel(*item.current, item.target, item.opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC())
-			switch {
-			case decision.Suppress:
-				s.logger.Info("replace suppressed", "order_id", (*item.current).ID, "side", (*item.current).Side, "reason", decision.SuppressReason)
-				s.metrics.IncSuppressedReplaces()
-			case decision.Cancel:
-				if decision.EnforceRateLimit && !s.canUseCancelSlot() {
-					return result, &CancelRateLimitError{Limit: s.cfg.MaxCancelsPerMinute}
-				}
-				if err := s.cancel(ctx, (*item.current).ID, decision.Reason, decision.EnforceRateLimit, cancelCategoryReplaceDriven); err != nil {
-					return result, err
-				}
-				result.Changed = true
-				*item.current = nil
-			}
-		}
-		if *item.current == nil && item.target != nil {
-			id := identities[item.side]
-			if err := s.place(ctx, snapshot.Market, *item.target, id); err != nil {
-				return result, err
-			}
-			result.Changed = true
-			result.PlacedOrderIDs[item.side] = id.OrderID
-		}
-	}
-
-	s.metrics.SetOpenBidPresent(quotes.Bid != nil || existingBid != nil)
-	s.metrics.SetOpenAskPresent(quotes.Ask != nil || existingAsk != nil)
+	s.metrics.SetOpenBidPresent(len(bidTargets) > 0 || len(existingBids) > 0)
+	s.metrics.SetOpenAskPresent(len(askTargets) > 0 || len(existingAsks) > 0)
 	s.metrics.SetCancelsPerMinute(s.cancelsPerMinute())
 	if result.Changed {
 		s.metrics.IncQuoteRefresh()
 	}
 	return result, nil
+}
+
+// reconcileSide pairs the resting orders of one side (best-first) against the
+// target ladder (best-first) by rank: slot k's resting order is replaced/kept
+// against target level k, resting orders beyond the ladder depth are cancelled,
+// and target levels beyond the resting depth are placed. With one target and one
+// resting order this is exactly the original single-level reconcile.
+func (s *Syncer) reconcileSide(
+	ctx context.Context,
+	snapshot state.Snapshot,
+	existing []exchange.Order,
+	targets []strategy.Quote,
+	opposite *strategy.Quote,
+	ids []Identity,
+	result *SyncResult,
+) error {
+	slots := len(existing)
+	if len(targets) > slots {
+		slots = len(targets)
+	}
+	for i := 0; i < slots; i++ {
+		var current *exchange.Order
+		if i < len(existing) {
+			current = &existing[i]
+		}
+		var target *strategy.Quote
+		if i < len(targets) {
+			target = &targets[i]
+		}
+
+		if current != nil {
+			decision := evaluateCancel(current, target, opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC())
+			switch {
+			case decision.Suppress:
+				s.logger.Info("replace suppressed", "order_id", current.ID, "side", current.Side, "reason", decision.SuppressReason)
+				s.metrics.IncSuppressedReplaces()
+			case decision.Cancel:
+				if decision.EnforceRateLimit && !s.canUseCancelSlot() {
+					return &CancelRateLimitError{Limit: s.cfg.MaxCancelsPerMinute}
+				}
+				if err := s.cancel(ctx, current.ID, decision.Reason, decision.EnforceRateLimit, cancelCategoryReplaceDriven); err != nil {
+					return err
+				}
+				result.Changed = true
+				current = nil
+			}
+		}
+		if current == nil && target != nil {
+			if i >= len(ids) {
+				// No identity allocated for this depth; skip rather than reuse a nonce.
+				s.logger.Warn("no identity for quote level", "side", target.Side, "level", i)
+				continue
+			}
+			id := ids[i]
+			if err := s.place(ctx, snapshot.Market, *target, id); err != nil {
+				return err
+			}
+			result.Changed = true
+			if _, ok := result.PlacedOrderIDs[target.Side]; !ok {
+				result.PlacedOrderIDs[target.Side] = id.OrderID
+			}
+		}
+	}
+	return nil
+}
+
+// groupOrdersBySide splits resting orders into bids (price descending) and asks
+// (price ascending) so each side's best-priced order is first.
+func groupOrdersBySide(orders []exchange.Order) ([]exchange.Order, []exchange.Order) {
+	var bids, asks []exchange.Order
+	for _, order := range orders {
+		switch order.Side {
+		case exchange.SideBuy:
+			bids = append(bids, order)
+		case exchange.SideSell:
+			asks = append(asks, order)
+		}
+	}
+	sort.SliceStable(bids, func(i, j int) bool { return bids[i].Price > bids[j].Price })
+	sort.SliceStable(asks, func(i, j int) bool { return asks[i].Price < asks[j].Price })
+	return bids, asks
+}
+
+func firstQuote(quotes []strategy.Quote) *strategy.Quote {
+	if len(quotes) == 0 {
+		return nil
+	}
+	return &quotes[0]
 }
 
 type cancelDecision struct {

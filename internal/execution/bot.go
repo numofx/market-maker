@@ -254,7 +254,11 @@ func (b *Bot) RunCycle(ctx context.Context) error {
 	return nil
 }
 
-func (b *Bot) allocateIdentities() (map[exchange.Side]Identity, error) {
+func (b *Bot) allocateIdentities() (map[exchange.Side][]Identity, error) {
+	levels := b.cfg.QuoteLevels
+	if levels < 1 {
+		levels = 1
+	}
 	base := b.persisted.NextNonceBase
 	nowBase := uint64(time.Now().UnixMicro()) * 2
 	if nowBase > base {
@@ -263,11 +267,21 @@ func (b *Bot) allocateIdentities() (map[exchange.Side]Identity, error) {
 	if base%2 != 0 {
 		base++
 	}
-	ids := map[exchange.Side]Identity{
-		exchange.SideBuy:  buildIdentity(b.spec.Symbol, exchange.SideBuy, base),
-		exchange.SideSell: buildIdentity(b.spec.Symbol, exchange.SideSell, base+1),
+	// Interleave nonces per level: buy levels get even offsets, sell levels odd,
+	// so every order across both sides and all levels has a unique nonce.
+	bids := make([]Identity, levels)
+	asks := make([]Identity, levels)
+	for k := 0; k < levels; k++ {
+		bidNonce := base + uint64(2*k)
+		askNonce := base + uint64(2*k) + 1
+		bids[k] = buildIdentity(b.spec.Symbol, exchange.SideBuy, bidNonce)
+		asks[k] = buildIdentity(b.spec.Symbol, exchange.SideSell, askNonce)
 	}
-	b.persisted.NextNonceBase = base + 2
+	ids := map[exchange.Side][]Identity{
+		exchange.SideBuy:  bids,
+		exchange.SideSell: asks,
+	}
+	b.persisted.NextNonceBase = base + uint64(2*levels)
 	b.persisted.LastNonceBySide[string(exchange.SideBuy)] = base
 	b.persisted.LastNonceBySide[string(exchange.SideSell)] = base + 1
 	if b.store != nil {
