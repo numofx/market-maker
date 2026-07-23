@@ -92,6 +92,9 @@ type Config struct {
 	AnchorFixedPrice             float64
 	CarryRateAPR                 float64
 	AnchorOracleMaxAge           time.Duration
+	QuoteLevels                  int
+	LevelSpreadStepBPS           float64
+	LevelSizeMult                float64
 	KillSwitchFile               string
 	DryRun                       bool
 	LogLevel                     slog.Level
@@ -166,6 +169,9 @@ func Load() (Config, error) {
 		AnchorSourceType:             envString("MM_ANCHOR_SOURCE_TYPE", defaultAnchorSourceType),
 		CarryRateAPR:                 envFloat("MM_CARRY_RATE_APR", 0),
 		AnchorOracleMaxAge:           time.Duration(envInt("MM_ANCHOR_ORACLE_MAX_AGE_SECONDS", 14400)) * time.Second,
+		QuoteLevels:                  envInt("MM_QUOTE_LEVELS", 1),
+		LevelSpreadStepBPS:           envFloat("MM_LEVEL_SPREAD_STEP_BPS", 0),
+		LevelSizeMult:                envFloat("MM_LEVEL_SIZE_MULT", 1),
 		AnchorURL:                    strings.TrimSpace(os.Getenv("MM_ANCHOR_URL")),
 		AnchorFixedPrice:             envFloat("MM_ANCHOR_FIXED_PRICE", 0),
 		KillSwitchFile:               strings.TrimSpace(os.Getenv("MM_KILL_SWITCH_FILE")),
@@ -245,6 +251,18 @@ func Load() (Config, error) {
 		if cfg.AnchorOracleMaxAge <= 0 {
 			return Config{}, fmt.Errorf("MM_ANCHOR_ORACLE_MAX_AGE_SECONDS must be > 0 when MM_ANCHOR_SOURCE_TYPE=oracle_carry")
 		}
+	}
+	if cfg.QuoteLevels < 1 {
+		return Config{}, fmt.Errorf("MM_QUOTE_LEVELS must be >= 1")
+	}
+	if cfg.LevelSpreadStepBPS < 0 {
+		return Config{}, fmt.Errorf("MM_LEVEL_SPREAD_STEP_BPS must be >= 0")
+	}
+	if cfg.LevelSizeMult <= 0 {
+		return Config{}, fmt.Errorf("MM_LEVEL_SIZE_MULT must be > 0")
+	}
+	if cfg.QuoteLevels > 1 && cfg.LevelSpreadStepBPS <= 0 {
+		return Config{}, fmt.Errorf("MM_LEVEL_SPREAD_STEP_BPS must be > 0 when MM_QUOTE_LEVELS > 1 (levels would overlap at one price)")
 	}
 	if cfg.AnchorSourceType == "fixed" && cfg.AnchorFixedPrice <= 0 {
 		return Config{}, fmt.Errorf("MM_ANCHOR_FIXED_PRICE must be > 0 when MM_ANCHOR_SOURCE_TYPE=fixed")
