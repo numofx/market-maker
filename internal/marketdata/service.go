@@ -115,8 +115,8 @@ func localReference(snapshot state.Snapshot) (float64, string) {
 	if snapshot.BestBid > 0 && snapshot.BestAsk > 0 {
 		return (snapshot.BestBid + snapshot.BestAsk) / 2, "book"
 	}
-	if len(snapshot.RecentTrades) > 0 && snapshot.RecentTrades[0].Price > 0 {
-		return snapshot.RecentTrades[0].Price, "trade"
+	if price, ok := state.FreshTradePrice(snapshot); ok {
+		return price, "trade"
 	}
 	return 0, "none"
 }

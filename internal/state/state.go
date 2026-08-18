@@ -10,6 +10,30 @@ import (
 	"github.com/numofx/market-maker/internal/exchange"
 )
 
+// ReferenceTradeMaxAge bounds how old the most recent trade may be to still stand in for a live
+// reference price. Older than this, an empty book falls through to the oracle rather than anchoring
+// the mid on a stale print — a days-old trade must not read as the current price, which would trip
+// the anchor-deviation guard against a rate that has since moved and halt the bot.
+const ReferenceTradeMaxAge = 5 * time.Minute
+
+// FreshTradePrice returns the most recent trade's price when it is recent enough (per
+// ReferenceTradeMaxAge, measured against the snapshot's own market-data timestamp) to serve as a
+// local reference. It returns ok=false for an empty or stale trade, or when the snapshot has no
+// market-data timestamp to age against.
+func FreshTradePrice(snapshot Snapshot) (float64, bool) {
+	if len(snapshot.RecentTrades) == 0 {
+		return 0, false
+	}
+	trade := snapshot.RecentTrades[0]
+	if trade.Price <= 0 || snapshot.LastMarketDataRefresh.IsZero() {
+		return 0, false
+	}
+	if snapshot.LastMarketDataRefresh.Sub(trade.CreatedAt) > ReferenceTradeMaxAge {
+		return 0, false
+	}
+	return trade.Price, true
+}
+
 type AssetPosition struct {
 	Total     float64
 	Reserved  float64
