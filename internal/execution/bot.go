@@ -476,6 +476,19 @@ func (b *Bot) handleLoadError(ctx context.Context, err error) error {
 }
 
 func (b *Bot) haltForReason(ctx context.Context, reason string, cancelOrders bool, cancelCategory string) error {
+	if reason != b.persisted.LastHaltReason || !b.currentHalted {
+		// Log on the transition into a halt (or when the reason changes), so an operator can see
+		// why the bot stopped quoting instead of only that it did. The prices show which input was
+		// missing — a spot bot with ref==0 and ext_anchor==0 is halted on "reference price
+		// unavailable" because neither the book nor the oracle yielded a price.
+		b.logger.Warn(
+			"halted",
+			"reason", reason,
+			"reference_price", b.snapshot.ReferencePrice,
+			"local_ref", b.snapshot.LocalReferencePrice,
+			"ext_anchor", b.snapshot.ExternalAnchorPrice,
+		)
+	}
 	b.persisted.LastHaltReason = reason
 	b.haltCount++
 	b.currentHalted = true
@@ -643,7 +656,7 @@ func (b *Bot) Summary() RuntimeSummary {
 func (b *Bot) SoakStatusLine() string {
 	s := b.Summary()
 	return fmt.Sprintf(
-		"state=%s halted=%t inv=%0.6f bids=%d asks=%d fills_buy=%d fills_sell=%d partial_fills=%d cancels=%d md_age=%s bal_age=%s anchor_age=%s",
+		"state=%s halted=%t inv=%0.6f bids=%d asks=%d fills_buy=%d fills_sell=%d partial_fills=%d cancels=%d md_age=%s bal_age=%s anchor_age=%s halt_reason=%q ref=%0.6f local_ref=%0.6f ext_anchor=%0.6f best_bid=%0.6f best_ask=%0.6f",
 		s.OperatorMode,
 		s.Halted,
 		s.NetInventory,
@@ -656,6 +669,12 @@ func (b *Bot) SoakStatusLine() string {
 		s.ExchangeMarketDataAge.Truncate(time.Second),
 		s.BalanceAge.Truncate(time.Second),
 		s.AnchorAge.Truncate(time.Second),
+		s.LastHaltReason,
+		b.snapshot.ReferencePrice,
+		b.snapshot.LocalReferencePrice,
+		b.snapshot.ExternalAnchorPrice,
+		b.snapshot.BestBid,
+		b.snapshot.BestAsk,
 	)
 }
 
