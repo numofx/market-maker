@@ -752,11 +752,19 @@ func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string, reason str
 	if err != nil {
 		return err
 	}
+	expiry := strconv.FormatInt(time.Now().UTC().Add(cancelSignatureLifetime).Unix(), 10)
+	signature, err := c.signCancel(c.cfg.OwnerAddress, c.cfg.SignerAddress, orders.Nonce, expiry)
+	if err != nil {
+		return fmt.Errorf("sign cancel for %s: %w", orderID, err)
+	}
 	body := map[string]string{
-		"owner_address": c.cfg.OwnerAddress,
-		"nonce":         orders.Nonce,
-		"reason":        machineCancelReason(c.cfg.ServiceName, reason),
-		"service":       normalizeCancelToken(c.cfg.ServiceName),
+		"owner_address":  c.cfg.OwnerAddress,
+		"signer_address": c.cfg.SignerAddress,
+		"nonce":          orders.Nonce,
+		"expiry":         expiry,
+		"signature":      signature,
+		"reason":         machineCancelReason(c.cfg.ServiceName, reason),
+		"service":        normalizeCancelToken(c.cfg.ServiceName),
 	}
 	return c.post(ctx, "/v1/orders/cancel", body, nil)
 }
@@ -1110,6 +1118,56 @@ func (c *HTTPClient) signAction(action map[string]string) (string, error) {
 	sig, err := crypto.Sign(hash, c.signerKey)
 	if err != nil {
 		return "", fmt.Errorf("sign typed data: %w", err)
+	}
+	sig[64] += 27
+	return hexutil.Encode(sig), nil
+}
+
+// cancelSignatureLifetime bounds how long a signed cancel can be replayed. It only has to cover the
+// request round trip and any clock skew against markets-service, so it is kept short.
+const cancelSignatureLifetime = 2 * time.Minute
+
+// signCancel signs the Cancel(owner,signer,nonce,expiry) authorization markets-service verifies
+// before removing a resting order. It mirrors signAction over the same Matching domain; the server
+// requires signer == owner for cancels (there is no off-chain session-key registry), which holds
+// here because the bot signs its own orders with its owner key.
+func (c *HTTPClient) signCancel(owner, signer, nonce, expiry string) (string, error) {
+	td := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": {
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"Cancel": {
+				{Name: "owner", Type: "address"},
+				{Name: "signer", Type: "address"},
+				{Name: "nonce", Type: "uint256"},
+				{Name: "expiry", Type: "uint256"},
+			},
+		},
+		PrimaryType: "Cancel",
+		Domain: apitypes.TypedDataDomain{
+			Name:              "Matching",
+			Version:           "1.0",
+			ChainId:           (*gethmath.HexOrDecimal256)(big.NewInt(c.cfg.ChainID)),
+			VerifyingContract: c.matching.Hex(),
+		},
+		Message: apitypes.TypedDataMessage{
+			"owner":  owner,
+			"signer": signer,
+			"nonce":  nonce,
+			"expiry": expiry,
+		},
+	}
+	hash, _, err := apitypes.TypedDataAndHash(td)
+	if err != nil {
+		return "", fmt.Errorf("hash cancel typed data: %w", err)
+	}
+	sig, err := crypto.Sign(hash, c.signerKey)
+	if err != nil {
+		return "", fmt.Errorf("sign cancel typed data: %w", err)
 	}
 	sig[64] += 27
 	return hexutil.Encode(sig), nil
