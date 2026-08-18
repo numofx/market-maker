@@ -56,11 +56,11 @@ type Result struct {
 	// each holds exactly the single Bid/Ask, so the syncer's per-level loop degrades
 	// to the original one-level behavior. Bid/Ask alias the best level for callers
 	// (metrics, logs, cross-quote checks) that only care about the top of book.
-	Bids                 []Quote
-	Asks                 []Quote
-	BidSuppression       *Suppression
-	AskSuppression       *Suppression
-	SkewBPS              float64
+	Bids           []Quote
+	Asks           []Quote
+	BidSuppression *Suppression
+	AskSuppression *Suppression
+	SkewBPS        float64
 }
 
 func ComputeReferencePrice(snapshot state.Snapshot) (float64, string) {
@@ -99,8 +99,8 @@ func ComputeLocalReference(snapshot state.Snapshot) (float64, string) {
 	if snapshot.BestBid > 0 && snapshot.BestAsk > 0 {
 		return (snapshot.BestBid + snapshot.BestAsk) / 2, "book"
 	}
-	if len(snapshot.RecentTrades) > 0 {
-		return snapshot.RecentTrades[0].Price, "trade"
+	if price, ok := state.FreshTradePrice(snapshot); ok {
+		return price, "trade"
 	}
 	return 0, "none"
 }

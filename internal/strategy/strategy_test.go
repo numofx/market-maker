@@ -3,11 +3,16 @@ package strategy
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/numofx/market-maker/internal/config"
 	"github.com/numofx/market-maker/internal/exchange"
 	"github.com/numofx/market-maker/internal/state"
 )
+
+// freshTradeAt is a fixed market-data timestamp; a trade stamped at the same instant is well within
+// state.ReferenceTradeMaxAge, so it counts as a live local reference.
+var freshTradeAt = time.Unix(1_700_000_000, 0).UTC()
 
 func TestBuildQuotes(t *testing.T) {
 	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
@@ -44,8 +49,9 @@ func TestBuildQuotes(t *testing.T) {
 		{
 			name: "fallback to last trade",
 			snapshot: state.Snapshot{
-				RecentTrades:     []exchange.Trade{{Price: 2000}},
-				InventoryByAsset: map[string]float64{"USDC": 0},
+				LastMarketDataRefresh: freshTradeAt,
+				RecentTrades:          []exchange.Trade{{Price: 2000, CreatedAt: freshTradeAt}},
+				InventoryByAsset:      map[string]float64{"USDC": 0},
 				Positions: map[string]state.AssetPosition{
 					"USDC": {Available: 100},
 					"cNGN": {Available: 100000},
@@ -386,10 +392,11 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 		{
 			name: "trade beats external",
 			snapshot: state.Snapshot{
-				Market:               "USDCcNGN-SPOT",
-				RecentTrades:         []exchange.Trade{{Price: 1550}},
-				ExternalAnchorPrice:  1700,
-				LocalReferenceSource: "trade",
+				Market:                "USDCcNGN-SPOT",
+				LastMarketDataRefresh: freshTradeAt,
+				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt}},
+				ExternalAnchorPrice:   1700,
+				LocalReferenceSource:  "trade",
 				Positions: map[string]state.AssetPosition{
 					"USDC": {Available: 100},
 					"cNGN": {Available: 100000},
@@ -397,6 +404,23 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 			},
 			wantRef:    1550,
 			wantSource: "trade",
+		},
+		{
+			// The fix: a trade older than ReferenceTradeMaxAge is not a live reference, so an empty
+			// book falls through to the external oracle instead of anchoring on a stale print.
+			name: "stale trade falls through to external",
+			snapshot: state.Snapshot{
+				Market:                "USDCcNGN-SPOT",
+				LastMarketDataRefresh: freshTradeAt,
+				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
+				ExternalAnchorPrice:   1700,
+				Positions: map[string]state.AssetPosition{
+					"USDC": {Available: 100},
+					"cNGN": {Available: 100000},
+				},
+			},
+			wantRef:    1700,
+			wantSource: "external",
 		},
 	}
 
@@ -537,7 +561,7 @@ func TestCashMarginedFutureCapacityDoesNotRunAwayFromRestingOrders(t *testing.T)
 			"cNGN": {Total: 2000, Reserved: 2000, Available: 0}, // cash fully reserved by the resting orders
 		},
 		OpenOrders: []exchange.Order{
-			{Side: exchange.SideBuy, Size: 10, Price: 1000},  // notional 10000, 5x the 2000 cash budget
+			{Side: exchange.SideBuy, Size: 10, Price: 1000}, // notional 10000, 5x the 2000 cash budget
 			{Side: exchange.SideSell, Size: 10, Price: 1000},
 		},
 	})
@@ -562,8 +586,8 @@ func TestCashMarginedFutureAskGatedByShortInventoryLimit(t *testing.T) {
 		MaxShortInventory: -5, // already near the short cap
 	}
 	got, err := BuildQuotes(cfg, spec, state.Snapshot{
-		Market:      spec.Symbol,
-		AnchorPrice: 1500,
+		Market:           spec.Symbol,
+		AnchorPrice:      1500,
 		InventoryByAsset: map[string]float64{"USDC": 0},
 		Positions: map[string]state.AssetPosition{
 			"USDC": {Available: 0},
