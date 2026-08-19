@@ -120,6 +120,13 @@ func (b *Bot) Initialize(ctx context.Context) error {
 	b.applyDerivedState(&snapshot, quotes)
 	b.logReferenceSourceTransition(b.snapshot, snapshot)
 	b.updateReadiness(snapshot, quotes)
+	// Honor pause on startup, not only in RunCycle: a restarting paused bot must cancel and idle,
+	// never place a fresh ladder. Without this, a crash-looping paused service re-quotes on every
+	// boot — pause silently fails as an incident control exactly when it is relied on.
+	if b.cfg.OperatorMode == config.ModePause {
+		b.snapshot = snapshot
+		return b.haltForReason(ctx, "operator pause active", true, "")
+	}
 	if b.cfg.OperatorMode == config.ModeDryRunHealth {
 		b.setHealthyState(snapshot, "")
 		b.recordInventory(snapshot)

@@ -435,6 +435,45 @@ func TestPauseModeCancelsAndDoesNotPlace(t *testing.T) {
 	}
 }
 
+// Pause must also be honored on startup (Initialize), not only in RunCycle — otherwise a restarting
+// paused bot places a fresh ladder from nothing on every boot before the first cycle, so pause
+// silently fails as a kill. With no pre-existing orders, Initialize WOULD reconcile-and-place; under
+// pause it must place nothing. (This is the real incident: a crash-looping paused futures bot
+// re-quoted on each restart.)
+func TestPauseModeInitializeDoesNotPlaceFromEmpty(t *testing.T) {
+	client := &integrationClient{
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		balances: []exchange.Balance{
+			{Asset: "USDC", Total: 100, Available: 100},
+			{Asset: "cNGN", Total: 100000, Available: 100000},
+		},
+		// No pre-existing orders: without the pause fix, ReconcileStartup places a fresh ladder.
+	}
+	cfg := config.Config{
+		MarketSymbol:      "USDCcNGN-SPOT",
+		StateFile:         filepath.Join(t.TempDir(), "state.json"),
+		OrderSize:         10,
+		HalfSpreadBPS:     10,
+		MaxLongInventory:  100,
+		MaxShortInventory: -100,
+		OperatorMode:      config.ModePause,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bot := NewBot(cfg, client, client.spec, metrics.New(), logger, state.NewStore(cfg.StateFile))
+	if err := bot.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	// Under pause, Initialize must take the halt path (cancel + idle), not the reconcile path that
+	// places a fresh ladder. currentHalted==true iff it halted; a reconciling startup sets it false.
+	if !bot.Summary().Halted {
+		t.Fatal("paused startup did not halt — pause not honored on startup, would place a ladder")
+	}
+	if len(client.placed) != 0 {
+		t.Fatalf("paused startup placed %d orders, want 0", len(client.placed))
+	}
+}
+
 type failingLoadClient struct {
 	integrationClient
 	bookErr    error
