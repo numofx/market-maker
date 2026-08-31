@@ -1,0 +1,6 @@
+.git
+.github
+out
+mm-bot
+*.log
+docs
