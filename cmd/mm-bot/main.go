@@ -18,6 +18,10 @@ import (
 )
 
 func main() {
+	if isHealthcheckArg(os.Args) {
+		os.Exit(runHealthcheck())
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load config", "error", err)
