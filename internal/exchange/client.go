@@ -97,6 +97,14 @@ type MarketSpec struct {
 	SizeStep       float64
 	MinSize        float64
 	OrderEntrySpec string
+	// TakerFeeBps is the venue's taker fee for this market, in basis points of the quote
+	// notional, exactly as /v1/markets reports it. It is never configured here: the matcher
+	// charges what markets-service's instrument registry says, so a copy in this repo would be a
+	// second source of truth that goes stale the first time the venue's changes.
+	//
+	// It exists so the bot can sign a worstFee that covers the charge. Zero means the market
+	// reported no schedule, and the bot falls back to MM_WORST_FEE.
+	TakerFeeBps int
 	// ExpiryTimestamp is the market's expiry (unix seconds) from /v1/markets;
 	// zero for spot / perpetual markets.
 	ExpiryTimestamp int64
@@ -666,7 +674,17 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		payloadDesiredAmount = bodyDecimal
 		signedDesiredAmount = signedWei
 	}
-	actionData, err := encodeTradeData(spec.AssetAddress, spec.SubID, enginePrice, signedDesiredAmount, c.cfg.RecipientID, engineSide == SideBuy, c.cfg.WorstFee)
+	// The bound is derived from this order's own engine price and the venue's published
+	// schedule, not from a configured constant. A quote signed with a bound below the schedule
+	// rests, crosses, and then reverts TM_FeeTooHigh on chain -- and because chooseTakerMaker
+	// makes the LATER order the taker, a bot that requotes is the taker most of the time, so the
+	// zero bound that was correct while the venue charged nothing became a permanent revert loop
+	// the moment it started charging.
+	worstFee, err := c.signedWorstFee(spec, enginePrice)
+	if err != nil {
+		return Order{}, err
+	}
+	actionData, err := encodeTradeData(spec.AssetAddress, spec.SubID, enginePrice, signedDesiredAmount, c.cfg.RecipientID, engineSide == SideBuy, worstFee)
 	if err != nil {
 		return Order{}, err
 	}
@@ -694,7 +712,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	payload["asset_address"] = spec.AssetAddress
 	payload["sub_id"] = spec.SubID
 	payload["filled_amount"] = "0"
-	payload["worst_fee"] = c.cfg.WorstFee
+	payload["worst_fee"] = worstFee
 	payload["expiry"] = expiry
 	payload["action_json"] = actionJSON
 	payload["signature"] = signature
@@ -875,6 +893,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		SubID            string `json:"sub_id"`
 		TickSize         string `json:"tick_size"`
 		OrderEntrySpec   string `json:"order_entry_spec"`
+		TakerFeeBps      int    `json:"taker_fee_bps"`
 		ExpiryTimestamp  int64  `json:"expiry_timestamp"`
 	}
 	if err := c.get(ctx, "/v1/markets", nil, &resp); err != nil {
@@ -891,6 +910,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			TickSize:        tickSize,
 			QuoteAddress:    strings.ToLower(c.quoteAsset.Hex()),
 			OrderEntrySpec:  item.OrderEntrySpec,
+			TakerFeeBps:     item.TakerFeeBps,
 			ExpiryTimestamp: item.ExpiryTimestamp,
 		}
 		switch item.Market {
@@ -1335,6 +1355,54 @@ func rawBigToFloat(value *big.Int) float64 {
 	rat := new(big.Rat).SetFrac(value, decimalScale)
 	out, _ := rat.Float64()
 	return out
+}
+
+// worstFeeHeadroomBps is how far above the venue's published schedule the bot signs its fee
+// ceiling. A ceiling signed at exactly the schedule bricks every resting quote the instant the
+// schedule moves up by one basis point, and requoting is not instant -- the orders already on the
+// book were signed under the old number. Five basis points is the same headroom the trading app
+// signs (30 over a 25 bps schedule), so the two agree about how much slack a fee change has.
+const worstFeeHeadroomBps = 5
+
+// signedWorstFee is the per-unit fee ceiling to sign into an order on this market.
+//
+// TradeModule bounds fee/amountFilled, not the total: _fillLimitOrder reverts TM_FeeTooHigh when
+// the charge per filled unit exceeds worstFee. amountFilled is denominated in the base asset, so
+// the bound is a QUOTE amount PER BASE UNIT -- which makes it price-dependent, and a single
+// configured constant wrong at every price but one.
+//
+// For one base unit worth enginePrice of quote, a feeBps charge on the notional is
+// feeBps/10_000 * enginePrice per unit. The result is rounded UP: the matcher truncates when it
+// computes the fee, so a bound rounded down can sit one wei under a charge that is otherwise
+// exactly at the ceiling.
+//
+// A market that reports no schedule falls back to the configured MM_WORST_FEE unchanged. That is
+// the futures path, where the notional is the contract's rather than the price's, and nothing
+// here should silently start signing a different bound for it.
+func (c *HTTPClient) signedWorstFee(spec MarketSpec, enginePrice float64) (string, error) {
+	if spec.TakerFeeBps <= 0 {
+		return c.cfg.WorstFee, nil
+	}
+	if !(enginePrice > 0) {
+		return "", fmt.Errorf("cannot bound fee at engine price %v", enginePrice)
+	}
+
+	bound := new(big.Rat).Mul(
+		ratFromFloat(enginePrice),
+		big.NewRat(int64(spec.TakerFeeBps+worstFeeHeadroomBps), 10_000),
+	)
+	bound.Mul(bound, new(big.Rat).SetInt(decimalScale))
+
+	units := new(big.Int).Quo(bound.Num(), bound.Denom())
+	if new(big.Int).Mul(units, bound.Denom()).Cmp(bound.Num()) != 0 {
+		units.Add(units, big.NewInt(1))
+	}
+	if units.Sign() == 0 {
+		// The bound truncated to nothing, so any fee at all breaches it. One wei is the smallest
+		// ceiling that is not a guaranteed revert.
+		units.SetInt64(1)
+	}
+	return units.String(), nil
 }
 
 func floatToRaw(value float64) string {
