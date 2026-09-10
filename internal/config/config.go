@@ -46,21 +46,26 @@ const (
 )
 
 type Config struct {
-	APIBaseURL                   string
-	RPCURL                       string
-	DatabaseURL                  string
-	ChainID                      int64
-	MatchingRepoPath             string
-	RiskCoreRepoPath             string
-	MatchingAddress              string
-	TradeModuleAddress           string
-	SubAccountsAddress           string
-	OwnerPrivateKey              string
-	SignerPrivateKey             string
-	OwnerAddress                 string
-	SignerAddress                string
-	SubaccountID                 string
-	RecipientID                  string
+	APIBaseURL         string
+	RPCURL             string
+	DatabaseURL        string
+	ChainID            int64
+	MatchingRepoPath   string
+	RiskCoreRepoPath   string
+	MatchingAddress    string
+	TradeModuleAddress string
+	SubAccountsAddress string
+	OwnerPrivateKey    string
+	SignerPrivateKey   string
+	OwnerAddress       string
+	SignerAddress      string
+	SubaccountID       string
+	RecipientID        string
+	// WorstFee is the signed fee ceiling for markets that publish NO taker schedule on
+	// /v1/markets -- the futures path, where the bound is a contract notional rather than a
+	// price. On a market that does publish one, the bound is derived per order from that
+	// schedule and the order's own engine price (see HTTPClient.signedWorstFee): the contract
+	// checks fee PER FILLED UNIT, so a single configured number is wrong at every price but one.
 	WorstFee                     string
 	OrderExpirySeconds           int64
 	StateFile                    string
