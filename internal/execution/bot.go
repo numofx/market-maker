@@ -172,11 +172,60 @@ func marketMetadataAttrs(spec exchange.MarketSpec) []any {
 	}
 }
 
+// syncFeeSchedule re-reads the market's fee schedule and, when the taker fee has RISEN, cancels
+// the resting ladder so it is re-signed against the new number.
+//
+// Newly placed orders are safe without this -- PlaceLimitOrder derives worstFee from the schedule
+// at signing time. The exposure is orders already on the book: reconcileSide keeps an order whose
+// price has not drifted, so on a quiet market a quote signed under the old, lower bound can rest
+// untouched for its whole lifetime and revert TM_FeeTooHigh on every cross.
+//
+// Only an increase forces the cancel. A cut leaves every resting bound comfortably above the new
+// charge, and churning the book for it would spend cancel budget to no purpose.
+//
+// The worstFeeHeadroomBps cushion already absorbs a small rise, so this is belt and braces for the
+// case that outruns it -- which is the case nobody would notice until fills started reverting.
+func (b *Bot) syncFeeSchedule(ctx context.Context) error {
+	spec, err := b.client.GetMarket(ctx, b.spec.Symbol)
+	if err != nil {
+		// GetMarket already falls back to the last good schedule; a real error here means it never
+		// had one, and quoting against a schedule we have never seen is not something to guess at.
+		return fmt.Errorf("refresh fee schedule: %w", err)
+	}
+
+	was := b.spec.TakerFeeBps
+	if spec.TakerFeeBps == was {
+		return nil
+	}
+	b.spec = spec
+
+	if spec.TakerFeeBps < was {
+		b.logger.Info(
+			"taker fee lowered",
+			"market", spec.Symbol, "from_bps", was, "to_bps", spec.TakerFeeBps,
+			"action", "resting orders kept -- their signed bound still covers the smaller charge",
+		)
+		return nil
+	}
+
+	b.logger.Warn(
+		"taker fee raised",
+		"market", spec.Symbol, "from_bps", was, "to_bps", spec.TakerFeeBps,
+		"action", "cancelling the resting ladder so it is re-signed against the new schedule",
+	)
+	return b.syncer.CancelAll(ctx, spec.Symbol, cancelCategoryFeeRaised)
+}
+
 func (b *Bot) RunCycle(ctx context.Context) error {
 	if active, err := b.killSwitchActive(); err != nil {
 		return err
 	} else if active {
 		return b.haltForReason(ctx, "kill switch active", true, cancelCategoryKillSwitch)
+	}
+
+	if err := b.syncFeeSchedule(ctx); err != nil {
+		b.metrics.IncErrors()
+		return err
 	}
 
 	snapshot, err := b.loader.Load(ctx, b.snapshot)
