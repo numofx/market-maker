@@ -233,7 +233,9 @@ func (b *Bot) RunCycle(ctx context.Context) error {
 		b.metrics.IncErrors()
 		return b.handleLoadError(ctx, err)
 	}
-	b.observeFills(b.snapshot, snapshot)
+	// Drained here, not inside observeFills, so the set covers exactly the interval between the
+	// two snapshots being compared -- every cancel this bot issued since the last observation.
+	b.observeFills(b.snapshot, snapshot, b.syncer.TakeCancelled())
 	quotes, err := strategy.BuildQuotes(b.cfg, b.spec, snapshot)
 	if err != nil {
 		b.metrics.IncErrors()
@@ -759,8 +761,8 @@ func sumMap(values map[string]uint64) uint64 {
 	return out
 }
 
-func (b *Bot) observeFills(previous, current state.Snapshot) {
-	if fillsBySide, partials, ok := observeOrderStateFills(previous, current); ok {
+func (b *Bot) observeFills(previous, current state.Snapshot, cancelled map[string]struct{}) {
+	if fillsBySide, partials, ok := observeOrderStateFills(previous, current, cancelled); ok {
 		for side, count := range fillsBySide {
 			for i := uint64(0); i < count; i++ {
 				b.metrics.IncFill(side)
@@ -791,7 +793,18 @@ func (b *Bot) observeFills(previous, current state.Snapshot) {
 	}
 }
 
-func observeOrderStateFills(previous, current state.Snapshot) (map[string]uint64, uint64, bool) {
+// observeOrderStateFills turns two consecutive snapshots into fill counts.
+//
+// An order present before and absent now has either been filled or been cancelled, and the two are
+// indistinguishable from the snapshots alone -- so the caller supplies the set of orders this bot
+// cancelled in that interval. Without it the bot counted its own churn: 9,066 reported fills in 15
+// hours against a venue with 8 trades in its entire history, which both misreported the fill rate
+// an operator reads and disguised the churn bug that was generating the cancels.
+//
+// A disappearance that is neither a fill nor one of our cancels -- an expiry, or a cancel from
+// somewhere else -- is still counted as a fill here. That remains wrong, but it is rare and
+// bounded, where counting every replace was neither.
+func observeOrderStateFills(previous, current state.Snapshot, cancelled map[string]struct{}) (map[string]uint64, uint64, bool) {
 	prevByID := make(map[string]exchange.Order, len(previous.OpenOrders))
 	for _, order := range previous.OpenOrders {
 		prevByID[order.ID] = order
@@ -806,6 +819,11 @@ func observeOrderStateFills(previous, current state.Snapshot) (map[string]uint64
 	for id, prev := range prevByID {
 		curr, ok := currentByID[id]
 		if !ok {
+			if _, wasCancelled := cancelled[id]; wasCancelled {
+				// We took it off the book. Its absence says nothing about trading.
+				haveTruth = true
+				continue
+			}
 			fillsBySide[string(prev.Side)]++
 			haveTruth = true
 			continue

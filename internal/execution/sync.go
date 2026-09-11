@@ -26,6 +26,15 @@ type Syncer struct {
 	cancelTimestamps []time.Time
 	totalCancels     uint64
 	totalPlacements  uint64
+
+	// cancelledIDs is every order this bot cancelled since the caller last drained it.
+	//
+	// It exists so fills can be told apart from cancels. observeOrderStateFills sees an order
+	// that was on the previous snapshot and not on the current one, and without this it counts
+	// that as a fill -- but the bot's own cancels make orders disappear exactly the same way, so
+	// it was counting its own churn. Over one 15-hour window that produced 9,066 reported fills
+	// against a venue whose entire trade history was 8 trades.
+	cancelledIDs map[string]struct{}
 }
 
 const (
@@ -369,6 +378,7 @@ func (s *Syncer) cancel(ctx context.Context, orderID string, reason string, reco
 		return nil
 	}
 	s.logger.Info("cancel order", "order_id", orderID, "reason", reason)
+	s.noteCancelled(orderID)
 	if s.cfg.DryRun {
 		if recordRate {
 			s.recordCancel()
@@ -415,6 +425,30 @@ func (s *Syncer) place(ctx context.Context, market string, q strategy.Quote, id 
 	s.totalPlacements++
 	s.metrics.SetCancelReplaceRatio(s.cancelReplaceRatio())
 	return nil
+}
+
+// noteCancelled records an order the bot itself took off the book, so its disappearance is not
+// later mistaken for a fill. Recorded on intent rather than on success: an order we asked the venue
+// to cancel is not evidence of a trade whether or not the call returned cleanly.
+func (s *Syncer) noteCancelled(orderID string) {
+	if s.cancelledIDs == nil {
+		s.cancelledIDs = make(map[string]struct{})
+	}
+	s.cancelledIDs[orderID] = struct{}{}
+}
+
+// TakeCancelled returns the orders cancelled since the last call and clears the set.
+//
+// Draining is deliberate. The caller compares two consecutive snapshots, so the only cancels that
+// can explain a disappearance are the ones issued between them; holding older ids would suppress a
+// genuine fill on an order id the venue happened to reuse.
+func (s *Syncer) TakeCancelled() map[string]struct{} {
+	out := s.cancelledIDs
+	s.cancelledIDs = nil
+	if out == nil {
+		return map[string]struct{}{}
+	}
+	return out
 }
 
 func (s *Syncer) canUseCancelSlot() bool {
