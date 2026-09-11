@@ -143,15 +143,28 @@ func (s *Syncer) reconcileSide(
 		}
 
 		if current != nil {
-			decision := evaluateCancel(current, target, opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC())
+			decision := evaluateCancel(current, target, opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC(), sizeQuantumUI(s.spec, current.Price))
 			switch {
 			case decision.Suppress:
 				s.logger.Info("replace suppressed", "order_id", current.ID, "side", current.Side, "reason", decision.SuppressReason)
 				s.metrics.IncSuppressedReplaces()
+			case decision.Cancel && decision.EnforceRateLimit && !s.canUseCancelSlot():
+				// Out of cancel budget. Leave the order resting and try again next cycle.
+				//
+				// This used to return CancelRateLimitError, which the bot answered by halting and
+				// cancelling the ENTIRE ladder -- through CancelAll, which passes recordRate=false
+				// and so bypasses the very limiter that just tripped. The response to "you are
+				// cancelling too much" was to cancel everything, go dark, and rebuild all six
+				// orders next cycle, which costs six more placements and starts the loop again.
+				//
+				// A slightly stale quote is better than no quote. The budget is there to bound
+				// churn, and declining the replace bounds it; emptying the book does not.
+				s.logger.Info(
+					"replace suppressed", "order_id", current.ID, "side", current.Side,
+					"reason", "cancel budget exhausted", "limit_per_minute", s.cfg.MaxCancelsPerMinute,
+				)
+				s.metrics.IncSuppressedReplaces()
 			case decision.Cancel:
-				if decision.EnforceRateLimit && !s.canUseCancelSlot() {
-					return &CancelRateLimitError{Limit: s.cfg.MaxCancelsPerMinute}
-				}
 				if err := s.cancel(ctx, current.ID, decision.Reason, decision.EnforceRateLimit, cancelCategoryReplaceDriven); err != nil {
 					return err
 				}
@@ -210,7 +223,7 @@ type cancelDecision struct {
 	SuppressReason   string
 }
 
-func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *strategy.Quote, cfg config.Config, fallbackQuoteTime time.Time, now time.Time) cancelDecision {
+func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *strategy.Quote, cfg config.Config, fallbackQuoteTime time.Time, now time.Time, quantum float64) cancelDecision {
 	if current == nil {
 		return cancelDecision{}
 	}
@@ -220,7 +233,7 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 	if current.Side != target.Side {
 		return cancelDecision{Cancel: true, Reason: "side_mismatch"}
 	}
-	if sizeMismatchRequiresReplace(current.Size, target.Size, cfg) {
+	if sizeMismatchRequiresReplace(current.Size, target.Size, cfg, quantum) {
 		return cancelDecision{Cancel: true, Reason: "size_mismatch", EnforceRateLimit: true}
 	}
 	drift := priceDriftBPS(current.Price, target.Price)
@@ -245,14 +258,45 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 	return cancelDecision{}
 }
 
-func sizeMismatchRequiresReplace(current, target float64, cfg config.Config) bool {
+// sizeQuantumUI is the smallest size difference the venue can actually express, in the same units
+// the quote is denominated in.
+//
+// Spot amounts are whole cNGN, so placing a UI size of 0.359975 USDC at 1331.99 asks for 479.48
+// cNGN and rests 479 -- the venue floors it, and the resting order is smaller than the target by
+// up to one cNGN no matter what anyone does. In UI terms that is 1/price USDC.
+//
+// Futures quantise in contract lots, where the size is already in contracts and the step is
+// MinSize.
+func sizeQuantumUI(spec exchange.MarketSpec, price float64) float64 {
+	if spec.Symbol == "USDCcNGN-SPOT" {
+		if price <= 0 {
+			return 0
+		}
+		return 1.0 / price
+	}
+	return spec.MinSize
+}
+
+// sizeMismatchRequiresReplace reports whether a resting order's size is far enough from the target
+// to be worth cancelling and replacing.
+//
+// The tolerance is floored at one quantum because the venue cannot express anything finer. The
+// dust tolerance is RELATIVE (5 bps of size) while the quantisation error is ABSOLUTE (up to one
+// cNGN), so below roughly 1.5 USDC the error always exceeds the tolerance and the order is
+// replaced by an order that is wrong in exactly the same way -- forever, at the poll interval.
+//
+// That is not hypothetical. On 2026-09-10 a 0.359975 USDC level was placed 4,065 times at an
+// unchanged price: target 0.359975, rests 0.359613, diff 0.000362, tolerance 0.000180. It
+// accounted for 92% of 10,368 cancels in 15 hours and repeatedly exhausted the cancel budget.
+// There were no fills to explain it -- the venue's whole trade history was 8 trades.
+func sizeMismatchRequiresReplace(current, target float64, cfg config.Config, quantum float64) bool {
 	diff := math.Abs(current - target)
 	if diff <= 1e-9 {
 		return false
 	}
 	absTolerance := cfg.AdoptSizeTolerance
 	relativeTolerance := math.Max(math.Abs(current), math.Abs(target)) * (sizeDustToleranceBPS / 10000.0)
-	return diff > math.Max(absTolerance, relativeTolerance)
+	return diff > math.Max(math.Max(absTolerance, relativeTolerance), quantum)
 }
 
 func priceDriftBPS(current, target float64) float64 {
@@ -368,7 +412,9 @@ func quoteAge(current *exchange.Order, fallbackQuoteTime, now time.Time) time.Du
 	return 0
 }
 
+// shouldCancel is the price-drift-only helper used by the unit tests. Quantum 0 keeps it on the
+// old tolerance arithmetic, which is what those cases are about.
 func shouldCancel(current *exchange.Order, target *strategy.Quote, staleThresholdBPS float64, opposite *strategy.Quote) bool {
-	decision := evaluateCancel(current, target, opposite, config.Config{CancelStaleOrderThreshold: staleThresholdBPS}, time.Time{}, time.Now().UTC())
+	decision := evaluateCancel(current, target, opposite, config.Config{CancelStaleOrderThreshold: staleThresholdBPS}, time.Time{}, time.Now().UTC(), 0)
 	return decision.Cancel
 }
