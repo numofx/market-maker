@@ -89,7 +89,7 @@ func TestObserveOrderStateFills(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, partials, truth := observeOrderStateFills(tt.previous, tt.current)
+			got, partials, truth := observeOrderStateFills(tt.previous, tt.current, nil)
 			if truth != tt.wantTruth {
 				t.Fatalf("truth = %v want %v", truth, tt.wantTruth)
 			}
