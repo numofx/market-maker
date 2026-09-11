@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,7 +144,8 @@ func (s *Syncer) reconcileSide(
 		}
 
 		if current != nil {
-			decision := evaluateCancel(current, target, opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC(), sizeQuantumUI(s.spec, current.Price))
+			quantum := sizeQuantumUI(s.spec, current.Price)
+			decision := evaluateCancel(current, target, opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC(), quantum)
 			switch {
 			case decision.Suppress:
 				s.logger.Info("replace suppressed", "order_id", current.ID, "side", current.Side, "reason", decision.SuppressReason)
@@ -165,6 +167,9 @@ func (s *Syncer) reconcileSide(
 				)
 				s.metrics.IncSuppressedReplaces()
 			case decision.Cancel:
+				if decision.Reason == "size_mismatch" {
+					s.logger.Info("size mismatch replace", sizeMismatchAttrs(current, target, quantum, s.cfg)...)
+				}
 				if err := s.cancel(ctx, current.ID, decision.Reason, decision.EnforceRateLimit, cancelCategoryReplaceDriven); err != nil {
 					return err
 				}
@@ -267,6 +272,58 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 //
 // Futures quantise in contract lots, where the size is already in contracts and the step is
 // MinSize.
+// sizeMismatchAttrs is every input the replace decision actually used, so a size_mismatch cancel
+// can be explained from the log line alone.
+//
+// It exists because it could not be. On 2026-09-11 a quantum floor was added to stop the ladder
+// replacing itself over differences the venue cannot express, and it cut the churn by 16% rather
+// than the expected ~92%. Running the same function on the numbers read off /v1/book and the
+// place-order logs said "keep"; production said "replace". The decision inputs were never logged,
+// so the gap could only be guessed at -- twice, wrongly.
+//
+// raw_engine_amount is the value straight from the active_orders row, before
+// orderAmountToFloat and spotUIFromEngine convert it. The book serves the same order through a
+// different projection, and the suspicion is that the two disagree; printing both ends of that
+// conversion is what settles it rather than another inference.
+func sizeMismatchAttrs(current *exchange.Order, target *strategy.Quote, quantum float64, cfg config.Config) []any {
+	relative := math.Max(math.Abs(current.Size), math.Abs(target.Size)) * (sizeDustToleranceBPS / 10000.0)
+	tolerance := math.Max(math.Max(cfg.AdoptSizeTolerance, relative), quantum)
+
+	attrs := []any{
+		"order_id", current.ID,
+		"side", current.Side,
+		"current_size", current.Size,
+		"target_size", target.Size,
+		"diff", math.Abs(current.Size - target.Size),
+		"quantum", quantum,
+		"tolerance", tolerance,
+		"tolerance_source", toleranceSource(cfg.AdoptSizeTolerance, relative, quantum),
+		"current_price", current.Price,
+		"target_price", target.Price,
+		"raw_engine_amount", current.RawSize,
+	}
+	// What current.Size would be if it were derived from the raw amount and the order's own price.
+	// A disagreement with current_size localises the fault to the conversion rather than the
+	// decision.
+	if raw, err := strconv.ParseFloat(strings.TrimSpace(current.RawSize), 64); err == nil && current.Price > 0 {
+		attrs = append(attrs, "size_from_raw", raw/current.Price)
+	}
+	return attrs
+}
+
+// toleranceSource names which of the three bounds actually won, so a line that replaces despite
+// the quantum floor shows immediately whether the floor was in play at all.
+func toleranceSource(absolute, relative, quantum float64) string {
+	switch {
+	case quantum >= absolute && quantum >= relative:
+		return "quantum"
+	case relative >= absolute:
+		return "relative_dust_bps"
+	default:
+		return "absolute_adopt_tolerance"
+	}
+}
+
 func sizeQuantumUI(spec exchange.MarketSpec, price float64) float64 {
 	if spec.Symbol == "USDCcNGN-SPOT" {
 		if price <= 0 {
