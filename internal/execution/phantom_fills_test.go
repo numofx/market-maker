@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -110,5 +111,61 @@ func TestAReplaceDoesNotRegisterAsAFill(t *testing.T) {
 		snap(resting("b1", exchange.SideBuy, 1.2)), snap(), syncer.TakeCancelled())
 	if len(fills) != 0 {
 		t.Fatalf("a replace reported %v as fills", fills)
+	}
+}
+
+// The startup path cancels through the client directly rather than through the syncer, so it was
+// missed by the first pass at this: a restart cancelled the previous container's ladder, the next
+// comparison saw those orders vanish with nothing to attribute them to, and counted them as fills.
+// Bounded at one ladder per boot rather than thousands per hour, but it meant the counter never
+// started at zero -- which is the whole point of a fill counter.
+//
+// This drives Initialize rather than calling noteCancelled directly, because the defect was in the
+// WIRING, not the mechanism. A test that pokes the set by hand passes whether or not the bot ever
+// feeds it, which is exactly the trap the first version of this test fell into.
+func TestStartupCancelsAreNotCountedAsFills(t *testing.T) {
+	before := []exchange.Order{
+		{ID: "mm:USDCcNGN-SPOT:buy:1", Side: exchange.SideBuy, Nonce: "1", Managed: true},
+		{ID: "manual-order", Side: exchange.SideSell, Nonce: "2", Managed: false},
+	}
+	client := &integrationClient{
+		spec:       exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		mockClient: mockClient{openOrders: before},
+	}
+	cfg := config.Config{MarketSymbol: "USDCcNGN-SPOT", StateFile: filepath.Join(t.TempDir(), "state.json")}
+	bot := NewBot(cfg, client, client.spec, metrics.New(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
+
+	if err := bot.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if len(client.cancelled) == 0 {
+		t.Fatal("the premise needs startup to cancel something; nothing was cancelled")
+	}
+
+	// The very next observation compares the pre-restart book against an empty one.
+	fills, partials, _ := observeOrderStateFills(
+		snap(before...), snap(), bot.syncer.TakeCancelled())
+	if len(fills) != 0 || partials != 0 {
+		t.Fatalf("a restart reported %v fills (%d partial); the counter must start at zero", fills, partials)
+	}
+}
+
+// A restart that adopts rather than cancels must still report a real fill that happened while the
+// bot was down -- the guard is about attribution, not about suppressing everything at boot.
+func TestARestartStillSeesAFillItDidNotCause(t *testing.T) {
+	previous := snap(resting("b1", exchange.SideBuy, 1.2), resting("s1", exchange.SideSell, 1.2))
+
+	s := NewSyncer(&mockClient{}, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT"},
+		config.Config{}, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.noteCancelled("b1") // we cancelled this one
+
+	// s1 is gone and we never touched it: it traded.
+	fills, _, _ := observeOrderStateFills(previous, snap(), s.TakeCancelled())
+	if fills[string(exchange.SideSell)] != 1 {
+		t.Fatalf("fills = %v, want the untouched order counted as a sell fill", fills)
+	}
+	if fills[string(exchange.SideBuy)] != 0 {
+		t.Fatalf("fills = %v, want the cancelled order ignored", fills)
 	}
 }
