@@ -32,6 +32,7 @@ const (
 	cancelCategoryStartupReconcile = "startup_reconciliation"
 	cancelCategoryRiskTriggered    = "risk_triggered"
 	cancelCategoryKillSwitch       = "kill_switch"
+	cancelCategoryFeeRaised        = "taker_fee_raised"
 	sizeDustToleranceBPS           = 5.0
 )
 

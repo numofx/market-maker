@@ -27,6 +27,10 @@ const (
 	defaultMetricsAddr          = ":8080"
 	defaultLogLevel             = "INFO"
 	defaultWorstFee             = "0"
+	// How long a fetched /v1/markets schedule is trusted before the next quote refetches it.
+	// Short enough that a fee change reaches the signed bound within a cycle or two; long enough
+	// that it is one request a minute, not one per order.
+	defaultMarketRefreshSeconds = 60
 	defaultExpirySeconds        = 3600
 	defaultAdoptSizeTolerance   = 0.000001
 	defaultOperatorMode         = "normal"
@@ -66,7 +70,11 @@ type Config struct {
 	// price. On a market that does publish one, the bound is derived per order from that
 	// schedule and the order's own engine price (see HTTPClient.signedWorstFee): the contract
 	// checks fee PER FILLED UNIT, so a single configured number is wrong at every price but one.
-	WorstFee                     string
+	WorstFee string
+	// MarketRefreshSeconds bounds how stale the cached fee schedule may get before the next quote
+	// refetches it. Unset falls back to the client's own default; the refresh cannot be switched
+	// off, because a schedule cached forever is the defect it exists to fix.
+	MarketRefreshSeconds         int64
 	OrderExpirySeconds           int64
 	StateFile                    string
 	MarketSymbol                 string
@@ -148,6 +156,7 @@ func Load() (Config, error) {
 		RecipientID:                  strings.TrimSpace(os.Getenv("MM_RECIPIENT_ID")),
 		WorstFee:                     envString("MM_WORST_FEE", defaultWorstFee),
 		OrderExpirySeconds:           int64(envInt("MM_ORDER_EXPIRY_SECONDS", defaultExpirySeconds)),
+		MarketRefreshSeconds:         int64(envInt("MM_MARKET_REFRESH_SECONDS", defaultMarketRefreshSeconds)),
 		StateFile:                    envString("MM_STATE_FILE", filepath.Join(".", ".mm-bot-state.json")),
 		MarketSymbol:                 envString("MM_MARKET_SYMBOL", defaultMarket),
 		PollInterval:                 time.Duration(envInt("MM_POLL_INTERVAL_MS", defaultPollIntervalMS)) * time.Millisecond,

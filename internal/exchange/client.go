@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -157,9 +158,13 @@ type ClientConfig struct {
 	SubaccountID       string
 	RecipientID        string
 	WorstFee           string
-	OrderExpirySeconds int64
-	ServiceName        string
-	ProtectedPrefixes  []string
+	// MarketRefreshSeconds bounds how stale the cached /v1/markets schedule may get before the
+	// next GetMarket refetches it. Unset falls back to defaultRefreshEvery; there is no way to
+	// switch the refresh off, because "never refresh" is the defect this exists to fix.
+	MarketRefreshSeconds int64
+	OrderExpirySeconds   int64
+	ServiceName          string
+	ProtectedPrefixes    []string
 }
 
 type PlaceOrderRequest struct {
@@ -182,7 +187,21 @@ type HTTPClient struct {
 	tradeModule common.Address
 	subAccounts common.Address
 	quoteAsset  common.Address
-	markets     map[string]MarketSpec
+
+	// markets is the fee schedule and instrument metadata as /v1/markets last reported it.
+	//
+	// It used to be written once in the constructor and never again, which made the signed
+	// worstFee bound permanently whatever the venue was publishing at boot. A bot that started
+	// before a schedule existed kept signing worstFee 0 forever, and since chooseTakerMaker makes
+	// the later order the taker, a requoting bot IS the taker most of the time -- so every cross
+	// reverted TM_FeeTooHigh until the process was restarted by hand.
+	//
+	// Guarded because refreshes now happen on the quoting path while other calls read it.
+	marketsMu    sync.RWMutex
+	markets      map[string]MarketSpec
+	marketsAt    time.Time
+	marketsStale bool
+	refreshEvery time.Duration
 }
 
 func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
@@ -268,16 +287,17 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 	}
 
 	client := &HTTPClient{
-		cfg:         cfg,
-		httpClient:  &http.Client{Timeout: 15 * time.Second},
-		pg:          pg,
-		rpc:         rpc,
-		ownerKey:    ownerKey,
-		signerKey:   signerKey,
-		matching:    common.HexToAddress(cfg.MatchingAddress),
-		tradeModule: common.HexToAddress(cfg.TradeModuleAddress),
-		subAccounts: common.HexToAddress(cfg.SubAccountsAddress),
-		markets:     make(map[string]MarketSpec),
+		cfg:          cfg,
+		httpClient:   &http.Client{Timeout: 15 * time.Second},
+		pg:           pg,
+		rpc:          rpc,
+		ownerKey:     ownerKey,
+		signerKey:    signerKey,
+		matching:     common.HexToAddress(cfg.MatchingAddress),
+		tradeModule:  common.HexToAddress(cfg.TradeModuleAddress),
+		subAccounts:  common.HexToAddress(cfg.SubAccountsAddress),
+		markets:      make(map[string]MarketSpec),
+		refreshEvery: refreshInterval(cfg.MarketRefreshSeconds),
 	}
 
 	quoteAsset, err := client.readAddressCall(ctx, client.tradeModule, "quoteAsset", `{"name":"quoteAsset","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]}`)
@@ -291,6 +311,20 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 	return client, nil
 }
 
+// defaultRefreshEvery is how long a fetched schedule is trusted. A fee change reaches the signed
+// bound within a cycle or two, at the cost of one request a minute rather than one per order.
+const defaultRefreshEvery = 60 * time.Second
+
+// refreshInterval turns the configured seconds into a duration. A zero or negative value is an
+// unset field rather than a request to disable refreshing -- disabling it is exactly the bug --
+// so it falls back to the default.
+func refreshInterval(seconds int64) time.Duration {
+	if seconds <= 0 {
+		return defaultRefreshEvery
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func (c *HTTPClient) Close() {
 	if c.pg != nil {
 		c.pg.Close()
@@ -300,18 +334,63 @@ func (c *HTTPClient) Close() {
 	}
 }
 
+// GetMarket returns the market's metadata, refreshing it from /v1/markets when the cached copy
+// has aged past refreshEvery.
+//
+// The refresh is what keeps the signed fee bound honest: PlaceLimitOrder derives worstFee from
+// spec.TakerFeeBps, so a cache that never expires signs a bound for a schedule the venue stopped
+// publishing. See the note on the markets field.
+//
+// A FAILED refresh keeps the last good schedule and returns it. It must never fall back to a zero
+// TakerFeeBps, because signedWorstFee reads zero as "this market publishes no schedule" and
+// substitutes MM_WORST_FEE -- reintroducing the exact zero bound this is here to prevent. An RPC
+// blip would otherwise turn into a venue-wide revert loop. The staleness is recorded instead, and
+// surfaces on the next quote cycle.
 func (c *HTTPClient) GetMarket(ctx context.Context, market string) (MarketSpec, error) {
-	if spec, ok := c.markets[market]; ok {
+	c.marketsMu.RLock()
+	spec, ok := c.markets[market]
+	fresh := time.Since(c.marketsAt) < c.refreshEvery
+	c.marketsMu.RUnlock()
+
+	if ok && fresh {
 		return spec, nil
 	}
+
 	if err := c.loadMarkets(ctx); err != nil {
+		if ok {
+			c.marketsMu.Lock()
+			c.marketsStale = true
+			c.marketsMu.Unlock()
+			slog.Warn(
+				"market_refresh_failed",
+				"market", market,
+				"error", err,
+				"effect", "keeping the last known schedule; the signed fee bound may be stale",
+				"taker_fee_bps", spec.TakerFeeBps,
+			)
+			return spec, nil
+		}
+		// Nothing was ever loaded, so there is no last-good to fall back to. Refusing is right:
+		// quoting here would sign against a schedule we have never seen.
 		return MarketSpec{}, err
 	}
-	spec, ok := c.markets[market]
+
+	c.marketsMu.RLock()
+	defer c.marketsMu.RUnlock()
+	spec, ok = c.markets[market]
 	if !ok {
 		return MarketSpec{}, fmt.Errorf("unknown market %s", market)
 	}
 	return spec, nil
+}
+
+// MarketsStale reports whether the last refresh attempt failed, so the schedule in hand is older
+// than it should be. Read by the bot for its metrics; it is deliberately not an error, because a
+// stale-but-known schedule is safe to quote against and a hard stop would be worse.
+func (c *HTTPClient) MarketsStale() bool {
+	c.marketsMu.RLock()
+	defer c.marketsMu.RUnlock()
+	return c.marketsStale
 }
 
 func (c *HTTPClient) ValidateMarketAssets(ctx context.Context, spec MarketSpec) ([]AssetCodeCheck, error) {
@@ -899,6 +978,10 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	if err := c.get(ctx, "/v1/markets", nil, &resp); err != nil {
 		return err
 	}
+
+	// Built into a fresh map and swapped in at the end, so a failure part-way through leaves the
+	// previous schedule intact rather than a half-updated one.
+	next := make(map[string]MarketSpec, len(resp))
 	for _, item := range resp {
 		tickSize, _ := strconv.ParseFloat(item.TickSize, 64)
 		spec := MarketSpec{
@@ -930,23 +1013,59 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			spec.SizeStep = 0.001
 			spec.MinSize = 0.001
 		}
-		c.markets[item.Market] = spec
+		next[item.Market] = spec
 	}
-	if len(c.markets) == 0 {
+	if len(next) == 0 {
+		// Do NOT clear the cache here. An empty response is far more likely to be a bad deploy or
+		// a half-started service than a venue that genuinely delisted everything, and the caller
+		// treats a returned error as "keep the last good schedule".
 		return fmt.Errorf("no markets returned by exchange")
+	}
+
+	c.marketsMu.Lock()
+	previous := c.markets
+	c.markets = next
+	c.marketsAt = time.Now()
+	c.marketsStale = false
+	c.marketsMu.Unlock()
+
+	// A fee change is the reason this refresh exists, so say so once when it happens rather than
+	// leaving it to be inferred from reverts.
+	for symbol, spec := range next {
+		was, existed := previous[symbol]
+		if existed && was.TakerFeeBps != spec.TakerFeeBps {
+			slog.Info(
+				"taker_fee_schedule_changed",
+				"market", symbol,
+				"from_bps", was.TakerFeeBps,
+				"to_bps", spec.TakerFeeBps,
+				"effect", "new orders sign a bound derived from the new schedule",
+			)
+		}
 	}
 	return nil
 }
 
+// marketsSnapshot returns the current schedule map. loadMarkets replaces the map wholesale and
+// never mutates one that has been published, so the returned reference stays safe to range over
+// after the lock is dropped -- a later refresh swaps in a different map rather than editing this
+// one.
+func (c *HTTPClient) marketsSnapshot() map[string]MarketSpec {
+	c.marketsMu.RLock()
+	defer c.marketsMu.RUnlock()
+	return c.markets
+}
+
 func (c *HTTPClient) marketForBalances() (MarketSpec, error) {
+	markets := c.marketsSnapshot()
 	if c.cfg.MarketSymbol != "" {
-		spec, ok := c.markets[c.cfg.MarketSymbol]
+		spec, ok := markets[c.cfg.MarketSymbol]
 		if !ok {
 			return MarketSpec{}, fmt.Errorf("configured market %s not loaded", c.cfg.MarketSymbol)
 		}
 		return spec, nil
 	}
-	for _, spec := range c.markets {
+	for _, spec := range markets {
 		if spec.AssetAddress != "" && spec.QuoteAddress != "" {
 			return spec, nil
 		}
@@ -1521,7 +1640,7 @@ func usesContractLots(spec MarketSpec) bool {
 }
 
 func (c *HTTPClient) marketSpecForAsset(assetAddress, subID string) MarketSpec {
-	for _, spec := range c.markets {
+	for _, spec := range c.marketsSnapshot() {
 		if strings.EqualFold(spec.AssetAddress, assetAddress) && spec.SubID == subID {
 			return spec
 		}
@@ -1587,7 +1706,7 @@ func balanceKeys(spec MarketSpec) (string, string) {
 }
 
 func (c *HTTPClient) reservedExposureKey(side string, size float64, px float64, assetAddress string, subID string) (string, float64) {
-	for _, spec := range c.markets {
+	for _, spec := range c.marketsSnapshot() {
 		if strings.ToLower(spec.AssetAddress) != strings.ToLower(assetAddress) || spec.SubID != subID {
 			continue
 		}
