@@ -143,9 +143,14 @@ func (b *Bot) Initialize(ctx context.Context) error {
 	b.lastReconciliation = result
 	b.persisted.LastAdoptedBidOrder = result.AdoptedBidOrderID
 	b.persisted.LastAdoptedAskOrder = result.AdoptedAskOrderID
-	for range result.CanceledOrderIDs {
+	for _, id := range result.CanceledOrderIDs {
 		b.metrics.IncCancels()
 		b.metrics.IncCancelCategory(cancelCategoryStartupReconcile)
+		// Same reason as every other cancel: an order we took off the book must not be read as a
+		// fill when it stops appearing. ReconcileStartup cancels through the client directly
+		// rather than through the syncer, so without this the first comparison after a restart
+		// counts the whole previous ladder as fills -- six or seven phantom fills on every boot.
+		b.syncer.noteCancelled(id)
 	}
 	snapshot.OpenOrders = adoptedOrders
 	b.setHealthyState(snapshot, "")
