@@ -111,7 +111,7 @@ func TestEvaluateCancelSuppression(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decision := evaluateCancel(current, target, nil, tt.cfg, time.Time{}, now)
+			decision := evaluateCancel(current, target, nil, tt.cfg, time.Time{}, now, 0)
 			if decision.SuppressReason != tt.wantSuppress {
 				t.Fatalf("suppress reason = %q want %q", decision.SuppressReason, tt.wantSuppress)
 			}
@@ -130,7 +130,7 @@ func TestEvaluateCancelIgnoresDustSizeMismatch(t *testing.T) {
 	decision := evaluateCancel(current, target, nil, config.Config{
 		CancelStaleOrderThreshold: 10,
 		AdoptSizeTolerance:        0.000001,
-	}, time.Time{}, now)
+	}, time.Time{}, now, 0)
 	if decision.Cancel {
 		t.Fatalf("expected dust size mismatch to be kept, got cancel reason %q", decision.Reason)
 	}
@@ -147,7 +147,7 @@ func TestEvaluateCancelReplacesMaterialSizeMismatch(t *testing.T) {
 	decision := evaluateCancel(current, target, nil, config.Config{
 		CancelStaleOrderThreshold: 10,
 		AdoptSizeTolerance:        0.000001,
-	}, time.Time{}, now)
+	}, time.Time{}, now, 0)
 	if !decision.Cancel || decision.Reason != "size_mismatch" {
 		t.Fatalf("expected material size mismatch replace, got cancel=%v reason=%q", decision.Cancel, decision.Reason)
 	}
@@ -212,7 +212,13 @@ func TestSync(t *testing.T) {
 	}
 }
 
-func TestSyncCancelRateLimit(t *testing.T) {
+// An exhausted cancel budget must leave the ladder resting, not tear it down.
+//
+// This used to assert the opposite: Sync returned CancelRateLimitError, and the bot answered it by
+// halting and cancelling every order -- via CancelAll, which bypasses this very limiter. The
+// response to "you are cancelling too much" was to cancel everything and go dark. A slightly stale
+// quote is better than no quote, and declining the replace bounds churn just as well.
+func TestAnExhaustedCancelBudgetSuppressesTheReplaceAndKeepsTheOrder(t *testing.T) {
 	client := &mockClient{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT"}, config.Config{
@@ -221,7 +227,7 @@ func TestSyncCancelRateLimit(t *testing.T) {
 	}, metrics.New(), logger)
 	syncer.cancelTimestamps = []time.Time{time.Now().UTC().Add(-10 * time.Second)}
 
-	_, err := syncer.Sync(context.Background(), state.Snapshot{
+	result, err := syncer.Sync(context.Background(), state.Snapshot{
 		Market: "USDCcNGN-SPOT",
 		OpenOrders: []exchange.Order{
 			{ID: "b1", Side: exchange.SideBuy, Price: 100, Size: 1, CreatedAt: time.Now().UTC().Add(-time.Minute)},
@@ -231,11 +237,17 @@ func TestSyncCancelRateLimit(t *testing.T) {
 	}, map[exchange.Side][]Identity{
 		exchange.SideBuy: {{OrderID: "bid", Nonce: "10"}},
 	})
-	if err == nil {
-		t.Fatal("expected cancel rate limit error")
+	if err != nil {
+		t.Fatalf("running out of cancel budget must not fail the cycle: %v", err)
 	}
-	if _, ok := err.(*CancelRateLimitError); !ok {
-		t.Fatalf("expected CancelRateLimitError, got %T", err)
+	if len(client.cancelled) != 0 {
+		t.Fatalf("cancelled %v with no budget left; the order had to stay on the book", client.cancelled)
+	}
+	if len(client.placed) != 0 {
+		t.Fatalf("placed %d orders while the old one still rests -- that would double the ladder", len(client.placed))
+	}
+	if result.Changed {
+		t.Fatal("nothing changed, so the cycle must not report a quote update")
 	}
 }
 
