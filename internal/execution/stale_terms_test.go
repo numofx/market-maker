@@ -12,6 +12,7 @@ import (
 	"github.com/numofx/market-maker/internal/exchange"
 	"github.com/numofx/market-maker/internal/metrics"
 	"github.com/numofx/market-maker/internal/state"
+	"github.com/numofx/market-maker/internal/strategy"
 )
 
 func restingOrder(id string, side exchange.Side, postOnly bool, worstFee string) exchange.Order {
@@ -141,5 +142,93 @@ func TestStartupKeepsOrdersWhenTheRequiredBoundIsUnknown(t *testing.T) {
 	}
 	if len(client.cancelled) != 0 {
 		t.Fatalf("cancelled %v on an unknown bound", client.cancelled)
+	}
+}
+
+// The hole the drill exposed. ECS drains the previous task AFTER the new one is healthy, so a
+// predecessor keeps quoting and can place orders seconds after its successor's startup
+// reconciliation has already run. Startup never sees them, and on a stable ladder nothing else
+// ever replaces them -- the live book held six non-post-only maker quotes against a post-only
+// config for exactly this reason.
+//
+// Driven through Sync, not through startup, because the whole point is that startup is over.
+func TestSteadyStateCycleReplacesAPredecessorsStaleQuote(t *testing.T) {
+	client := &mockClient{requiredWorstFee: "1000"}
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001, PostOnlyQuotes: true},
+		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// Price and size match the target exactly, so every other check would keep it. Only the terms
+	// differ -- which is what a draining predecessor leaves behind.
+	stale := exchange.Order{
+		ID: "left-behind", Side: exchange.SideBuy, Price: 1326, Size: 1.2,
+		CreatedAt: time.Now().UTC().Add(-time.Minute), PostOnly: false, WorstFee: "9999999999",
+	}
+
+	result, err := syncer.Sync(context.Background(),
+		state.Snapshot{Market: "USDCcNGN-SPOT", OpenOrders: []exchange.Order{stale}},
+		strategy.Result{Bids: []strategy.Quote{{Side: exchange.SideBuy, Price: 1326, Size: 1.2}}},
+		map[exchange.Side][]Identity{exchange.SideBuy: {{OrderID: "fresh", Nonce: "9"}}})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(client.cancelled) != 1 || client.cancelled[0] != "left-behind" {
+		t.Fatalf("cancelled %v, want the stale-terms quote replaced mid-cycle", client.cancelled)
+	}
+	if len(client.placed) != 1 || !client.placed[0].PostOnly {
+		t.Fatalf("placed %+v, want one post-only replacement", client.placed)
+	}
+	if !result.Changed {
+		t.Fatal("replacing a quote is a change")
+	}
+}
+
+// A compliant quote at the right price and size is left alone -- otherwise the check would churn
+// the entire ladder on every cycle, which is worse than the problem it fixes.
+func TestSteadyStateCycleKeepsACompliantQuote(t *testing.T) {
+	client := &mockClient{requiredWorstFee: "1000"}
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001, PostOnlyQuotes: true},
+		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ok := exchange.Order{
+		ID: "compliant", Side: exchange.SideBuy, Price: 1326, Size: 1.2,
+		CreatedAt: time.Now().UTC().Add(-time.Minute), PostOnly: true, WorstFee: "5000",
+	}
+
+	if _, err := syncer.Sync(context.Background(),
+		state.Snapshot{Market: "USDCcNGN-SPOT", OpenOrders: []exchange.Order{ok}},
+		strategy.Result{Bids: []strategy.Quote{{Side: exchange.SideBuy, Price: 1326, Size: 1.2}}},
+		map[exchange.Side][]Identity{exchange.SideBuy: {{OrderID: "fresh", Nonce: "9"}}}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(client.cancelled) != 0 {
+		t.Fatalf("cancelled %v, want a compliant quote left resting", client.cancelled)
+	}
+}
+
+// Stale terms must not be deferred when the cancel budget is spent. The budget bounds churn; an
+// order that can take when the operator said it must not is not churn to be smoothed out.
+func TestStaleTermsAreNotDeferredByTheCancelBudget(t *testing.T) {
+	client := &mockClient{requiredWorstFee: "1000"}
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001,
+			PostOnlyQuotes: true, MaxCancelsPerMinute: 1},
+		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer.cancelTimestamps = []time.Time{time.Now().UTC().Add(-10 * time.Second)} // budget spent
+
+	stale := exchange.Order{
+		ID: "left-behind", Side: exchange.SideBuy, Price: 1326, Size: 1.2,
+		CreatedAt: time.Now().UTC().Add(-time.Minute), PostOnly: false, WorstFee: "9999999999",
+	}
+
+	if _, err := syncer.Sync(context.Background(),
+		state.Snapshot{Market: "USDCcNGN-SPOT", OpenOrders: []exchange.Order{stale}},
+		strategy.Result{Bids: []strategy.Quote{{Side: exchange.SideBuy, Price: 1326, Size: 1.2}}},
+		map[exchange.Side][]Identity{exchange.SideBuy: {{OrderID: "fresh", Nonce: "9"}}}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(client.cancelled) != 1 {
+		t.Fatalf("cancelled %v with the budget spent; stale terms must not be deferred", client.cancelled)
 	}
 }

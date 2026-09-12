@@ -155,7 +155,11 @@ func (s *Syncer) reconcileSide(
 
 		if current != nil {
 			quantum := sizeQuantumUI(s.spec, current.Price)
-			decision := evaluateCancel(current, target, opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC(), quantum)
+			// Derived per order, because the correct bound depends on that order's own price.
+			// An error here yields "", which staleTermsReason reads as "cannot say" and leaves
+			// the order alone rather than churning the book on a guess.
+			requiredWorstFee, _ := s.client.RequiredWorstFee(s.spec, current.Price)
+			decision := evaluateCancel(current, target, opposite, s.cfg, snapshot.LastQuoteUpdate, time.Now().UTC(), quantum, requiredWorstFee)
 			switch {
 			case decision.Suppress:
 				s.logger.Info("replace suppressed", "order_id", current.ID, "side", current.Side, "reason", decision.SuppressReason)
@@ -238,7 +242,7 @@ type cancelDecision struct {
 	SuppressReason   string
 }
 
-func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *strategy.Quote, cfg config.Config, fallbackQuoteTime time.Time, now time.Time, quantum float64) cancelDecision {
+func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *strategy.Quote, cfg config.Config, fallbackQuoteTime time.Time, now time.Time, quantum float64, requiredWorstFee string) cancelDecision {
 	if current == nil {
 		return cancelDecision{}
 	}
@@ -247,6 +251,22 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 	}
 	if current.Side != target.Side {
 		return cancelDecision{Cancel: true, Reason: "side_mismatch"}
+	}
+	// Signed terms are checked before price and size, and unconditionally: no minimum-lifetime
+	// suppression, no deferral when the cancel budget is spent. An order that can take when the
+	// operator has said it must not is not something to leave resting for a quieter moment.
+	//
+	// This has to run every cycle, not only at startup. ECS drains the previous task AFTER the
+	// new one is healthy, so a predecessor keeps quoting and can place orders SECONDS AFTER its
+	// successor's startup reconciliation has already run. Startup never sees them and, on a
+	// stable ladder, nothing else ever replaces them.
+	//
+	// Observed: a drill flipped post-only off and back on, and both times the draining task left
+	// quotes on the book carrying the previous setting. After the second flip the live book held
+	// six non-post-only maker quotes while the config said post-only -- precisely the state the
+	// startup check exists to prevent.
+	if reason := staleTermsReason(cfg, current, requiredWorstFee); reason != "" {
+		return cancelDecision{Cancel: true, Reason: reason}
 	}
 	if sizeMismatchRequiresReplace(current.Size, target.Size, cfg, quantum) {
 		return cancelDecision{Cancel: true, Reason: "size_mismatch", EnforceRateLimit: true}
@@ -526,6 +546,6 @@ func quoteAge(current *exchange.Order, fallbackQuoteTime, now time.Time) time.Du
 // shouldCancel is the price-drift-only helper used by the unit tests. Quantum 0 keeps it on the
 // old tolerance arithmetic, which is what those cases are about.
 func shouldCancel(current *exchange.Order, target *strategy.Quote, staleThresholdBPS float64, opposite *strategy.Quote) bool {
-	decision := evaluateCancel(current, target, opposite, config.Config{CancelStaleOrderThreshold: staleThresholdBPS}, time.Time{}, time.Now().UTC(), 0)
+	decision := evaluateCancel(current, target, opposite, config.Config{CancelStaleOrderThreshold: staleThresholdBPS}, time.Time{}, time.Now().UTC(), 0, "")
 	return decision.Cancel
 }
