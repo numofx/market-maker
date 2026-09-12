@@ -17,10 +17,11 @@ import (
 )
 
 type mockClient struct {
-	openOrders []exchange.Order
-	placed     []exchange.PlaceOrderRequest
-	cancelled  []string
-	placeErr   error
+	openOrders       []exchange.Order
+	placed           []exchange.PlaceOrderRequest
+	cancelled        []string
+	placeErr         error
+	requiredWorstFee string
 }
 
 func (m *mockClient) GetBook(context.Context, string) (exchange.Book, error) {
@@ -34,6 +35,13 @@ func (m *mockClient) CancelAllOrders(_ context.Context, _ string, _ string) erro
 	}
 	return nil
 }
+
+// requiredWorstFee lets a test pretend the venue's schedule demands a particular bound. Empty
+// means "cannot say", which staleTermsReason treats as "leave the order alone".
+func (m *mockClient) RequiredWorstFee(_ exchange.MarketSpec, _ float64) (string, error) {
+	return m.requiredWorstFee, nil
+}
+
 func (m *mockClient) GetMarket(context.Context, string) (exchange.MarketSpec, error) {
 	return exchange.MarketSpec{}, nil
 }
