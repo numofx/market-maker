@@ -74,7 +74,13 @@ type Config struct {
 	// MarketRefreshSeconds bounds how stale the cached fee schedule may get before the next quote
 	// refetches it. Unset falls back to the client's own default; the refresh cannot be switched
 	// off, because a schedule cached forever is the defect it exists to fix.
-	MarketRefreshSeconds         int64
+	MarketRefreshSeconds int64
+	// PostOnlyQuotes sends post_only on every quote, so the venue refuses any that would take.
+	//
+	// On by default: a market maker that takes is paying the taker fee to do the opposite of its
+	// job, and since the fee follows whichever order arrived later, a requoting bot is the taker
+	// far more often than its name suggests. MM_POST_ONLY_QUOTES=false opts out.
+	PostOnlyQuotes               bool
 	OrderExpirySeconds           int64
 	StateFile                    string
 	MarketSymbol                 string
@@ -157,6 +163,7 @@ func Load() (Config, error) {
 		WorstFee:                     envString("MM_WORST_FEE", defaultWorstFee),
 		OrderExpirySeconds:           int64(envInt("MM_ORDER_EXPIRY_SECONDS", defaultExpirySeconds)),
 		MarketRefreshSeconds:         int64(envInt("MM_MARKET_REFRESH_SECONDS", defaultMarketRefreshSeconds)),
+		PostOnlyQuotes:               envBool("MM_POST_ONLY_QUOTES", true),
 		StateFile:                    envString("MM_STATE_FILE", filepath.Join(".", ".mm-bot-state.json")),
 		MarketSymbol:                 envString("MM_MARKET_SYMBOL", defaultMarket),
 		PollInterval:                 time.Duration(envInt("MM_POLL_INTERVAL_MS", defaultPollIntervalMS)) * time.Millisecond,
