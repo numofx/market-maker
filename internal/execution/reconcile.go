@@ -158,7 +158,11 @@ func startupRejectReason(cfg config.Config, spec exchange.MarketSpec, order exch
 	if parts[2] != wantSide {
 		return "malformed_metadata"
 	}
-	return staleTermsReason(cfg, spec, order, client)
+	required, err := client.RequiredWorstFee(spec, order.Price)
+	if err != nil {
+		required = ""
+	}
+	return staleTermsReason(cfg, &order, required)
 }
 
 // staleTermsReason rejects an order that is resting under terms this process would not sign now.
@@ -178,26 +182,34 @@ func startupRejectReason(cfg config.Config, spec exchange.MarketSpec, order exch
 //   - post_only: an order without it can take, whatever the config says.
 //   - worstFee: the signed per-unit bound. One signed under an older, lower fee schedule reverts
 //     TM_FeeTooHigh on every fill it takes, silently, until it expires.
-func staleTermsReason(cfg config.Config, spec exchange.MarketSpec, order exchange.Order, client exchange.Client) string {
+//
+// staleTermsReason reports why an order is resting under terms this process would not sign now.
+//
+// Takes the required bound rather than a client, so the same rule serves both startup
+// reconciliation and the steady-state cycle. Empty requiredWorstFee means "cannot say", which
+// leaves the order alone -- the schedule refresh forces a requote if the fee actually moved, and
+// churning the whole book on a failed lookup would be worse than a stale bound.
+//
+// Two terms matter, because both are promises made at signing time that cannot be amended:
+//
+//   - post_only: an order without it can take, whatever the config says.
+//   - worstFee: a bound signed under an older, lower schedule reverts TM_FeeTooHigh on every fill
+//     it takes, silently, until it expires.
+func staleTermsReason(cfg config.Config, order *exchange.Order, requiredWorstFee string) string {
+	if order == nil {
+		return ""
+	}
 	if order.PostOnly != cfg.PostOnlyQuotes {
 		return "post_only_mismatch"
 	}
-
-	// The bound is compared against what this process would sign for THIS order's own price,
-	// rather than against a fixed number: the correct bound is price-dependent, so a resting
-	// order priced differently legitimately carries a different one. What matters is whether it
-	// still covers the schedule.
-	required, err := client.RequiredWorstFee(spec, order.Price)
-	if err != nil || required == "" {
-		// Unable to say, so do not churn the book on a guess. The order stays; the schedule
-		// refresh will force a requote if the fee actually moved.
+	if strings.TrimSpace(requiredWorstFee) == "" {
 		return ""
 	}
 	have, ok := new(big.Int).SetString(strings.TrimSpace(order.WorstFee), 10)
 	if !ok {
 		return "unreadable_worst_fee"
 	}
-	want, ok := new(big.Int).SetString(strings.TrimSpace(required), 10)
+	want, ok := new(big.Int).SetString(strings.TrimSpace(requiredWorstFee), 10)
 	if !ok {
 		return ""
 	}

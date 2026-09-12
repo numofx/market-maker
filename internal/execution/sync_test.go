@@ -119,7 +119,7 @@ func TestEvaluateCancelSuppression(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decision := evaluateCancel(current, target, nil, tt.cfg, time.Time{}, now, 0)
+			decision := evaluateCancel(current, target, nil, tt.cfg, time.Time{}, now, 0, "")
 			if decision.SuppressReason != tt.wantSuppress {
 				t.Fatalf("suppress reason = %q want %q", decision.SuppressReason, tt.wantSuppress)
 			}
@@ -138,7 +138,7 @@ func TestEvaluateCancelIgnoresDustSizeMismatch(t *testing.T) {
 	decision := evaluateCancel(current, target, nil, config.Config{
 		CancelStaleOrderThreshold: 10,
 		AdoptSizeTolerance:        0.000001,
-	}, time.Time{}, now, 0)
+	}, time.Time{}, now, 0, "")
 	if decision.Cancel {
 		t.Fatalf("expected dust size mismatch to be kept, got cancel reason %q", decision.Reason)
 	}
@@ -155,7 +155,7 @@ func TestEvaluateCancelReplacesMaterialSizeMismatch(t *testing.T) {
 	decision := evaluateCancel(current, target, nil, config.Config{
 		CancelStaleOrderThreshold: 10,
 		AdoptSizeTolerance:        0.000001,
-	}, time.Time{}, now, 0)
+	}, time.Time{}, now, 0, "")
 	if !decision.Cancel || decision.Reason != "size_mismatch" {
 		t.Fatalf("expected material size mismatch replace, got cancel=%v reason=%q", decision.Cancel, decision.Reason)
 	}
