@@ -38,6 +38,10 @@ type AssetPosition struct {
 	Total     float64
 	Reserved  float64
 	Available float64
+	// Reusable is the part of Reserved this bot frees again each cycle -- its own replaceable
+	// orders on this market. The quoting budget is Available + Reusable, and both come from the
+	// client so the reservation is computed exactly once. See exchange.Balance.Reusable.
+	Reusable float64
 }
 
 type Snapshot struct {

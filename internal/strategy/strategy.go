@@ -158,11 +158,25 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 		quoteAvailable = quotePosition.Total
 		baseAvailable = 0
 	} else {
-		baseAvailable = basePosition.Available
-		quoteAvailable = quotePosition.Available
-		reusableBase, reusableQuote := reusableCapacity(spec, snapshot.OpenOrders)
-		baseAvailable += reusableBase
-		quoteAvailable += reusableQuote
+		// Budget = Available + Reusable, both reported by the client.
+		//
+		// Reusable is the part of Reserved this bot frees again this cycle: its own replaceable
+		// orders on THIS market. The client computes it with the same arithmetic that produced
+		// Reserved, which is the point -- the previous version recomputed the reservation here,
+		// from UI values (USDC size x cNGN-per-USDC) while the client used engine values (cNGN
+		// amount x USDC-per-cNGN). Those are not the same quantity, so the add-back never
+		// cancelled the subtraction, and the residual fed the next cycle's size -- which changed
+		// the orders, which changed the reservation. The target walked while the price stood still.
+		//
+		// Measured before this change: 62 of 71 consecutive replacements had current_size equal to
+		// the PREVIOUS cycle's target_size, drifting ~1.1% per cycle at a price identical to 15
+		// digits, with diffs 18x to 1152x the size quantum. Not rounding, and not the market.
+		//
+		// Not Total, either: the exposure query filters by owner and subaccount but NOT by market,
+		// so Reserved can include orders on another market that this ladder cannot free, and
+		// protected orders are never cancelled by design. Reusable excludes both.
+		baseAvailable = basePosition.Available + basePosition.Reusable
+		quoteAvailable = quotePosition.Available + quotePosition.Reusable
 	}
 
 	maxBidSize := quoteAvailable / bidPrice
@@ -322,18 +336,6 @@ func maxInventoryForSide(cfg config.Config, side exchange.Side) float64 {
 		return effectiveMaxLong(cfg)
 	}
 	return effectiveMaxShort(cfg)
-}
-
-func reusableCapacity(spec exchange.MarketSpec, orders []exchange.Order) (base, quote float64) {
-	for _, order := range orders {
-		switch order.Side {
-		case exchange.SideBuy:
-			quote += order.Size * order.Price
-		case exchange.SideSell:
-			base += order.Size
-		}
-	}
-	return base, quote
 }
 
 // buildLevels expands the single best-level quote into a ladder of up to

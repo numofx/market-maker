@@ -65,6 +65,19 @@ type Balance struct {
 	Available float64 `json:"available"`
 	Reserved  float64 `json:"reserved"`
 	Total     float64 `json:"total"`
+	// Reusable is the part of Reserved that this bot will free again this cycle: capacity held by
+	// its own replaceable orders ON THIS MARKET. The quoting budget is Available + Reusable.
+	//
+	// Computed here, with the same arithmetic that produced Reserved, because deriving it a second
+	// time elsewhere is what made the ladder size drift: the strategy recomputed the reservation
+	// from UI values while this used engine values, so the add-back never cancelled the
+	// subtraction and the residual fed the next cycle's size.
+	//
+	// Excluded from Reusable, and therefore genuinely unavailable:
+	//   - protected orders (validation/smoke/manual), which are never cancelled by design
+	//   - orders on OTHER markets in the same subaccount, which this ladder cannot free --
+	//     the exposure query filters only by owner and subaccount, not by market
+	Reusable float64 `json:"reusable"`
 }
 
 type RawBalance struct {
@@ -575,8 +588,9 @@ func (c *HTTPClient) GetBalances(ctx context.Context) ([]Balance, error) {
 	}
 
 	exposures := make(map[string]float64)
+	reusable := make(map[string]float64)
 	rows, err := c.pg.Query(ctx, `
-select side, desired_amount, limit_price, asset_address, sub_id
+select order_id, side, desired_amount, limit_price, asset_address, sub_id
 from active_orders
 where owner_address = $1 and subaccount_id = $2 and status = 'active'
 `, c.cfg.OwnerAddress, c.cfg.SubaccountID)
@@ -584,13 +598,15 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 		return nil, fmt.Errorf("query exposures: %w", err)
 	}
 	defer rows.Close()
+	marketSpec, specErr := c.marketForBalances()
 	for rows.Next() {
+		var orderID string
 		var side string
 		var rawSize string
 		var price string
 		var assetAddress string
 		var subID string
-		if err := rows.Scan(&side, &rawSize, &price, &assetAddress, &subID); err != nil {
+		if err := rows.Scan(&orderID, &side, &rawSize, &price, &assetAddress, &subID); err != nil {
 			return nil, fmt.Errorf("scan exposure: %w", err)
 		}
 		size := orderAmountToFloat(c.marketSpecForAsset(assetAddress, subID), rawSize)
@@ -600,6 +616,12 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 		}
 		assetKey, reserved := c.reservedExposureKey(side, size, px, assetAddress, subID)
 		exposures[assetKey] += reserved
+		// Reusable only when this ladder will actually free it: this market, not protected.
+		sameMarket := specErr == nil &&
+			strings.EqualFold(assetAddress, marketSpec.AssetAddress) && subID == marketSpec.SubID
+		if sameMarket && !isProtectedOrderID(orderID, c.cfg.ProtectedPrefixes) {
+			reusable[assetKey] += reserved
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -631,6 +653,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 		Total:     baseTotal,
 		Reserved:  baseReserved,
 		Available: baseAvailable,
+		Reusable:  minFloat(baseReserved, reusable[baseKey]),
 	})
 
 	quoteTotal := positions[quoteKey]
@@ -642,6 +665,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 		Total:     quoteTotal,
 		Reserved:  quoteReserved,
 		Available: quoteAvailable,
+		Reusable:  minFloat(quoteReserved, reusable[quoteKey]),
 	})
 	return dedupeBalances(out), nil
 }
@@ -1845,6 +1869,13 @@ func dedupeBalances(items []Balance) []Balance {
 		out = append(out, item)
 	}
 	return out
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func maxFloat(a, b float64) float64 {
