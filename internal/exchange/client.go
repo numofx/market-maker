@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -174,6 +175,10 @@ type PlaceOrderRequest struct {
 	Size    float64
 	OrderID string
 	Nonce   string
+	// PostOnly asks the venue to refuse the order rather than let it take. A market maker wants
+	// this on every quote: taking is what it is trying not to do, and since the fee follows
+	// whichever order arrived later, a quote that crosses pays the taker fee.
+	PostOnly bool
 }
 
 type HTTPClient struct {
@@ -798,6 +803,9 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	payload["side"] = payloadSide
 	payload["desired_amount"] = payloadDesiredAmount
 	payload["limit_price"] = payloadLimitPrice
+	if req.PostOnly {
+		payload["post_only"] = true
+	}
 	var resp struct {
 		Order struct {
 			OrderID       string `json:"order_id"`
@@ -1337,6 +1345,13 @@ func (c *HTTPClient) post(ctx context.Context, path string, payload any, out any
 	return c.do(req, out)
 }
 
+// ErrPostOnlyWouldCross is the venue refusing a post-only order because it would have taken.
+//
+// It is a routine outcome, not a failure: the book moved between quoting and submitting, which on
+// a fast market is expected several times an hour. Callers skip the level and requote rather than
+// abandoning the cycle.
+var ErrPostOnlyWouldCross = errors.New("post_only order would cross the resting book")
+
 func (c *HTTPClient) do(req *http.Request, out any) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -1345,6 +1360,12 @@ func (c *HTTPClient) do(req *http.Request, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		// 422 with this message is the post-only guard, which the caller treats as an expected
+		// outcome rather than an error. Matching on the status AND the text so an unrelated 422
+		// does not get quietly swallowed as "just a reprice".
+		if resp.StatusCode == http.StatusUnprocessableEntity && strings.Contains(string(body), "post_only order would cross") {
+			return ErrPostOnlyWouldCross
+		}
 		return fmt.Errorf("%s %s returned %d: %s", req.Method, req.URL.Path, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if out == nil {

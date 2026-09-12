@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -411,13 +412,32 @@ func (s *Syncer) place(ctx context.Context, market string, q strategy.Quote, id 
 		return nil
 	}
 	if _, err := s.client.PlaceLimitOrder(ctx, exchange.PlaceOrderRequest{
-		Market:  market,
-		Side:    q.Side,
-		Price:   q.Price,
-		Size:    q.Size,
-		OrderID: id.OrderID,
-		Nonce:   id.Nonce,
+		Market:   market,
+		Side:     q.Side,
+		Price:    q.Price,
+		Size:     q.Size,
+		OrderID:  id.OrderID,
+		Nonce:    id.Nonce,
+		PostOnly: s.cfg.PostOnlyQuotes,
 	}); err != nil {
+		// A post-only rejection is the guard doing its job, not a failure. The book moved between
+		// pricing this quote and submitting it, so the quote would have taken -- which is exactly
+		// what the flag exists to prevent.
+		//
+		// It must not abort the cycle. place() returns into reconcileSide, which returns into
+		// Sync, which in RunCycle is a bare `return err` -- so treating this as an error would
+		// abandon every remaining level on both sides because one of them was priced a tick too
+		// aggressively. The level is skipped, the rest of the ladder is placed, and the next cycle
+		// reprices this one against a book it can actually rest on.
+		if errors.Is(err, exchange.ErrPostOnlyWouldCross) {
+			s.logger.Info(
+				"post-only quote rejected",
+				"market", market, "side", q.Side, "price", q.Price, "size", q.Size,
+				"action", "level skipped; requoting next cycle",
+			)
+			s.metrics.IncPostOnlyRejections()
+			return nil
+		}
 		s.metrics.IncErrors()
 		return fmt.Errorf("place order: %w", err)
 	}

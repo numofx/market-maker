@@ -20,6 +20,7 @@ type Registry struct {
 	orderPlacements                uint64
 	cancels                        uint64
 	errors                         uint64
+	postOnlyRejections             uint64
 	partialFills                   uint64
 	suppressedReplaces             uint64
 	lastReference                  float64
@@ -117,6 +118,31 @@ func (r *Registry) IncErrors() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.errors++
+}
+
+// IncPostOnlyRejections counts quotes the venue refused because they would have taken.
+//
+// Deliberately not an error: it is the post-only guard working, and the bot requotes. It is worth
+// counting because a rate that climbs means quotes are being priced through the opposing touch --
+// a spread or skew problem -- and because a rate that drops to zero on a moving market suggests
+// the flag stopped being sent.
+func (r *Registry) IncPostOnlyRejections() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.postOnlyRejections++
+}
+
+// Errors exposes the error counter so tests can assert that a routine outcome did not inflate it.
+func (r *Registry) Errors() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.errors
+}
+
+func (r *Registry) PostOnlyRejections() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.postOnlyRejections
 }
 
 func (r *Registry) IncFill(side string) {
