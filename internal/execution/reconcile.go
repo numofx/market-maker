@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"sort"
 	"strings"
 
@@ -62,7 +63,7 @@ func ReconcileStartup(
 		exchange.SideSell: {},
 	}
 	for _, order := range snapshot.OpenOrders {
-		reason := startupRejectReason(spec, order)
+		reason := startupRejectReason(cfg, spec, order, client)
 		if reason != "" {
 			result.RejectedReasons[order.ID] = reason
 			continue
@@ -136,7 +137,7 @@ func ReconcileStartup(
 	return result, adoptedOrders, nil
 }
 
-func startupRejectReason(spec exchange.MarketSpec, order exchange.Order) string {
+func startupRejectReason(cfg config.Config, spec exchange.MarketSpec, order exchange.Order, client exchange.Client) string {
 	if !order.Managed {
 		return "ambiguous_ownership"
 	}
@@ -156,6 +157,52 @@ func startupRejectReason(spec exchange.MarketSpec, order exchange.Order) string 
 	wantSide := string(order.Side)
 	if parts[2] != wantSide {
 		return "malformed_metadata"
+	}
+	return staleTermsReason(cfg, spec, order, client)
+}
+
+// staleTermsReason rejects an order that is resting under terms this process would not sign now.
+//
+// An order carries the guarantees of the image that placed it, and nothing else notices. A stable
+// ladder is never replaced -- that is what the quantum fix achieved -- so a quote placed by a
+// previous image can rest indefinitely under superseded terms while the operator believes the new
+// ones are in force.
+//
+// That is not hypothetical. Deploying post-only left six live quotes without it for twenty
+// minutes: the bot had the flag, the ladder never churned, and only reading post_only back off
+// the venue showed it. A restart fixed it by accident. This makes the restart do it on purpose.
+//
+// Two terms matter, because both are promises made at signing time and neither can be amended
+// afterwards:
+//
+//   - post_only: an order without it can take, whatever the config says.
+//   - worstFee: the signed per-unit bound. One signed under an older, lower fee schedule reverts
+//     TM_FeeTooHigh on every fill it takes, silently, until it expires.
+func staleTermsReason(cfg config.Config, spec exchange.MarketSpec, order exchange.Order, client exchange.Client) string {
+	if order.PostOnly != cfg.PostOnlyQuotes {
+		return "post_only_mismatch"
+	}
+
+	// The bound is compared against what this process would sign for THIS order's own price,
+	// rather than against a fixed number: the correct bound is price-dependent, so a resting
+	// order priced differently legitimately carries a different one. What matters is whether it
+	// still covers the schedule.
+	required, err := client.RequiredWorstFee(spec, order.Price)
+	if err != nil || required == "" {
+		// Unable to say, so do not churn the book on a guess. The order stays; the schedule
+		// refresh will force a requote if the fee actually moved.
+		return ""
+	}
+	have, ok := new(big.Int).SetString(strings.TrimSpace(order.WorstFee), 10)
+	if !ok {
+		return "unreadable_worst_fee"
+	}
+	want, ok := new(big.Int).SetString(strings.TrimSpace(required), 10)
+	if !ok {
+		return ""
+	}
+	if have.Cmp(want) < 0 {
+		return "worst_fee_below_current_schedule"
 	}
 	return ""
 }

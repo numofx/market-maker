@@ -86,6 +86,12 @@ type Order struct {
 	CreatedAt  time.Time `json:"created_at"`
 	Managed    bool      `json:"managed"`
 	Subaccount string    `json:"subaccount_id"`
+	// PostOnly and WorstFee are read back so startup can tell whether a resting order was signed
+	// under the CURRENT configuration. An order placed by a previous image carries that image's
+	// guarantees, and nothing else notices: a stable ladder is never replaced, so it can rest
+	// indefinitely under terms the operator believes were superseded.
+	PostOnly bool
+	WorstFee string
 }
 
 type MarketSpec struct {
@@ -139,6 +145,7 @@ type Client interface {
 	CancelOrder(ctx context.Context, orderID string, reason string) error
 	CancelAllOrders(ctx context.Context, market string, reason string) error
 	GetMarket(ctx context.Context, market string) (MarketSpec, error)
+	RequiredWorstFee(spec MarketSpec, uiPrice float64) (string, error)
 }
 
 type ClientConfig struct {
@@ -646,7 +653,8 @@ func (c *HTTPClient) ListOpenOrders(ctx context.Context, market string) ([]Order
 	}
 
 	rows, err := c.pg.Query(ctx, `
-select order_id, side, limit_price, desired_amount, filled_amount, nonce, owner_address, created_at, subaccount_id
+select order_id, side, limit_price, desired_amount, filled_amount, nonce, owner_address, created_at, subaccount_id,
+       post_only, worst_fee
 from active_orders
 where owner_address = $1 and asset_address = $2 and sub_id = $3 and subaccount_id = $4 and status = 'active'
 order by created_at asc
@@ -668,8 +676,10 @@ order by created_at asc
 			owner         string
 			createdAt     time.Time
 			subaccountID  string
+			postOnly      bool
+			worstFee      string
 		)
-		if err := rows.Scan(&orderID, &side, &limitPrice, &desiredAmount, &filledAmount, &nonce, &owner, &createdAt, &subaccountID); err != nil {
+		if err := rows.Scan(&orderID, &side, &limitPrice, &desiredAmount, &filledAmount, &nonce, &owner, &createdAt, &subaccountID, &postOnly, &worstFee); err != nil {
 			return nil, fmt.Errorf("scan order: %w", err)
 		}
 		price, err := strconv.ParseFloat(limitPrice, 64)
@@ -700,6 +710,8 @@ order by created_at asc
 			CreatedAt:  createdAt,
 			Managed:    strings.HasPrefix(orderID, managedOrderPrefix(market)),
 			Subaccount: subaccountID,
+			PostOnly:   postOnly,
+			WorstFee:   worstFee,
 		})
 	}
 	return out, rows.Err()
@@ -1495,6 +1507,25 @@ func rawBigToFloat(value *big.Int) float64 {
 	rat := new(big.Rat).SetFrac(value, decimalScale)
 	out, _ := rat.Float64()
 	return out
+}
+
+// RequiredWorstFee is the bound this process would sign for an order already resting at the given
+// UI price -- used by startup reconciliation to decide whether a resting order's signed bound
+// still covers the current fee schedule.
+//
+// The unit conversion is the whole reason this lives here rather than in the caller. Order.Price
+// is the UI price (cNGN per USDC); signedWorstFee takes the ENGINE price (USDC per cNGN), and the
+// two are reciprocals. Passing one where the other is expected produces a bound wrong by a factor
+// of ~1.8 million, which would reject every resting order on every restart.
+func (c *HTTPClient) RequiredWorstFee(spec MarketSpec, uiPrice float64) (string, error) {
+	enginePrice := uiPrice
+	if spec.Symbol == "USDCcNGN-SPOT" {
+		if uiPrice <= 0 {
+			return "", fmt.Errorf("cannot derive a bound from ui price %v", uiPrice)
+		}
+		enginePrice = 1.0 / uiPrice
+	}
+	return c.signedWorstFee(spec, enginePrice)
 }
 
 // worstFeeHeadroomBps is how far above the venue's published schedule the bot signs its fee
