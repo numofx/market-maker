@@ -75,6 +75,7 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 			Total:     balance.Total,
 			Reserved:  balance.Reserved,
 			Available: balance.Available,
+			Reusable:  balance.Reusable,
 		}
 	}
 	if l.spec.Symbol == "USDCcNGN-SPOT" {

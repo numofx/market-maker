@@ -38,8 +38,8 @@ func TestBuildQuotes(t *testing.T) {
 				BestAsk:          1510,
 				InventoryByAsset: map[string]float64{"USDC": 0},
 				Positions: map[string]state.AssetPosition{
-					"USDC": {Available: 100},
-					"cNGN": {Available: 100000},
+					"USDC": {Total: 100, Available: 100},
+					"cNGN": {Total: 100000, Available: 100000},
 				},
 			},
 			wantRef: 1500,
@@ -53,8 +53,8 @@ func TestBuildQuotes(t *testing.T) {
 				RecentTrades:          []exchange.Trade{{Price: 2000, CreatedAt: freshTradeAt}},
 				InventoryByAsset:      map[string]float64{"USDC": 0},
 				Positions: map[string]state.AssetPosition{
-					"USDC": {Available: 100},
-					"cNGN": {Available: 100000},
+					"USDC": {Total: 100, Available: 100},
+					"cNGN": {Total: 100000, Available: 100000},
 				},
 			},
 			wantRef: 2000,
@@ -90,8 +90,8 @@ func TestInventorySkewBehavior(t *testing.T) {
 		BestAsk:          1001,
 		InventoryByAsset: map[string]float64{"USDC": 0},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Available: 100},
-			"cNGN": {Available: 100000},
+			"USDC": {Total: 100, Available: 100},
+			"cNGN": {Total: 100000, Available: 100000},
 		},
 	})
 	if err != nil {
@@ -113,8 +113,8 @@ func TestInventorySkewBehavior(t *testing.T) {
 				BestAsk:          1001,
 				InventoryByAsset: map[string]float64{"USDC": tt.inventory},
 				Positions: map[string]state.AssetPosition{
-					"USDC": {Available: 100},
-					"cNGN": {Available: 100000},
+					"USDC": {Total: 100, Available: 100},
+					"cNGN": {Total: 100000, Available: 100000},
 				},
 			})
 			if err != nil {
@@ -147,8 +147,8 @@ func TestAvailableBalanceCapsQuoteSize(t *testing.T) {
 		BestAsk:          101,
 		InventoryByAsset: map[string]float64{"USDC": 0},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Available: 1.3},
-			"cNGN": {Available: 250},
+			"USDC": {Total: 1.3, Available: 1.3},
+			"cNGN": {Total: 250, Available: 250},
 		},
 	})
 	if err != nil {
@@ -177,7 +177,19 @@ func TestExistingOpenOrdersReuseReservedCapacity(t *testing.T) {
 		Market:              "USDCcNGN-SPOT",
 		ExternalAnchorPrice: 1380,
 		InventoryByAsset:    map[string]float64{"USDC": 0},
-		Positions:           map[string]state.AssetPosition{"USDC": {Available: 0}, "cNGN": {Available: 0}},
+		// The bot's own two resting orders are holding the entire balance: Available is 0, but
+		// Total still shows it, because Total is the raw subaccount balance. That capacity is
+		// reusable -- these orders are cancel-replaced every cycle -- so the budget is Total.
+		//
+		// Total: 0 with orders resting, which this fixture used to say, is a state the client
+		// cannot report: it derives Available as Total minus reservations.
+		// The bot's own two resting orders hold the whole balance: Available is 0, and the client
+		// reports that capacity as Reusable because these orders are cancel-replaced each cycle.
+		// The budget is Available + Reusable, so the ladder can still be quoted at full size.
+		Positions: map[string]state.AssetPosition{
+			"USDC": {Total: 2, Reserved: 2, Available: 0, Reusable: 2},
+			"cNGN": {Total: 2800, Reserved: 2800, Available: 0, Reusable: 2800},
+		},
 		OpenOrders: []exchange.Order{
 			{ID: "bid-1", Side: exchange.SideBuy, Price: 1373.1, Size: 2},
 			{ID: "ask-1", Side: exchange.SideSell, Price: 1386.9, Size: 2},
@@ -222,8 +234,8 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 			ExternalAnchorPrice: 1353.0884,
 			InventoryByAsset:    map[string]float64{"USDC": 0},
 			Positions: map[string]state.AssetPosition{
-				"USDC": {Available: 0},
-				"cNGN": {Available: 1000},
+				"USDC": {Total: 0, Available: 0},
+				"cNGN": {Total: 1000, Available: 1000},
 			},
 		})
 		if err != nil {
@@ -247,7 +259,7 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 			InventoryByAsset:    map[string]float64{"USDC": 365.57},
 			Positions: map[string]state.AssetPosition{
 				"USDC": {Total: 365.57, Reserved: 365.57, Available: 0},
-				"cNGN": {Available: 1000},
+				"cNGN": {Total: 1000, Available: 1000},
 			},
 		})
 		if err != nil {
@@ -270,8 +282,8 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 			ExternalAnchorPrice: 1353.0884,
 			InventoryByAsset:    map[string]float64{"USDC": 1},
 			Positions: map[string]state.AssetPosition{
-				"USDC": {Available: 1},
-				"cNGN": {Available: 100},
+				"USDC": {Total: 1, Available: 1},
+				"cNGN": {Total: 100, Available: 100},
 			},
 		})
 		if err != nil {
@@ -294,8 +306,8 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 			ExternalAnchorPrice: 1353.0884,
 			InventoryByAsset:    map[string]float64{"USDC": 5},
 			Positions: map[string]state.AssetPosition{
-				"USDC": {Available: 5},
-				"cNGN": {Available: 5000},
+				"USDC": {Total: 5, Available: 5},
+				"cNGN": {Total: 5000, Available: 5000},
 			},
 		})
 		if err != nil {
@@ -321,8 +333,8 @@ func TestOperatorModes(t *testing.T) {
 		BestAsk:          101,
 		InventoryByAsset: map[string]float64{"USDC": 0},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Available: 100},
-			"cNGN": {Available: 100000},
+			"USDC": {Total: 100, Available: 100},
+			"cNGN": {Total: 100000, Available: 100000},
 		},
 	}
 
@@ -382,8 +394,8 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 				ExternalAnchorPrice:  1700,
 				LocalReferenceSource: "book",
 				Positions: map[string]state.AssetPosition{
-					"USDC": {Available: 100},
-					"cNGN": {Available: 100000},
+					"USDC": {Total: 100, Available: 100},
+					"cNGN": {Total: 100000, Available: 100000},
 				},
 			},
 			wantRef:    1500,
@@ -398,8 +410,8 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 				ExternalAnchorPrice:   1700,
 				LocalReferenceSource:  "trade",
 				Positions: map[string]state.AssetPosition{
-					"USDC": {Available: 100},
-					"cNGN": {Available: 100000},
+					"USDC": {Total: 100, Available: 100},
+					"cNGN": {Total: 100000, Available: 100000},
 				},
 			},
 			wantRef:    1550,
@@ -415,8 +427,8 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
 				ExternalAnchorPrice:   1700,
 				Positions: map[string]state.AssetPosition{
-					"USDC": {Available: 100},
-					"cNGN": {Available: 100000},
+					"USDC": {Total: 100, Available: 100},
+					"cNGN": {Total: 100000, Available: 100000},
 				},
 			},
 			wantRef:    1700,
@@ -451,8 +463,8 @@ func TestExternalBootstrapMultipliersOnlyApplyWhenExternalActive(t *testing.T) {
 		},
 	}
 	basePositions := map[string]state.AssetPosition{
-		"USDC": {Available: 100},
-		"cNGN": {Available: 100000},
+		"USDC": {Total: 100, Available: 100},
+		"cNGN": {Total: 100000, Available: 100000},
 	}
 
 	local, err := BuildQuotes(cfg, spec, state.Snapshot{
@@ -497,8 +509,8 @@ func TestNonSpotMarketsUnchangedAndStillPreferConfiguredAnchor(t *testing.T) {
 		BestAsk:     1501,
 		AnchorPrice: 1600,
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Available: 100},
-			"cNGN": {Available: 100000},
+			"USDC": {Total: 100, Available: 100},
+			"cNGN": {Total: 100000, Available: 100000},
 		},
 	})
 	if err != nil {
@@ -590,7 +602,7 @@ func TestCashMarginedFutureAskGatedByShortInventoryLimit(t *testing.T) {
 		AnchorPrice:      1500,
 		InventoryByAsset: map[string]float64{"USDC": 0},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Available: 0},
+			"USDC": {Total: 0, Available: 0},
 			"cNGN": {Total: 100000, Available: 100000},
 		},
 	})
