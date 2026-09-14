@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/numofx/market-maker/internal/config"
+	"github.com/numofx/market-maker/internal/control"
 	"github.com/numofx/market-maker/internal/exchange"
 	"github.com/numofx/market-maker/internal/marketdata"
 	"github.com/numofx/market-maker/internal/metrics"
@@ -44,6 +46,24 @@ type Bot struct {
 	maxQuoteAge        time.Duration
 	maxAnchorDeviation float64
 	maxNetInventory    float64
+
+	// Operator control. control is nil for a bot built without one -- every test that predates the
+	// control API -- and every Controller method is nil-safe, so that bot behaves exactly as before.
+	control *control.Controller
+	// marketSymbol is spec.Symbol captured at construction. b.spec is rewritten by syncFeeSchedule on
+	// the loop, so the control API's cancel path must not read it.
+	marketSymbol  string
+	initialized   bool
+	lastQuotes    strategy.Result
+	haltSince     time.Time
+	runningSince  time.Time
+	killFileSince time.Time
+	lastCycleAt   time.Time
+	lastCycleErr  string
+	// view is the copy of the above that the control API reads from its own goroutines. Everything
+	// else on Bot belongs to the quoting loop.
+	viewMu sync.Mutex
+	view   control.BotView
 }
 
 type RuntimeSummary struct {
@@ -73,21 +93,32 @@ type RuntimeSummary struct {
 }
 
 func NewBot(cfg config.Config, client exchange.Client, spec exchange.MarketSpec, m *metrics.Registry, logger *slog.Logger, store *state.Store) *Bot {
-	return &Bot{
-		cfg:       cfg,
-		client:    client,
-		spec:      spec,
-		loader:    marketdata.NewLoaderWithSpotExternal(client, spec, marketdata.NewAnchorSource(cfg, spec), marketdata.NewUSDCCNGNSpotExternalAnchor(cfg), cfg.USDCCNGNSpotExternalAnchor.BootstrapOnly),
-		syncer:    NewSyncer(client, spec, cfg, m, logger),
-		metrics:   m,
-		logger:    logger,
-		store:     store,
-		persisted: state.Persistent{LastNonceBySide: map[string]uint64{}},
-		startedAt: time.Now().UTC(),
+	now := time.Now().UTC()
+	b := &Bot{
+		cfg:          cfg,
+		client:       client,
+		spec:         spec,
+		loader:       marketdata.NewLoaderWithSpotExternal(client, spec, marketdata.NewAnchorSource(cfg, spec), marketdata.NewUSDCCNGNSpotExternalAnchor(cfg), cfg.USDCCNGNSpotExternalAnchor.BootstrapOnly),
+		syncer:       NewSyncer(client, spec, cfg, m, logger),
+		metrics:      m,
+		logger:       logger,
+		store:        store,
+		persisted:    state.Persistent{LastNonceBySide: map[string]uint64{}},
+		startedAt:    now,
+		marketSymbol: spec.Symbol,
+		runningSince: now,
 	}
+	b.publishView()
+	return b
 }
 
-func (b *Bot) Initialize(ctx context.Context) error {
+func (b *Bot) Initialize(ctx context.Context) (err error) {
+	defer func() {
+		if err == nil {
+			b.initialized = true
+		}
+		b.publishView()
+	}()
 	b.metrics.SetOperatorMode(string(b.cfg.OperatorMode))
 	b.logger.Info("selected market metadata", marketMetadataAttrs(b.spec)...)
 	if validator, ok := b.client.(marketAssetValidator); ok {
@@ -106,17 +137,25 @@ func (b *Bot) Initialize(ctx context.Context) error {
 	if active, err := b.killSwitchActive(); err != nil {
 		return err
 	} else if active {
-		return b.haltForReason(ctx, "kill switch active", true, cancelCategoryKillSwitch)
+		b.killFileSince = time.Now().UTC()
+		return b.haltForReason(ctx, control.HaltReasonKillSwitchFile, true, cancelCategoryKillSwitch)
+	}
+	// A kill set through the control API survives the restart (the controller restored it from the
+	// state file). Checked before anything is loaded, like the file: a kill must not wait on the
+	// exchange being reachable, and a restarting killed bot must not reconcile its way into quoting.
+	if b.control.Status().Killed {
+		return b.haltForReason(ctx, control.HaltReasonControlKill, true, cancelCategoryKillSwitch)
 	}
 
 	snapshot, err := b.loader.Load(ctx, b.snapshot)
 	if err != nil {
 		return fmt.Errorf("load startup state: %w", err)
 	}
-	quotes, err := strategy.BuildQuotes(b.cfg, b.spec, snapshot)
+	quotes, err := strategy.BuildQuotesWithOverrides(b.cfg, b.spec, snapshot, b.strategyOverrides())
 	if err != nil {
 		return fmt.Errorf("build startup quotes: %w", err)
 	}
+	b.lastQuotes = quotes
 	b.applyDerivedState(&snapshot, quotes)
 	b.logReferenceSourceTransition(b.snapshot, snapshot)
 	b.updateReadiness(snapshot, quotes)
@@ -125,7 +164,11 @@ func (b *Bot) Initialize(ctx context.Context) error {
 	// boot — pause silently fails as an incident control exactly when it is relied on.
 	if b.cfg.OperatorMode == config.ModePause {
 		b.snapshot = snapshot
-		return b.haltForReason(ctx, "operator pause active", true, "")
+		return b.haltForReason(ctx, control.HaltReasonOperatorPause, true, "")
+	}
+	if b.control.Status().Paused {
+		b.snapshot = snapshot
+		return b.haltForReason(ctx, control.HaltReasonControlPause, true, "")
 	}
 	if b.cfg.OperatorMode == config.ModeDryRunHealth {
 		b.setHealthyState(snapshot, "")
@@ -143,7 +186,13 @@ func (b *Bot) Initialize(ctx context.Context) error {
 	b.lastReconciliation = result
 	b.persisted.LastAdoptedBidOrder = result.AdoptedBidOrderID
 	b.persisted.LastAdoptedAskOrder = result.AdoptedAskOrderID
+	startupOrders := make(map[string]exchange.Order, len(snapshot.OpenOrders))
+	for _, order := range snapshot.OpenOrders {
+		startupOrders[order.ID] = order
+	}
 	for _, id := range result.CanceledOrderIDs {
+		order := startupOrders[id]
+		b.syncer.recordAction("cancel", order.Side, order.Price, order.Size, id, "startup_reconciliation:"+result.RejectedReasons[id], "")
 		b.metrics.IncCancels()
 		b.metrics.IncCancelCategory(cancelCategoryStartupReconcile)
 		// Same reason as every other cancel: an order we took off the book must not be read as a
@@ -221,11 +270,22 @@ func (b *Bot) syncFeeSchedule(ctx context.Context) error {
 	return b.syncer.CancelAll(ctx, spec.Symbol, cancelCategoryFeeRaised)
 }
 
-func (b *Bot) RunCycle(ctx context.Context) error {
+func (b *Bot) RunCycle(ctx context.Context) (err error) {
+	defer func() { b.finishCycle(err) }()
 	if active, err := b.killSwitchActive(); err != nil {
 		return err
 	} else if active {
-		return b.haltForReason(ctx, "kill switch active", true, cancelCategoryKillSwitch)
+		if b.killFileSince.IsZero() {
+			b.killFileSince = time.Now().UTC()
+		}
+		return b.haltForReason(ctx, control.HaltReasonKillSwitchFile, true, cancelCategoryKillSwitch)
+	}
+	b.killFileSince = time.Time{}
+	// The control API's kill, on the same footing as the file: before the fee refresh and the load,
+	// so a killed bot keeps cancelling whatever it finds even while the exchange is unreachable. The
+	// handler has already cancelled once; this pass catches anything a mid-flight cycle placed.
+	if b.control.Status().Killed {
+		return b.haltForReason(ctx, control.HaltReasonControlKill, true, cancelCategoryKillSwitch)
 	}
 
 	if err := b.syncFeeSchedule(ctx); err != nil {
@@ -241,11 +301,12 @@ func (b *Bot) RunCycle(ctx context.Context) error {
 	// Drained here, not inside observeFills, so the set covers exactly the interval between the
 	// two snapshots being compared -- every cancel this bot issued since the last observation.
 	b.observeFills(b.snapshot, snapshot, b.syncer.TakeCancelled())
-	quotes, err := strategy.BuildQuotes(b.cfg, b.spec, snapshot)
+	quotes, err := strategy.BuildQuotesWithOverrides(b.cfg, b.spec, snapshot, b.strategyOverrides())
 	if err != nil {
 		b.metrics.IncErrors()
 		return err
 	}
+	b.lastQuotes = quotes
 	b.applyDerivedState(&snapshot, quotes)
 	b.logReferenceSourceTransition(b.snapshot, snapshot)
 	b.updateReadiness(snapshot, quotes)
@@ -256,14 +317,22 @@ func (b *Bot) RunCycle(ctx context.Context) error {
 		return b.haltForReason(ctx, riskDecision.Reason, true, cancelCategoryRiskTriggered)
 	}
 	b.clearDependencyStaleMetrics()
+	// Pause is checked before the halt is cleared, not after. Clearing first and re-halting made every
+	// paused cycle look like a fresh transition into the halt -- a "halted" warning per poll, and a
+	// since-timestamp that reset every two seconds.
+	if b.cfg.OperatorMode == config.ModePause {
+		b.snapshot = snapshot
+		return b.haltForReason(ctx, control.HaltReasonOperatorPause, true, "")
+	}
+	if b.control.Status().Paused {
+		b.snapshot = snapshot
+		return b.haltForReason(ctx, control.HaltReasonControlPause, true, "")
+	}
 	b.metrics.SetHaltState(false, "")
 	b.metrics.SetHealth(true, "")
-	b.currentHalted = false
+	b.markRunning()
 
 	switch b.cfg.OperatorMode {
-	case config.ModePause:
-		b.snapshot = snapshot
-		return b.haltForReason(ctx, "operator pause active", true, "")
 	case config.ModeDryRunHealth:
 		b.logger.Info("operator mode active", "mode", b.cfg.OperatorMode, "action", "observe_only")
 		b.recordInventory(snapshot)
@@ -274,7 +343,13 @@ func (b *Bot) RunCycle(ctx context.Context) error {
 		return nil
 	}
 
-	if time.Since(snapshot.LastQuoteUpdate) < b.cfg.QuoteRefreshInterval && len(snapshot.OpenOrders) > 0 {
+	// The refresh throttle is skipped in two cases where waiting is wrong. An operator change (adjust,
+	// a restored side, a resume) should reach the book on the cycle it woke, not a refresh interval
+	// later. And a resting quote inside its expiry margin must be re-signed now: the throttle defers by
+	// up to MM_QUOTE_REFRESH_INTERVAL_MS, and a margin shorter than that would let the quote lapse.
+	controlChanged := b.control.TakeDirty()
+	expiring := anyExpiring(snapshot.OpenOrders, b.cfg.ExpiryReplaceMarginSeconds, time.Now().UTC())
+	if !controlChanged && !expiring && time.Since(snapshot.LastQuoteUpdate) < b.cfg.QuoteRefreshInterval && len(snapshot.OpenOrders) > 0 {
 		b.logger.Debug("quote refresh not due yet", "last_update", snapshot.LastQuoteUpdate)
 		b.recordInventory(snapshot)
 		if err := b.savePersistent(); err != nil {
@@ -498,7 +573,7 @@ func (b *Bot) logReferenceSourceTransition(prev state.Snapshot, next state.Snaps
 }
 
 func (b *Bot) setHealthyState(snapshot state.Snapshot, reason string) {
-	b.currentHalted = false
+	b.markRunning()
 	b.metrics.SetHaltState(false, reason)
 	b.metrics.SetHealth(true, reason)
 	b.metrics.SetOperatorMode(string(b.cfg.OperatorMode))
@@ -540,6 +615,7 @@ func (b *Bot) handleLoadError(ctx context.Context, err error) error {
 
 func (b *Bot) haltForReason(ctx context.Context, reason string, cancelOrders bool, cancelCategory string) error {
 	if reason != b.persisted.LastHaltReason || !b.currentHalted {
+		b.haltSince = time.Now().UTC()
 		// Log on the transition into a halt (or when the reason changes), so an operator can see
 		// why the bot stopped quoting instead of only that it did. The prices show which input was
 		// missing — a spot bot with ref==0 and ext_anchor==0 is halted on "reference price
@@ -559,9 +635,21 @@ func (b *Bot) haltForReason(ctx context.Context, reason string, cancelOrders boo
 	b.metrics.SetHaltState(true, reason)
 	b.metrics.SetHealth(false, reason)
 	b.metrics.SetReadiness(false, reason)
+	// A halted bot quotes nothing, so the last cycle's targets are not what it would place.
+	b.lastQuotes = strategy.Result{}
 	if cancelOrders {
-		if err := b.syncer.CancelAll(ctx, b.spec.Symbol, cancelCategory); err != nil {
-			return err
+		_, remaining, listErr, cancelErr := b.syncer.cancelAll(ctx, b.marketSymbol, cancelCategory, "")
+		switch {
+		case listErr == nil:
+			// What the cancel-all left resting is the book as of now. A kill returns before the
+			// cycle's load, so without this /control/state would show the pre-kill ladder for as long
+			// as the bot stayed killed -- to an operator checking that the kill emptied the book.
+			b.snapshot.OpenOrders = remaining
+		case !b.cfg.DryRun:
+			return listErr
+		}
+		if cancelErr != nil {
+			return cancelErr
 		}
 	}
 	if err := b.savePersistent(); err != nil {
@@ -630,8 +718,11 @@ func (b *Bot) updateReadiness(snapshot state.Snapshot, quotes strategy.Result) {
 		return
 	}
 	if b.cfg.ReadinessMissingQuoteTimeout > 0 && !snapshot.LastQuoteUpdate.IsZero() && time.Since(snapshot.LastQuoteUpdate) > b.cfg.ReadinessMissingQuoteTimeout {
-		requiredBid := b.cfg.OperatorMode == config.ModeNormal || b.cfg.OperatorMode == config.ModeBidOnly
-		requiredAsk := b.cfg.OperatorMode == config.ModeNormal || b.cfg.OperatorMode == config.ModeAskOnly
+		// A side the operator pulled is not "missing"; failing readiness over it would page for an
+		// instruction that was followed.
+		sides := b.control.Status()
+		requiredBid := (b.cfg.OperatorMode == config.ModeNormal || b.cfg.OperatorMode == config.ModeBidOnly) && sides.BidEnabled
+		requiredAsk := (b.cfg.OperatorMode == config.ModeNormal || b.cfg.OperatorMode == config.ModeAskOnly) && sides.AskEnabled
 		if requiredBid && quotes.Bid != nil && countOrdersBySide(snapshot.OpenOrders, exchange.SideBuy) == 0 {
 			b.metrics.SetReadiness(false, "required bid missing too long")
 			return

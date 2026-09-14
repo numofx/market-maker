@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/numofx/market-maker/internal/exchange"
@@ -96,6 +97,22 @@ func (s Snapshot) Position(asset string) AssetPosition {
 	return s.Positions[asset]
 }
 
+// ControlState is the operator's kill/pause as last set through the control API.
+//
+// Persisted so a restart comes back KILLED or PAUSED rather than quoting: a crash-looping task that
+// forgot it had been killed would re-place a full ladder on every boot, which is exactly when a kill
+// is being relied on. MM_STATE_FILE lives under /tmp on Fargate, which does not survive a task
+// replacement -- so this covers in-task restarts only, and the terminal re-asserts kill on connect
+// for the rest.
+type ControlState struct {
+	Killed      bool      `json:"killed"`
+	KillReason  string    `json:"kill_reason,omitempty"`
+	KilledAt    time.Time `json:"killed_at,omitempty"`
+	Paused      bool      `json:"paused"`
+	PauseReason string    `json:"pause_reason,omitempty"`
+	PausedAt    time.Time `json:"paused_at,omitempty"`
+}
+
 type Persistent struct {
 	NextNonceBase         uint64             `json:"next_nonce_base"`
 	LastNonceBySide       map[string]uint64  `json:"last_nonce_by_side"`
@@ -105,17 +122,41 @@ type Persistent struct {
 	LastAdoptedAskOrder   string             `json:"last_adopted_ask_order_id,omitempty"`
 	LastHaltReason        string             `json:"last_halt_reason,omitempty"`
 	LastInventorySnapshot map[string]float64 `json:"last_inventory_snapshot,omitempty"`
+	Control               *ControlState      `json:"control,omitempty"`
 }
 
+// Store reads and writes MM_STATE_FILE.
+//
+// Two writers share it: the quoting loop saves nonces every cycle, and the control API saves a kill
+// the moment it arrives, from an HTTP goroutine. Unserialized, their writes could interleave into a
+// torn file, and a whole-struct save from the loop would overwrite a kill written a moment earlier.
+// So every write goes through one lock, and the overlay -- the controller's current kill/pause --
+// is applied under that lock at write time, whichever writer is holding it.
 type Store struct {
-	path string
+	path    string
+	mu      sync.Mutex
+	overlay func(*Persistent)
 }
 
 func NewStore(path string) *Store {
 	return &Store{path: path}
 }
 
+// SetOverlay installs a hook applied to every value just before it is written. The hook must not
+// call back into the Store.
+func (s *Store) SetOverlay(fn func(*Persistent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.overlay = fn
+}
+
 func (s *Store) Load() (Persistent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadLocked()
+}
+
+func (s *Store) loadLocked() (Persistent, error) {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -137,6 +178,30 @@ func (s *Store) Load() (Persistent, error) {
 }
 
 func (s *Store) Save(value Persistent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLocked(value)
+}
+
+// Update rewrites the file from its current contents, so a writer that owns only part of the state
+// (the controller) does not clobber nonce progression it never read.
+func (s *Store) Update(fn func(*Persistent)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	if fn != nil {
+		fn(&value)
+	}
+	return s.saveLocked(value)
+}
+
+func (s *Store) saveLocked(value Persistent) error {
+	if s.overlay != nil {
+		s.overlay(&value)
+	}
 	if value.LastNonceBySide == nil {
 		value.LastNonceBySide = map[string]uint64{}
 	}

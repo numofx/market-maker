@@ -57,12 +57,14 @@ internal/metrics
 - `MM_RPC_URL`
 - `MM_DATABASE_URL` or `DATABASE_URL`
 - `MM_CHAIN_ID`
-- `MM_OWNER_PRIVATE_KEY`
+- `MM_OWNER_PRIVATE_KEY` (only with `MM_SIGNER_BACKEND=local`, the default)
+- `MM_KMS_KEY_ID` (only with `MM_SIGNER_BACKEND=kms`)
 - `MM_SUBACCOUNT_ID`
 
 ## Common Optional Environment Variables
 
 - `MM_MARKET_SYMBOL`
+- `MM_SIGNER_BACKEND` (`local` | `kms`, default `local`)
 - `MM_SIGNER_PRIVATE_KEY`
 - `MM_OWNER_ADDRESS`
 - `MM_SIGNER_ADDRESS`
@@ -73,7 +75,10 @@ internal/metrics
 - `MM_TRADE_MODULE_ADDRESS`
 - `MM_SUBACCOUNTS_ADDRESS`
 - `MM_WORST_FEE`
-- `MM_ORDER_EXPIRY_SECONDS`
+- `MM_ORDER_EXPIRY_SECONDS` (default `60`)
+- `MM_EXPIRY_REPLACE_MARGIN_SECONDS` (default `15`; must be `> 0` and `< MM_ORDER_EXPIRY_SECONDS/2`)
+- `MM_CONTROL_ADDR` (default `127.0.0.1:8081`)
+- `MM_CONTROL_TOKEN` (control API is disabled when unset)
 - `MM_STATE_FILE`
 - `MM_POLL_INTERVAL_MS`
 - `MM_QUOTE_REFRESH_INTERVAL_MS`
@@ -138,6 +143,8 @@ The bot:
 
 If your deployment uses a dedicated signer/session key, set `MM_SIGNER_PRIVATE_KEY` and optionally `MM_SIGNER_ADDRESS`. Otherwise the owner key is used for both.
 
+With `MM_SIGNER_BACKEND=kms` the key lives in AWS KMS (`ECC_SECG_P256K1`, `SIGN_VERIFY`) and no private key is read from the environment. Credentials and region come from the standard AWS chain (the task role on Fargate); the role needs `kms:GetPublicKey` and `kms:Sign` on `MM_KMS_KEY_ID`. The bot derives the address at startup and exits if it differs from `MM_OWNER_ADDRESS` or `MM_SIGNER_ADDRESS` when those are set — cancels require signer == owner. KMS signatures are normalized to low-s and V is recovered locally. `cmd/futures-check` and `cmd/mm-bot-integration` still sign with local keys.
+
 ## Startup Reconciliation
 
 The bot treats exchange state as the source of truth.
@@ -188,6 +195,7 @@ Persisted fields now include:
 - last adopted ask order id
 - last halt reason
 - last inventory snapshot
+- control-API kill and pause
 
 ## Balance And Exposure Accounting
 
@@ -364,6 +372,31 @@ When the file exists:
 - `/readyz` returns `503`
 - metrics expose the halt reason `kill switch active`
 - `MM_STATE_FILE` stores `last_halt_reason=kill switch active`
+
+The file kill switch also reads `KILLED` on the control API, and `POST /control/resume` is refused while the file exists.
+
+## Order Expiry
+
+A cancel on this venue is off-chain only: TradeModule has no nonce invalidation, so a cancelled order stays executable on-chain until its signed `expiry`. The expiry, not the cancel, bounds exposure after a kill. Orders are therefore signed with a 60s expiry (`MM_ORDER_EXPIRY_SECONDS`), and a resting quote within `MM_EXPIRY_REPLACE_MARGIN_SECONDS` of its expiry is cancelled and re-placed in the same cycle (cancel category `expiry_replace`). That roll ignores `MM_MIN_QUOTE_LIFETIME_SECONDS`, does not count toward `MM_MAX_CANCELS_PER_MINUTE`, and bypasses the quote-refresh throttle.
+
+## Control API
+
+A JSON API for the operator terminal, served on `MM_CONTROL_ADDR` (default `127.0.0.1:8081`), separate from the metrics server. It listens only when `MM_CONTROL_TOKEN` is set; every request needs `Authorization: Bearer <token>` (401 otherwise). It binds to loopback because the terminal runs as a sidecar in the same Fargate task (awsvpc), so nothing outside the task needs to reach it.
+
+| Endpoint | Body | Effect |
+| --- | --- | --- |
+| `GET /control/state` | | State, reason, sides, adjust, reference/book, target quotes, open orders, positions, config, last 50 place/cancel attempts |
+| `POST /control/kill` | `{"reason"}` | `KILLED`; cancels every managed order immediately and returns `cancel_results` (`cancelled` / `not_found` / `error`). Idempotent. |
+| `POST /control/pause` | `{"reason"}` | `PAUSED`; cancels managed orders |
+| `POST /control/resume` | `{"reason","clear_kill"}` | Clears pause; clears a kill only with `clear_kill=true` (409 otherwise). Never overrides a risk halt. |
+| `POST /control/side` | `{"side":"bid"\|"ask","enabled","reason"}` | Pulling a side cancels that side's orders and suppresses it |
+| `POST /control/adjust` | `{"mid_shift_bps"?,"spread_add_bps"?,"size_mult"?,"reason"}` | Partial update. Bounds: `\|mid_shift_bps\| <= 200`, `spread_add_bps` in `[-(MM_HALF_SPREAD_BPS-1), 500]`, `size_mult` in `[0, 5]` |
+
+State precedence is `KILLED > PAUSED > HALTED > RUNNING`. Every change wakes the quoting loop instead of waiting for the next poll. Prices are cNGN per USDC, sizes are USDC, and `buy` is a bid for USDC. `not_found` on a kill means the order was already off the book (filled, cancelled, or mid-settlement). In `MM_DRY_RUN` nothing is sent: cancel results read `error: "dry run: cancel not sent"` and `last_actions` entries carry `dry_run: true`.
+
+**KILLED** survives an in-task restart (persisted in `MM_STATE_FILE` under `control`), but `/tmp` is ephemeral on Fargate, so a replaced task starts un-killed; the terminal re-asserts kill on connect. Even after a kill, orders already signed remain executable on-chain for up to `MM_ORDER_EXPIRY_SECONDS`. Side pulls and adjustments are not persisted.
+
+Every control action is logged as `control_action` with the action, reason, resulting state and remote address.
 
 ## Running
 
@@ -640,7 +673,11 @@ Cancel metrics are split by category:
 - `risk_triggered`
   - cancels triggered by risk halts, stale dependencies, or cancel-budget halt
 - `kill_switch`
-  - cancels triggered by the file-based kill switch
+  - cancels triggered by the file-based kill switch or `POST /control/kill`
+- `expiry_replace`
+  - steady-state re-signing of quotes about to pass their signed expiry
+- `control_side_pulled`
+  - cancels from `POST /control/side` with `enabled=false`
 
 `mm_bot_order_cancels_total` still exposes total cancels, while `mm_bot_order_cancels_total_by_category` shows the category breakdown.
 

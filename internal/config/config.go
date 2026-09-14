@@ -31,12 +31,23 @@ const (
 	// Short enough that a fee change reaches the signed bound within a cycle or two; long enough
 	// that it is one request a minute, not one per order.
 	defaultMarketRefreshSeconds = 60
-	defaultExpirySeconds        = 3600
-	defaultAdoptSizeTolerance   = 0.000001
-	defaultOperatorMode         = "normal"
-	defaultAnchorSourceType     = "none"
-	defaultMaxCancelsPerMinute  = 30
-	defaultSoakLogInterval      = 0
+	// A cancel on this venue is off-chain only. markets-service drops the order from its book, but
+	// TradeModule has no nonce invalidation, so the signed action stays executable on-chain -- by
+	// anyone holding the signature -- until its expiry. The expiry, not the cancel, is the real bound
+	// on how long a quote can be taken after the bot decided to pull it.
+	//
+	// It was 3600: a kill left an hour of on-chain exposure behind it. 60s bounds that to a minute,
+	// and the bot re-signs every quote MM_EXPIRY_REPLACE_MARGIN_SECONDS before it lapses (see
+	// evaluateCancel), so a stable ladder rolls rather than going dark.
+	defaultExpirySeconds              = 60
+	defaultExpiryReplaceMarginSeconds = 15
+	defaultControlAddr                = "127.0.0.1:8081"
+	defaultSignerBackend              = SignerBackendLocal
+	defaultAdoptSizeTolerance         = 0.000001
+	defaultOperatorMode               = "normal"
+	defaultAnchorSourceType           = "none"
+	defaultMaxCancelsPerMinute        = 30
+	defaultSoakLogInterval            = 0
 )
 
 type OperatorMode string
@@ -47,6 +58,11 @@ const (
 	ModeBidOnly      OperatorMode = "bid-only"
 	ModeAskOnly      OperatorMode = "ask-only"
 	ModeDryRunHealth OperatorMode = "dry-run-health"
+)
+
+const (
+	SignerBackendLocal = "local"
+	SignerBackendKMS   = "kms"
 )
 
 type Config struct {
@@ -80,8 +96,22 @@ type Config struct {
 	// On by default: a market maker that takes is paying the taker fee to do the opposite of its
 	// job, and since the fee follows whichever order arrived later, a requoting bot is the taker
 	// far more often than its name suggests. MM_POST_ONLY_QUOTES=false opts out.
-	PostOnlyQuotes               bool
-	OrderExpirySeconds           int64
+	PostOnlyQuotes     bool
+	OrderExpirySeconds int64
+	// ExpiryReplaceMarginSeconds is how long before its signed expiry a resting quote is replaced.
+	// It must leave room for a cycle or two to fail and retry before the quote lapses, and it must
+	// be under half the expiry or the bot would spend more of each quote's life replacing it than
+	// resting it.
+	ExpiryReplaceMarginSeconds int64
+	// SignerBackend is "local" (MM_OWNER_PRIVATE_KEY / MM_SIGNER_PRIVATE_KEY in the environment)
+	// or "kms" (MM_KMS_KEY_ID; the key never enters the process).
+	SignerBackend string
+	KMSKeyID      string
+	// ControlAddr/ControlToken configure the operator control API. It listens only when the token
+	// is set, and defaults to loopback: the terminal runs as a sidecar in the same Fargate task and
+	// reaches the bot on 127.0.0.1, so nothing outside the task needs to.
+	ControlAddr                  string
+	ControlToken                 string
 	StateFile                    string
 	MarketSymbol                 string
 	PollInterval                 time.Duration
@@ -162,6 +192,11 @@ func Load() (Config, error) {
 		RecipientID:                  strings.TrimSpace(os.Getenv("MM_RECIPIENT_ID")),
 		WorstFee:                     envString("MM_WORST_FEE", defaultWorstFee),
 		OrderExpirySeconds:           int64(envInt("MM_ORDER_EXPIRY_SECONDS", defaultExpirySeconds)),
+		ExpiryReplaceMarginSeconds:   int64(envInt("MM_EXPIRY_REPLACE_MARGIN_SECONDS", defaultExpiryReplaceMarginSeconds)),
+		SignerBackend:                strings.ToLower(envString("MM_SIGNER_BACKEND", defaultSignerBackend)),
+		KMSKeyID:                     strings.TrimSpace(os.Getenv("MM_KMS_KEY_ID")),
+		ControlAddr:                  envString("MM_CONTROL_ADDR", defaultControlAddr),
+		ControlToken:                 strings.TrimSpace(os.Getenv("MM_CONTROL_TOKEN")),
 		MarketRefreshSeconds:         int64(envInt("MM_MARKET_REFRESH_SECONDS", defaultMarketRefreshSeconds)),
 		PostOnlyQuotes:               envBool("MM_POST_ONLY_QUOTES", true),
 		StateFile:                    envString("MM_STATE_FILE", filepath.Join(".", ".mm-bot-state.json")),
@@ -233,14 +268,38 @@ func Load() (Config, error) {
 	if cfg.SubaccountID == "" {
 		return Config{}, fmt.Errorf("MM_SUBACCOUNT_ID is required")
 	}
-	if cfg.OwnerPrivateKey == "" {
-		return Config{}, fmt.Errorf("MM_OWNER_PRIVATE_KEY is required")
+	switch cfg.SignerBackend {
+	case SignerBackendLocal:
+		if cfg.OwnerPrivateKey == "" {
+			return Config{}, fmt.Errorf("MM_OWNER_PRIVATE_KEY is required")
+		}
+		if _, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.OwnerPrivateKey, "0x")); err != nil {
+			return Config{}, fmt.Errorf("invalid MM_OWNER_PRIVATE_KEY: %w", err)
+		}
+		if _, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.SignerPrivateKey, "0x")); err != nil {
+			return Config{}, fmt.Errorf("invalid MM_SIGNER_PRIVATE_KEY: %w", err)
+		}
+	case SignerBackendKMS:
+		// No private key is required, or read: the point of KMS is that there is none in the
+		// environment. The derived address is checked against MM_OWNER_ADDRESS/MM_SIGNER_ADDRESS
+		// when the client is built, because that needs a KMS round trip.
+		if cfg.KMSKeyID == "" {
+			return Config{}, fmt.Errorf("MM_KMS_KEY_ID is required when MM_SIGNER_BACKEND=kms")
+		}
+	default:
+		return Config{}, fmt.Errorf("MM_SIGNER_BACKEND must be one of local, kms")
 	}
-	if _, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.OwnerPrivateKey, "0x")); err != nil {
-		return Config{}, fmt.Errorf("invalid MM_OWNER_PRIVATE_KEY: %w", err)
+	if cfg.OrderExpirySeconds <= 0 {
+		return Config{}, fmt.Errorf("MM_ORDER_EXPIRY_SECONDS must be > 0")
 	}
-	if _, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.SignerPrivateKey, "0x")); err != nil {
-		return Config{}, fmt.Errorf("invalid MM_SIGNER_PRIVATE_KEY: %w", err)
+	// Checked here rather than clamped: a margin of zero lets quotes lapse before they are replaced
+	// -- the ladder goes dark and every lapse reads as a fill -- and a margin of half the expiry or
+	// more replaces each quote before it has rested as long as it is being replaced for.
+	if cfg.ExpiryReplaceMarginSeconds <= 0 || 2*cfg.ExpiryReplaceMarginSeconds >= cfg.OrderExpirySeconds {
+		return Config{}, fmt.Errorf(
+			"MM_EXPIRY_REPLACE_MARGIN_SECONDS must be > 0 and < MM_ORDER_EXPIRY_SECONDS/2 (got margin %d, expiry %d)",
+			cfg.ExpiryReplaceMarginSeconds, cfg.OrderExpirySeconds,
+		)
 	}
 	if cfg.OrderSize <= 0 {
 		return Config{}, fmt.Errorf("MM_ORDER_SIZE must be > 0")

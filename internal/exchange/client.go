@@ -3,7 +3,6 @@ package exchange
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,9 +24,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	gethmath "github.com/ethereum/go-ethereum/common/math"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -108,6 +107,12 @@ type Order struct {
 	// indefinitely under terms the operator believes were superseded.
 	PostOnly bool
 	WorstFee string
+	// Expiry is the signed action's expiry in unix seconds; 0 means unknown.
+	//
+	// A cancel is off-chain only -- TradeModule has no nonce invalidation -- so an order the venue
+	// has "cancelled" stays executable on-chain until this moment. The bot therefore signs a short
+	// rolling expiry and re-signs before it lapses, which it can only do if it reads the expiry back.
+	Expiry int64 `json:"expiry"`
 }
 
 type MarketSpec struct {
@@ -189,6 +194,9 @@ type ClientConfig struct {
 	OrderExpirySeconds   int64
 	ServiceName          string
 	ProtectedPrefixes    []string
+	// Signer, when set, is the only key: OwnerPrivateKey/SignerPrivateKey are ignored and the
+	// configured addresses must equal Signer.Address(). See resolveSigner.
+	Signer Signer
 }
 
 type PlaceOrderRequest struct {
@@ -209,8 +217,7 @@ type HTTPClient struct {
 	httpClient  *http.Client
 	pg          *pgxpool.Pool
 	rpc         *ethclient.Client
-	ownerKey    *ecdsa.PrivateKey
-	signerKey   *ecdsa.PrivateKey
+	signer      Signer
 	matching    common.Address
 	tradeModule common.Address
 	subAccounts common.Address
@@ -245,12 +252,6 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 	if cfg.SubaccountID == "" {
 		return nil, fmt.Errorf("SubaccountID is required")
 	}
-	if cfg.OwnerPrivateKey == "" {
-		return nil, fmt.Errorf("OwnerPrivateKey is required")
-	}
-	if cfg.SignerPrivateKey == "" {
-		cfg.SignerPrivateKey = cfg.OwnerPrivateKey
-	}
 	if cfg.RecipientID == "" {
 		cfg.RecipientID = cfg.SubaccountID
 	}
@@ -258,7 +259,9 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 		cfg.WorstFee = "0"
 	}
 	if cfg.OrderExpirySeconds <= 0 {
-		cfg.OrderExpirySeconds = 3600
+		// Matches config.defaultExpirySeconds: a cancel is off-chain only, so the signed expiry is
+		// the real bound on how long a quote can be taken on-chain.
+		cfg.OrderExpirySeconds = 60
 	}
 	if cfg.MatchingRepoPath == "" {
 		cfg.MatchingRepoPath = "../execution-contracts"
@@ -267,23 +270,10 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 		cfg.RiskCoreRepoPath = "../risk-core"
 	}
 
-	ownerKey, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.OwnerPrivateKey, "0x"))
+	signer, cfg, err := resolveSigner(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("parse owner private key: %w", err)
+		return nil, err
 	}
-	signerKey, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.SignerPrivateKey, "0x"))
-	if err != nil {
-		return nil, fmt.Errorf("parse signer private key: %w", err)
-	}
-
-	if cfg.OwnerAddress == "" {
-		cfg.OwnerAddress = crypto.PubkeyToAddress(ownerKey.PublicKey).Hex()
-	}
-	if cfg.SignerAddress == "" {
-		cfg.SignerAddress = crypto.PubkeyToAddress(signerKey.PublicKey).Hex()
-	}
-	cfg.OwnerAddress = strings.ToLower(cfg.OwnerAddress)
-	cfg.SignerAddress = strings.ToLower(cfg.SignerAddress)
 
 	if cfg.MatchingAddress == "" || cfg.TradeModuleAddress == "" {
 		matchingAddress, tradeModuleAddress, err := loadMatchingDeployment(cfg.MatchingRepoPath, cfg.ChainID)
@@ -319,8 +309,7 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 		httpClient:   &http.Client{Timeout: 15 * time.Second},
 		pg:           pg,
 		rpc:          rpc,
-		ownerKey:     ownerKey,
-		signerKey:    signerKey,
+		signer:       signer,
 		matching:     common.HexToAddress(cfg.MatchingAddress),
 		tradeModule:  common.HexToAddress(cfg.TradeModuleAddress),
 		subAccounts:  common.HexToAddress(cfg.SubAccountsAddress),
@@ -685,7 +674,7 @@ func (c *HTTPClient) ListOpenOrders(ctx context.Context, market string) ([]Order
 
 	rows, err := c.pg.Query(ctx, `
 select order_id, side, limit_price, desired_amount, filled_amount, nonce, owner_address, created_at, subaccount_id,
-       post_only, worst_fee
+       post_only, worst_fee, coalesce(expiry, 0)
 from active_orders
 where owner_address = $1 and asset_address = $2 and sub_id = $3 and subaccount_id = $4 and status = 'active'
 order by created_at asc
@@ -709,8 +698,9 @@ order by created_at asc
 			subaccountID  string
 			postOnly      bool
 			worstFee      string
+			expiry        int64
 		)
-		if err := rows.Scan(&orderID, &side, &limitPrice, &desiredAmount, &filledAmount, &nonce, &owner, &createdAt, &subaccountID, &postOnly, &worstFee); err != nil {
+		if err := rows.Scan(&orderID, &side, &limitPrice, &desiredAmount, &filledAmount, &nonce, &owner, &createdAt, &subaccountID, &postOnly, &worstFee, &expiry); err != nil {
 			return nil, fmt.Errorf("scan order: %w", err)
 		}
 		price, err := strconv.ParseFloat(limitPrice, 64)
@@ -743,6 +733,7 @@ order by created_at asc
 			Subaccount: subaccountID,
 			PostOnly:   postOnly,
 			WorstFee:   worstFee,
+			Expiry:     expiry,
 		})
 	}
 	return out, rows.Err()
@@ -825,7 +816,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		"owner":         c.cfg.OwnerAddress,
 		"signer":        c.cfg.SignerAddress,
 	}
-	signature, err := c.signAction(actionJSON)
+	signature, err := c.signAction(ctx, actionJSON)
 	if err != nil {
 		return Order{}, err
 	}
@@ -888,6 +879,9 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		CreatedAt:  tm,
 		Managed:    true,
 		Subaccount: resp.Order.SubaccountID,
+		PostOnly:   req.PostOnly,
+		WorstFee:   worstFee,
+		Expiry:     expiry,
 	}, nil
 }
 
@@ -901,7 +895,7 @@ func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string, reason str
 		return err
 	}
 	expiry := strconv.FormatInt(time.Now().UTC().Add(cancelSignatureLifetime).Unix(), 10)
-	signature, err := c.signCancel(c.cfg.OwnerAddress, c.cfg.SignerAddress, orders.Nonce, expiry)
+	signature, err := c.signCancel(ctx, c.cfg.OwnerAddress, c.cfg.SignerAddress, orders.Nonce, expiry)
 	if err != nil {
 		return fmt.Errorf("sign cancel for %s: %w", orderID, err)
 	}
@@ -914,8 +908,21 @@ func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string, reason str
 		"reason":         machineCancelReason(c.cfg.ServiceName, reason),
 		"service":        normalizeCancelToken(c.cfg.ServiceName),
 	}
-	return c.post(ctx, "/v1/orders/cancel", body, nil)
+	if err := c.post(ctx, "/v1/orders/cancel", body, nil); err != nil {
+		if strings.Contains(err.Error(), "active order not found") {
+			return fmt.Errorf("%w: %w", ErrOrderNotFound, err)
+		}
+		return err
+	}
+	return nil
 }
+
+// ErrOrderNotFound is a cancel for an order that is no longer resting: already filled, already
+// cancelled, or mid-settlement (status "matching", which active_orders no longer serves as active).
+//
+// Not an error for a cancel-everything path. The order is off the book either way, and treating it
+// as a failure would make a kill report failure precisely when a fill raced it.
+var ErrOrderNotFound = errors.New("active order not found")
 
 func (c *HTTPClient) CancelAllOrders(ctx context.Context, market string, reason string) error {
 	orders, err := c.ListOpenOrders(ctx, market)
@@ -979,7 +986,8 @@ func isProtectedOrderID(orderID string, prefixes []string) bool {
 
 func (c *HTTPClient) lookupOrderByID(ctx context.Context, orderID string) (Order, error) {
 	row := c.pg.QueryRow(ctx, `
-select order_id, side, limit_price, desired_amount, nonce, owner_address, created_at, subaccount_id, asset_address, sub_id
+select order_id, side, limit_price, desired_amount, nonce, owner_address, created_at, subaccount_id, asset_address, sub_id,
+       coalesce(expiry, 0)
 from active_orders
 where order_id = $1 and owner_address = $2
 `, orderID, c.cfg.OwnerAddress)
@@ -994,8 +1002,12 @@ where order_id = $1 and owner_address = $2
 		subaccountID  string
 		assetAddress  string
 		subID         string
+		expiry        int64
 	)
-	if err := row.Scan(&id, &side, &limitPrice, &desiredAmount, &nonce, &owner, &createdAt, &subaccountID, &assetAddress, &subID); err != nil {
+	if err := row.Scan(&id, &side, &limitPrice, &desiredAmount, &nonce, &owner, &createdAt, &subaccountID, &assetAddress, &subID, &expiry); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Order{}, fmt.Errorf("lookup order %s: %w: %w", orderID, ErrOrderNotFound, err)
+		}
 		return Order{}, fmt.Errorf("lookup order %s: %w", orderID, err)
 	}
 	price, _ := strconv.ParseFloat(limitPrice, 64)
@@ -1011,6 +1023,7 @@ where order_id = $1 and owner_address = $2
 		Owner:      owner,
 		CreatedAt:  createdAt,
 		Subaccount: subaccountID,
+		Expiry:     expiry,
 	}, nil
 }
 
@@ -1265,7 +1278,7 @@ func (c *HTTPClient) rawRPCProbe(ctx context.Context, to common.Address, data []
 	return resp.StatusCode, string(raw), nil
 }
 
-func (c *HTTPClient) signAction(action map[string]string) (string, error) {
+func (c *HTTPClient) signAction(ctx context.Context, action map[string]string) (string, error) {
 	td := apitypes.TypedData{
 		Types: apitypes.Types{
 			"EIP712Domain": {
@@ -1305,7 +1318,7 @@ func (c *HTTPClient) signAction(action map[string]string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("hash typed data: %w", err)
 	}
-	sig, err := crypto.Sign(hash, c.signerKey)
+	sig, err := c.signer.SignHash(ctx, hash)
 	if err != nil {
 		return "", fmt.Errorf("sign typed data: %w", err)
 	}
@@ -1321,7 +1334,7 @@ const cancelSignatureLifetime = 2 * time.Minute
 // before removing a resting order. It mirrors signAction over the same Matching domain; the server
 // requires signer == owner for cancels (there is no off-chain session-key registry), which holds
 // here because the bot signs its own orders with its owner key.
-func (c *HTTPClient) signCancel(owner, signer, nonce, expiry string) (string, error) {
+func (c *HTTPClient) signCancel(ctx context.Context, owner, signer, nonce, expiry string) (string, error) {
 	td := apitypes.TypedData{
 		Types: apitypes.Types{
 			"EIP712Domain": {
@@ -1355,7 +1368,7 @@ func (c *HTTPClient) signCancel(owner, signer, nonce, expiry string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("hash cancel typed data: %w", err)
 	}
-	sig, err := crypto.Sign(hash, c.signerKey)
+	sig, err := c.signer.SignHash(ctx, hash)
 	if err != nil {
 		return "", fmt.Errorf("sign cancel typed data: %w", err)
 	}

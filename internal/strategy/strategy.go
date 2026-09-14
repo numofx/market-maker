@@ -105,7 +105,41 @@ func ComputeLocalReference(snapshot state.Snapshot) (float64, string) {
 	return 0, "none"
 }
 
+// Overrides are the operator's runtime adjustments from the control API, applied on top of config.
+//
+// The zero value is NOT neutral -- SizeMult 0 means "quote zero size", which is a legitimate
+// adjustment -- so callers with nothing to override use NoOverrides.
+type Overrides struct {
+	// BidDisabled/AskDisabled pull one side, through the same suppression path as bid-only and
+	// ask-only.
+	BidDisabled bool
+	AskDisabled bool
+	// MidShiftBPS moves the pricing mid by this many bps OF the mid; positive raises both bid and ask.
+	MidShiftBPS float64
+	// SpreadAddBPS is added to each side's half spread, after the external-anchor multiplier, so the
+	// number the operator typed is the number of bps each quote moves.
+	SpreadAddBPS float64
+	// SizeMult scales the configured order size before capacity and inventory caps, which still bind.
+	SizeMult float64
+}
+
+// NoOverrides is the neutral set: both sides on, no shift, no added spread, size unchanged.
+func NoOverrides() Overrides {
+	return Overrides{SizeMult: 1}
+}
+
 func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot) (Result, error) {
+	return BuildQuotesWithOverrides(cfg, spec, snapshot, NoOverrides())
+}
+
+// BuildQuotesWithOverrides is BuildQuotes with the operator's runtime adjustments applied where the
+// strategy prices: the mid shift to the reference the ladder is built around, the spread add to the
+// half spread, and the size multiplier to the order size.
+//
+// Result.ReferencePrice stays the UNSHIFTED market reference. It feeds risk (reference available?),
+// the quoted-spread metric, and /control/state, all of which are about the market, not about where
+// the operator chose to lean.
+func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot, ov Overrides) (Result, error) {
 	ref, refSource := ComputeReferencePrice(snapshot)
 	localRef, localSource := ComputeLocalReference(snapshot)
 	result := Result{
@@ -129,11 +163,14 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 		halfSpreadBPS *= cfg.USDCCNGNSpotExternalAnchor.SpreadMultiplier
 		orderSize *= cfg.USDCCNGNSpotExternalAnchor.SizeMultiplier
 	}
+	halfSpreadBPS += ov.SpreadAddBPS
+	orderSize *= ov.SizeMult
 	halfSpread := halfSpreadBPS / 10000.0
 	skew := skewBPS / 10000.0
+	pricingRef := ref * (1 + ov.MidShiftBPS/10000.0)
 
-	bidPrice := roundDown(ref*(1-halfSpread-skew), spec.TickSize)
-	askPrice := roundUp(ref*(1+halfSpread-skew), spec.TickSize)
+	bidPrice := roundDown(pricingRef*(1-halfSpread-skew), spec.TickSize)
+	askPrice := roundUp(pricingRef*(1+halfSpread-skew), spec.TickSize)
 	if bidPrice <= 0 || askPrice <= 0 || bidPrice >= askPrice || !isFinite(bidPrice) || !isFinite(askPrice) {
 		return result, fmt.Errorf("calculated invalid quote prices")
 	}
@@ -195,13 +232,13 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 	askMinSize := minQuoteSize(spec, askPrice)
 	if bidSize >= bidMinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}
-		result.Bids = buildLevels(cfg, spec, exchange.SideBuy, ref, halfSpread, skew, orderSize, maxBidSize, inventory, effectiveMaxLong(cfg), askPrice)
+		result.Bids = buildLevels(cfg, spec, exchange.SideBuy, pricingRef, halfSpread, skew, orderSize, maxBidSize, inventory, effectiveMaxLong(cfg), askPrice)
 	} else {
 		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, bidMinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), bidMinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
 	if askSize >= askMinSize && inventory-askSize >= effectiveMaxShort(cfg) {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
-		result.Asks = buildLevels(cfg, spec, exchange.SideSell, ref, halfSpread, skew, orderSize, maxAskSize, inventory, effectiveMaxShort(cfg), bidPrice)
+		result.Asks = buildLevels(cfg, spec, exchange.SideSell, pricingRef, halfSpread, skew, orderSize, maxAskSize, inventory, effectiveMaxShort(cfg), bidPrice)
 	} else if cashMarginedFuture {
 		// Short backed by cash: report cash/quote capacity, not base-asset inventory.
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, quoteAvailable, inventory, effectiveMaxShort(cfg)), askMinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
@@ -217,17 +254,29 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 		result.Asks = nil
 		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
-	case config.ModeBidOnly:
-		result.Ask = nil
-		result.Asks = nil
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
-	case config.ModeAskOnly:
-		result.Bid = nil
-		result.Bids = nil
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
+	default:
+		// bid-only/ask-only and a side pulled through the control API are the same suppression; only
+		// the reason differs, so a log line says which of the two turned the side off.
+		if cfg.OperatorMode == config.ModeBidOnly || ov.AskDisabled {
+			result.Ask = nil
+			result.Asks = nil
+			result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, sideOffReason(cfg.OperatorMode == config.ModeBidOnly), spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
+		}
+		if cfg.OperatorMode == config.ModeAskOnly || ov.BidDisabled {
+			result.Bid = nil
+			result.Bids = nil
+			result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, sideOffReason(cfg.OperatorMode == config.ModeAskOnly), spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		}
 	}
 	result.SkewBPS = skewBPS
 	return result, nil
+}
+
+func sideOffReason(byOperatorMode bool) string {
+	if byOperatorMode {
+		return "operator_halted"
+	}
+	return "control_side_disabled"
 }
 
 func bidSuppressionReason(orderSize, bidSize, minSize, maxBidSize, quoteAvailable, inventory, maxLong float64) string {
