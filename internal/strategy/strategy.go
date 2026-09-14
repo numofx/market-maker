@@ -65,12 +65,18 @@ type Result struct {
 
 func ComputeReferencePrice(snapshot state.Snapshot) (float64, string) {
 	if snapshot.Market == "USDCcNGN-SPOT" {
+		// Other participants' two-sided book first; then the external fallback price; the venue's own last
+		// trade only when neither exists. A thin venue's last print can be hours old and far from the market
+		// (1327 against ~1371 on 2026-09-14), while the fallback is a live cross-venue rate.
 		localRef, localSource := ComputeLocalReference(snapshot)
-		if localRef > 0 {
+		if localRef > 0 && localSource == "book" {
 			return localRef, localSource
 		}
 		if snapshot.ExternalAnchorPrice > 0 {
 			return snapshot.ExternalAnchorPrice, "external"
+		}
+		if localRef > 0 {
+			return localRef, localSource
 		}
 		return 0, "none"
 	}

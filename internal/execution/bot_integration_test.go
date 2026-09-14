@@ -529,6 +529,66 @@ func TestSpotReferenceIgnoresTheBotsOwnQuotes(t *testing.T) {
 	}
 }
 
+// After #22 deployed, with only a trader's 1370 ask opposite the bot, the reference fell back to the venue's
+// last trade (1327.34, hours old) while the market was ~1371. The rate picker's price now comes first.
+func TestSpotFallsBackToTheRatePickerBeforeTheLastTrade(t *testing.T) {
+	ownBid := exchange.Order{ID: "mm:USDCcNGN-SPOT:buy:1", Market: "USDCcNGN-SPOT", Side: exchange.SideBuy, Price: 1350.63, Size: 1.2, Managed: true}
+	client := &integrationClient{
+		mockClient: mockClient{openOrders: []exchange.Order{ownBid}},
+		spec:       exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001},
+		book: exchange.Book{
+			Bids: []exchange.BookLevel{{Price: 1350.63, OrderID: ownBid.ID}},
+			Asks: []exchange.BookLevel{{Price: 1370, OrderID: "spot-trader-ask"}},
+		},
+		trades: []exchange.Trade{{Price: 1327.34, CreatedAt: time.Now().UTC().Add(-3 * time.Hour)}},
+		balances: []exchange.Balance{
+			{Asset: "USDC", Total: 0.000682, Available: 0.000682},
+			{Asset: "cNGN", Total: 8980, Available: 8980},
+		},
+	}
+	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
+		Price:            1371.41,
+		Present:          true,
+		FetchedAt:        time.Now().UTC(),
+		RefreshAttempted: true,
+	}}}
+	cfg := config.Config{
+		MarketSymbol:         "USDCcNGN-SPOT",
+		StateFile:            filepath.Join(t.TempDir(), "state.json"),
+		OrderSize:            1.2,
+		HalfSpreadBPS:        10,
+		QuoteLevels:          5,
+		LevelSpreadStepBPS:   15,
+		LevelSizeMult:        1.2,
+		MaxNetInventory:      60,
+		MaxNotionalPerSide:   15000,
+		QuoteRefreshInterval: 0,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			Enabled:          true,
+			Provider:         marketdata.RatePickerProvider,
+			Timeout:          3 * time.Second,
+			MaxAge:           15 * time.Minute,
+			MaxDeviationBPS:  100,
+			BootstrapOnly:    true,
+			SpreadMultiplier: 2,
+			SizeMultiplier:   0.5,
+		},
+	}
+	bot := NewBot(cfg, client, client.spec, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg, client.spec), anchor, true)
+	if err := bot.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle() error = %v", err)
+	}
+	if bot.snapshot.ReferenceSource != "external" || bot.snapshot.ReferencePrice != 1371.41 {
+		t.Fatalf("reference = %v (%s), want the rate picker's 1371.41", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource)
+	}
+	for _, order := range client.placed {
+		if order.Side != exchange.SideBuy || order.Price >= 1371.41 {
+			t.Fatalf("placed %+v; want only bids below the fallback price", order)
+		}
+	}
+}
+
 func TestPauseModeCancelsAndDoesNotPlace(t *testing.T) {
 	client := &integrationClient{
 		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},

@@ -402,7 +402,7 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 			wantSource: "book",
 		},
 		{
-			name: "trade beats external",
+			name: "external beats a fresh trade",
 			snapshot: state.Snapshot{
 				Market:                "USDCcNGN-SPOT",
 				LastMarketDataRefresh: freshTradeAt,
@@ -414,18 +414,32 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 					"cNGN": {Total: 100000, Available: 100000},
 				},
 			},
-			wantRef:    1550,
-			wantSource: "trade",
+			wantRef:    1700,
+			wantSource: "external",
 		},
 		{
-			// The book is spot's source of truth, so its last trade outranks the oracle however old
-			// it is. The age cutoff only existed because an oracle guard compared against old prints.
-			name: "old trade still beats external",
+			// Without a two-sided book the external fallback price outranks the venue's last trade.
+			name: "external beats an old trade",
 			snapshot: state.Snapshot{
 				Market:                "USDCcNGN-SPOT",
 				LastMarketDataRefresh: freshTradeAt,
 				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
 				ExternalAnchorPrice:   1700,
+				Positions: map[string]state.AssetPosition{
+					"USDC": {Total: 100, Available: 100},
+					"cNGN": {Total: 100000, Available: 100000},
+				},
+			},
+			wantRef:    1700,
+			wantSource: "external",
+		},
+		{
+			// The last trade, however old, when there is no fallback price.
+			name: "old trade without external",
+			snapshot: state.Snapshot{
+				Market:                "USDCcNGN-SPOT",
+				LastMarketDataRefresh: freshTradeAt,
+				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
 				Positions: map[string]state.AssetPosition{
 					"USDC": {Total: 100, Available: 100},
 					"cNGN": {Total: 100000, Available: 100000},
