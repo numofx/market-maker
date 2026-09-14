@@ -79,23 +79,18 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 		}
 	}
 	if l.spec.Symbol == "USDCcNGN-SPOT" {
-		// Always refresh the external anchor — even when a local reference exists —
-		// so the risk layer's anchor-deviation and stale-anchor guards keep watching
-		// the oracle while the book quotes around its own mid. Reference-price
-		// selection is unchanged: local mid/trade first, external only as bootstrap
-		// (see strategy.ComputeReferencePrice). MM_..._BOOTSTRAP_ONLY now only
-		// controls reference selection semantics, not whether the oracle is polled.
+		// The book is spot's source of truth: the reference is its mid, else its last trade, and
+		// the oracle is only a bootstrap for a venue with neither (strategy.ComputeReferencePrice).
+		// So the oracle is deliberately NOT the snapshot's AnchorPrice: that is what the risk
+		// layer's anchor-deviation and stale-anchor guards compare against, and an oracle that
+		// disagrees with the book would halt the bot and cancel the only liquidity on the venue.
+		// It is still polled every cycle so the bootstrap price is warm when the book empties.
 		ext := l.spotExternal.Fetch(ctx)
 		snapshot.ExternalAnchorRefreshAttempted = ext.RefreshAttempted
 		snapshot.ExternalAnchorRefreshFailed = ext.RefreshFailed
 		if ext.Present {
 			snapshot.ExternalAnchorPrice = ext.Price
 			snapshot.LastExternalAnchorRefresh = ext.FetchedAt
-		}
-		if snapshot.ExternalAnchorPrice > 0 {
-			snapshot.AnchorPrice = snapshot.ExternalAnchorPrice
-			snapshot.AnchorSource = "external"
-			snapshot.LastAnchorRefresh = snapshot.LastExternalAnchorRefresh
 		}
 		return snapshot, nil
 	}
@@ -116,7 +111,7 @@ func localReference(snapshot state.Snapshot) (float64, string) {
 	if snapshot.BestBid > 0 && snapshot.BestAsk > 0 {
 		return (snapshot.BestBid + snapshot.BestAsk) / 2, "book"
 	}
-	if price, ok := state.FreshTradePrice(snapshot); ok {
+	if price, ok := state.ReferenceTradePrice(snapshot); ok {
 		return price, "trade"
 	}
 	return 0, "none"

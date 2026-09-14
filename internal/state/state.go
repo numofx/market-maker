@@ -34,6 +34,21 @@ func FreshTradePrice(snapshot Snapshot) (float64, bool) {
 	return trade.Price, true
 }
 
+// ReferenceTradePrice is the trade price a local reference may stand on. On USDCcNGN-SPOT the venue's
+// own book is the price, so its last trade stands however old it is: the oracle no longer gates spot
+// (see marketdata.Loader.Load), and an old print was only ever dangerous because an oracle guard
+// compared against it. Other markets keep the ReferenceTradeMaxAge cutoff, since their anchor still
+// feeds the deviation guard.
+func ReferenceTradePrice(snapshot Snapshot) (float64, bool) {
+	if snapshot.Market != "USDCcNGN-SPOT" {
+		return FreshTradePrice(snapshot)
+	}
+	if len(snapshot.RecentTrades) == 0 || snapshot.RecentTrades[0].Price <= 0 {
+		return 0, false
+	}
+	return snapshot.RecentTrades[0].Price, true
+}
+
 type AssetPosition struct {
 	Total     float64
 	Reserved  float64

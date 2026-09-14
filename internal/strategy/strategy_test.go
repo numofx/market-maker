@@ -418,9 +418,9 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 			wantSource: "trade",
 		},
 		{
-			// The fix: a trade older than ReferenceTradeMaxAge is not a live reference, so an empty
-			// book falls through to the external oracle instead of anchoring on a stale print.
-			name: "stale trade falls through to external",
+			// The book is spot's source of truth, so its last trade outranks the oracle however old
+			// it is. The age cutoff only existed because an oracle guard compared against old prints.
+			name: "old trade still beats external",
 			snapshot: state.Snapshot{
 				Market:                "USDCcNGN-SPOT",
 				LastMarketDataRefresh: freshTradeAt,
@@ -431,8 +431,8 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 					"cNGN": {Total: 100000, Available: 100000},
 				},
 			},
-			wantRef:    1700,
-			wantSource: "external",
+			wantRef:    1550,
+			wantSource: "trade",
 		},
 	}
 
@@ -622,5 +622,60 @@ func assertClose(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-6 {
 		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+// Live on 2026-09-14: the ask was left with 0.000682 USDC, worth under 1 cNGN, which the venue cannot
+// accept as a spot order. Quoting it failed the whole cycle; now only that side is suppressed.
+func TestSpotSideWorthLessThanOneCNGNIsSuppressedNotQuoted(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001}
+	cfg := config.Config{
+		OrderSize:          1.2,
+		HalfSpreadBPS:      10,
+		QuoteLevels:        5,
+		LevelSpreadStepBPS: 15,
+		LevelSizeMult:      1.2,
+		MaxNetInventory:    60,
+		MaxNotionalPerSide: 15000,
+	}
+	snapshot := state.Snapshot{
+		Market:           "USDCcNGN-SPOT",
+		BestBid:          1333.97,
+		BestAsk:          1370,
+		InventoryByAsset: map[string]float64{"USDC": 0.000682},
+		Positions: map[string]state.AssetPosition{
+			"USDC": {Total: 0.000682, Available: 0.000682},
+			"cNGN": {Total: 8980, Available: 8980},
+		},
+	}
+
+	got, err := BuildQuotes(cfg, spec, snapshot)
+	if err != nil {
+		t.Fatalf("BuildQuotes() error = %v", err)
+	}
+	if got.Ask != nil || len(got.Asks) != 0 {
+		t.Fatalf("asks = %+v, want none: 0.000682 USDC is under 1 cNGN", got.Asks)
+	}
+	if got.AskSuppression == nil || got.AskSuppression.Reason != "insufficient_base_capacity" {
+		t.Fatalf("ask suppression = %+v, want insufficient_base_capacity", got.AskSuppression)
+	}
+	if len(got.Bids) == 0 {
+		t.Fatal("bids suppressed too; the funded side must keep quoting")
+	}
+	for _, bid := range got.Bids {
+		if bid.Size*bid.Price < 1 {
+			t.Fatalf("bid %+v is worth %.6f cNGN, under the venue's 1 cNGN step", bid, bid.Size*bid.Price)
+		}
+	}
+}
+
+func TestMinQuoteSizeOnlyBindsSpot(t *testing.T) {
+	spot := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", SizeStep: 0.000001, MinSize: 0.000001}
+	if got := minQuoteSize(spot, 1351.985); got*1351.985 < 1 || got > 0.00074 {
+		t.Fatalf("spot min size = %v, want the smallest step worth at least 1 cNGN", got)
+	}
+	future := exchange.MarketSpec{Symbol: "USDCcNGN-SEP16-2026", SizeStep: 0.1, MinSize: 0.1}
+	if got := minQuoteSize(future, 1351.985); got != 0.1 {
+		t.Fatalf("future min size = %v, want spec min 0.1", got)
 	}
 }

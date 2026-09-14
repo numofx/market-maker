@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -394,6 +395,72 @@ func TestBootstrapOnlySwitchesFromExternalToLocal(t *testing.T) {
 	}
 	if bot.snapshot.ReferenceSource != "book" {
 		t.Fatalf("second source = %q want book", bot.snapshot.ReferenceSource)
+	}
+}
+
+// Live on 2026-09-14: a trader's bid 1333.97 and ask 1370 were the whole book, so its mid (1351.985)
+// sat 196 bps from the cNGN oracle (1326.01). With the oracle as the spot anchor that tripped the
+// 150 bps deviation guard, cancelled everything and stayed halted. The book is spot's source of
+// truth: the bot now prices off that mid, and quotes the one side it can fund.
+func TestSpotQuotesOffTheBookWhenTheOracleDisagrees(t *testing.T) {
+	client := &integrationClient{
+		spec:   exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001},
+		book:   exchange.Book{Bids: []exchange.BookLevel{{Price: 1333.97}}, Asks: []exchange.BookLevel{{Price: 1370}}},
+		trades: []exchange.Trade{{Price: 1327.34, CreatedAt: time.Now().UTC().Add(-10 * time.Minute)}},
+		balances: []exchange.Balance{
+			{Asset: "USDC", Total: 0.000682, Available: 0.000682},
+			{Asset: "cNGN", Total: 8980, Available: 8980},
+		},
+	}
+	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
+		Price:            1326.01,
+		Present:          true,
+		FetchedAt:        time.Now().UTC().Add(-20 * time.Minute),
+		RefreshAttempted: true,
+	}}}
+	cfg := config.Config{
+		MarketSymbol:          "USDCcNGN-SPOT",
+		StateFile:             filepath.Join(t.TempDir(), "state.json"),
+		OrderSize:             1.2,
+		HalfSpreadBPS:         10,
+		QuoteLevels:           5,
+		LevelSpreadStepBPS:    15,
+		LevelSizeMult:         1.2,
+		MaxNetInventory:       60,
+		MaxNotionalPerSide:    15000,
+		MaxAnchorDeviationBPS: 150,
+		StaleAnchorTimeout:    time.Minute,
+		QuoteRefreshInterval:  0,
+		USDCCNGNSpotExternalAnchor: config.USDCCNGNSpotExternalAnchorConfig{
+			Enabled:          true,
+			Provider:         "cngn-price-oracle",
+			ChainID:          8453,
+			Timeout:          time.Second,
+			MaxAge:           time.Hour,
+			MaxDeviationBPS:  100,
+			BootstrapOnly:    true,
+			SpreadMultiplier: 2,
+			SizeMultiplier:   0.5,
+		},
+	}
+	bot := NewBot(cfg, client, client.spec, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
+	bot.loader = marketdata.NewLoaderWithSpotExternal(client, client.spec, marketdata.NewAnchorSource(cfg, client.spec), anchor, true)
+	if err := bot.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle() error = %v", err)
+	}
+	if bot.currentHalted {
+		t.Fatalf("halted: %q; an oracle that disagrees with the book must not stop spot quoting", bot.persisted.LastHaltReason)
+	}
+	if bot.snapshot.ReferenceSource != "book" || math.Abs(bot.snapshot.ReferencePrice-1351.985) > 1e-9 {
+		t.Fatalf("reference = %v (%s), want the book mid 1351.985", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource)
+	}
+	if len(client.placed) == 0 {
+		t.Fatal("placed nothing; the cNGN-funded bid side should quote")
+	}
+	for _, order := range client.placed {
+		if order.Side != exchange.SideBuy {
+			t.Fatalf("placed %+v; 0.000682 USDC cannot fund an ask", order)
+		}
 	}
 }
 
