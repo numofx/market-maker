@@ -1,6 +1,7 @@
 package exchange
 
 import (
+	"context"
 	"math/big"
 	"strings"
 	"testing"
@@ -72,14 +73,14 @@ func TestSignCancelRecoversSigner(t *testing.T) {
 	}
 	addr := crypto.PubkeyToAddress(key.PublicKey)
 	c := &HTTPClient{
-		signerKey: key,
-		matching:  common.HexToAddress(testMatchingAddress),
-		cfg:       ClientConfig{ChainID: 8453},
+		signer:   NewLocalSigner(key),
+		matching: common.HexToAddress(testMatchingAddress),
+		cfg:      ClientConfig{ChainID: 8453},
 	}
 	nonce := "3574117736041901"
 	expiry := "1787058143"
 
-	sigHex, err := c.signCancel(addr.Hex(), addr.Hex(), nonce, expiry)
+	sigHex, err := c.signCancel(context.Background(), addr.Hex(), addr.Hex(), nonce, expiry)
 	if err != nil {
 		t.Fatalf("signCancel: %v", err)
 	}

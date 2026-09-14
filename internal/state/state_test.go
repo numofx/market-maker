@@ -56,6 +56,63 @@ func TestStorePersistsOperationalFields(t *testing.T) {
 	}
 }
 
+// A state file written before the control API existed has no control block, and must load as
+// "not killed, not paused" rather than failing.
+func TestStoreLoadsWithoutControlState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"next_nonce_base":42,"last_halt_reason":"kill switch active"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	got, err := NewStore(path).Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Control != nil {
+		t.Fatalf("Control = %#v, want nil", got.Control)
+	}
+}
+
+// The quoting loop saves a whole Persistent every cycle, built from a copy it read before the kill
+// arrived. The overlay is what stops that save from writing the kill back out of the file.
+func TestStoreOverlayWinsOverAWholeStructSave(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	store.SetOverlay(func(p *Persistent) {
+		p.Control = &ControlState{Killed: true, KillReason: "drill"}
+	})
+	if err := store.Save(Persistent{NextNonceBase: 7}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.NextNonceBase != 7 || got.Control == nil || !got.Control.Killed || got.Control.KillReason != "drill" {
+		t.Fatalf("loaded %#v, want nonce 7 and the kill preserved", got)
+	}
+}
+
+// The controller owns only the control block. Update must rewrite from the file, so a kill does not
+// reset nonce progression the controller never read -- a reset nonce base is owner+nonce reuse.
+func TestStoreUpdatePreservesNonceProgression(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err := store.Save(Persistent{NextNonceBase: 42, LastNonceBySide: map[string]uint64{"buy": 40}}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := store.Update(func(p *Persistent) { p.Control = &ControlState{Paused: true} }); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.NextNonceBase != 42 || got.LastNonceBySide["buy"] != 40 {
+		t.Fatalf("nonce progression lost: %#v", got)
+	}
+	if got.Control == nil || !got.Control.Paused {
+		t.Fatalf("Control = %#v, want paused", got.Control)
+	}
+}
+
 func TestFreshTradePrice(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	base := Snapshot{LastMarketDataRefresh: now}

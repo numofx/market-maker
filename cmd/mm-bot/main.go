@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/numofx/market-maker/internal/config"
+	"github.com/numofx/market-maker/internal/control"
 	"github.com/numofx/market-maker/internal/exchange"
 	"github.com/numofx/market-maker/internal/execution"
 	"github.com/numofx/market-maker/internal/metrics"
@@ -34,6 +35,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// A nil interface, not a nil *KMSSigner, when the backend is local: the client tests Signer != nil
+	// to decide whether the private keys are in play.
+	var signer exchange.Signer
+	if cfg.SignerBackend == config.SignerBackendKMS {
+		if cfg.OwnerPrivateKey != "" || cfg.SignerPrivateKey != "" {
+			logger.Warn("MM_SIGNER_BACKEND=kms ignores MM_OWNER_PRIVATE_KEY/MM_SIGNER_PRIVATE_KEY; remove them from the environment")
+		}
+		kmsCtx, cancelKMS := context.WithTimeout(ctx, 15*time.Second)
+		kmsSigner, err := exchange.NewAWSKMSSigner(kmsCtx, cfg.KMSKeyID)
+		cancelKMS()
+		if err != nil {
+			logger.Error("init kms signer", "error", err, "key_id", cfg.KMSKeyID)
+			os.Exit(1)
+		}
+		logger.Info("signer backend", "backend", config.SignerBackendKMS, "key_id", cfg.KMSKeyID, "address", kmsSigner.Address().Hex())
+		signer = kmsSigner
+	}
+
 	client, err := exchange.NewHTTPClient(ctx, exchange.ClientConfig{
 		APIBaseURL:           cfg.APIBaseURL,
 		RPCURL:               cfg.RPCURL,
@@ -56,6 +75,7 @@ func main() {
 		OrderExpirySeconds:   cfg.OrderExpirySeconds,
 		ServiceName:          cfg.ServiceName,
 		ProtectedPrefixes:    cfg.ProtectedOrderIDPrefixes,
+		Signer:               signer,
 	})
 	if err != nil {
 		logger.Error("init exchange client", "error", err)
@@ -70,7 +90,23 @@ func main() {
 	}
 
 	metricRegistry := metrics.New()
-	bot := execution.NewBot(cfg, client, spec, metricRegistry, logger, state.NewStore(cfg.StateFile))
+	store := state.NewStore(cfg.StateFile)
+	// Built even when the control API is disabled: a kill or pause persisted by an earlier run must
+	// still hold if the token has since been removed from the task definition.
+	controller, err := control.NewController(store, cfg.HalfSpreadBPS)
+	if err != nil {
+		logger.Error("init controller", "error", err)
+		os.Exit(1)
+	}
+	bot := execution.NewBot(cfg, client, spec, metricRegistry, logger, store)
+	bot.AttachController(controller)
+
+	// Started before Initialize, so a kill is available while startup reconciliation is still running.
+	controlServer := control.NewServer(cfg.ControlAddr, cfg.ControlToken, controller, bot, logger)
+	if _, err := controlServer.Start(); err != nil {
+		logger.Error("control API failed to start", "error", err)
+		os.Exit(1)
+	}
 
 	metricsServer := &http.Server{
 		Addr:    cfg.MetricsAddr,
@@ -108,11 +144,18 @@ func main() {
 			logger.Info("shutdown summary", "summary", bot.ShutdownSummaryLine())
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			_ = controlServer.Shutdown(shutdownCtx)
 			_ = metricsServer.Shutdown(shutdownCtx)
 			return
 		case <-pollTicker.C:
 			if err := bot.RunCycle(ctx); err != nil {
 				logger.Error("run cycle failed", "error", err)
+			}
+		case <-controller.Wake():
+			// An operator change runs a cycle now rather than at the next poll: a kill's follow-up
+			// cancel, a pause, a pulled side or an adjust should not wait out MM_POLL_INTERVAL_MS.
+			if err := bot.RunCycle(ctx); err != nil {
+				logger.Error("run cycle failed", "error", err, "trigger", "control")
 			}
 		case <-soakTick(soakTicker):
 			logger.Info("soak status", "status", bot.SoakStatusLine())

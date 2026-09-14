@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/numofx/market-maker/internal/config"
 	"github.com/numofx/market-maker/internal/exchange"
@@ -190,17 +191,21 @@ func startupRejectReason(cfg config.Config, spec exchange.MarketSpec, order exch
 // leaves the order alone -- the schedule refresh forces a requote if the fee actually moved, and
 // churning the whole book on a failed lookup would be worse than a stale bound.
 //
-// Two terms matter, because both are promises made at signing time that cannot be amended:
+// Three terms matter, because all are promises made at signing time that cannot be amended:
 //
 //   - post_only: an order without it can take, whatever the config says.
 //   - worstFee: a bound signed under an older, lower schedule reverts TM_FeeTooHigh on every fill
 //     it takes, silently, until it expires.
+//   - expiry: see expiryBeyondConfig.
 func staleTermsReason(cfg config.Config, order *exchange.Order, requiredWorstFee string) string {
 	if order == nil {
 		return ""
 	}
 	if order.PostOnly != cfg.PostOnlyQuotes {
 		return "post_only_mismatch"
+	}
+	if expiryBeyondConfig(cfg, order, time.Now()) {
+		return "expiry_beyond_config"
 	}
 	if strings.TrimSpace(requiredWorstFee) == "" {
 		return ""
@@ -217,6 +222,28 @@ func staleTermsReason(cfg config.Config, order *exchange.Order, requiredWorstFee
 		return "worst_fee_below_current_schedule"
 	}
 	return ""
+}
+
+// signedExpirySlackSeconds absorbs clock skew between the process that signed an order and this one.
+const signedExpirySlackSeconds = 10
+
+// expiryBeyondConfig reports an order signed to live longer than this process would sign now.
+//
+// A cancel is off-chain only: TradeModule has no nonce invalidation, so the signed expiry is the
+// only bound on how long a pulled quote can still settle. The image before 60s expiry signed 3600s,
+// and its ladder survives the deploy. Without this, startup adopts those quotes (price, size and
+// the other terms all match) and the expiry margin leaves them until they are nearly an hour old --
+// an hour of exposure while the config says sixty seconds. Lowering MM_ORDER_EXPIRY_SECONDS later
+// has the same shape.
+//
+// Unknown expiry (0) is left alone, as in expiringWithin. So are protected orders (validation:,
+// test:, ...): the bot never cancels them, and cmd/acceptance-cross still signs validation: orders
+// for 3600s. Flagging one would only free its slot and place a duplicate beside it on every poll.
+func expiryBeyondConfig(cfg config.Config, order *exchange.Order, now time.Time) bool {
+	if order.Expiry <= 0 || cfg.OrderExpirySeconds <= 0 || isProtectedOrderID(cfg, order.ID) {
+		return false
+	}
+	return order.Expiry > now.Unix()+cfg.OrderExpirySeconds+signedExpirySlackSeconds
 }
 
 func startupManagedOrderPrefix(market string) string {

@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/numofx/market-maker/internal/config"
+	"github.com/numofx/market-maker/internal/control"
 	"github.com/numofx/market-maker/internal/exchange"
 	"github.com/numofx/market-maker/internal/metrics"
 	"github.com/numofx/market-maker/internal/state"
@@ -36,6 +38,14 @@ type Syncer struct {
 	// it was counting its own churn. Over one 15-hour window that produced 9,066 reported fills
 	// against a venue whose entire trade history was 8 trades.
 	cancelledIDs map[string]struct{}
+
+	// mu guards cancelTimestamps, the totals and cancelledIDs. The control API cancels from an HTTP
+	// goroutine while the quoting loop may be mid-cycle, and both paths come through cancel().
+	mu sync.Mutex
+
+	// control gates every placement and receives every place/cancel attempt for the terminal's
+	// activity feed. Nil-safe: a syncer without one places and records exactly as before.
+	control *control.Controller
 }
 
 const (
@@ -44,8 +54,18 @@ const (
 	cancelCategoryRiskTriggered    = "risk_triggered"
 	cancelCategoryKillSwitch       = "kill_switch"
 	cancelCategoryFeeRaised        = "taker_fee_raised"
-	sizeDustToleranceBPS           = 5.0
+	// cancelCategoryExpiryReplace is the steady-state roll of a quote about to pass its signed
+	// expiry. Split out of replace_driven so the churn the 60s expiry costs by design is not mistaken
+	// for the churn the quantum and reservation fixes removed.
+	cancelCategoryExpiryReplace = "expiry_replace"
+	cancelCategoryControlSide   = "control_side_pulled"
+	cancelReasonExpiring        = "expiring"
+	sizeDustToleranceBPS        = 5.0
 )
+
+// errPlaceBlocked is a placement the operator control refused. Not a failure: the level is skipped
+// and the cycle carries on, so a kill that lands mid-cycle does not surface as a cycle error.
+var errPlaceBlocked = errors.New("placement blocked by operator control")
 
 type SyncResult struct {
 	Changed        bool
@@ -65,25 +85,85 @@ func NewSyncer(client exchange.Client, spec exchange.MarketSpec, cfg config.Conf
 }
 
 func (s *Syncer) CancelAll(ctx context.Context, market string, category string) error {
-	if s.cfg.DryRun {
-		s.logger.Info("dry-run cancel-all", "market", market)
-		return nil
+	_, _, listErr, cancelErr := s.cancelAll(ctx, market, category, "")
+	if listErr != nil {
+		if s.cfg.DryRun {
+			// Dry run never sent anything, so there is nothing a failed listing leaves exposed.
+			s.logger.Info("dry-run cancel-all could not list orders", "market", market, "error", listErr)
+			return nil
+		}
+		return listErr
 	}
+	return cancelErr
+}
+
+// CancelAllWithResults is CancelAll for the control API: it reports what happened to each order.
+// The error is only for a failure to list the book; per-order failures are in the results.
+//
+// A dry-run bot sends nothing, so each order is reported as an error ("dry run: cancel not sent")
+// rather than "cancelled" -- an operator killing a dry-run bot must not read a clean book into a
+// response that removed nothing.
+func (s *Syncer) CancelAllWithResults(ctx context.Context, market, category string, side exchange.Side) ([]control.CancelResult, error) {
+	results, _, listErr, _ := s.cancelAll(ctx, market, category, side)
+	return results, listErr
+}
+
+// cancelAll cancels every managed order on the market (one side when side is set) and returns the
+// per-order results, the orders still resting afterwards, a listing error, and the first cancel
+// error.
+//
+// It no longer stops at the first failure. A kill or halt that gave up on the first order that
+// errored would leave the rest of the ladder resting behind it -- on a venue where a resting order
+// is executable on-chain until expiry, that is the exposure the cancel was for. Not-found is success:
+// the order was already filled, cancelled, or mid-settlement, and is off the book either way.
+func (s *Syncer) cancelAll(ctx context.Context, market, category string, side exchange.Side) ([]control.CancelResult, []exchange.Order, error, error) {
 	orders, err := s.client.ListOpenOrders(ctx, market)
 	if err != nil {
 		s.metrics.IncErrors()
-		return err
+		return nil, nil, err, nil
 	}
+	if s.cfg.DryRun {
+		s.logger.Info("dry-run cancel-all", "market", market, "orders", len(orders))
+	}
+	results := make([]control.CancelResult, 0, len(orders))
+	var remaining []exchange.Order
+	var firstErr error
 	for _, order := range orders {
-		if err := s.cancel(ctx, order.ID, "cancel_all", false, category); err != nil {
-			if strings.Contains(err.Error(), "active order not found") {
-				continue
-			}
+		if side != "" && order.Side != side {
+			remaining = append(remaining, order)
+			continue
+		}
+		if isProtectedOrderID(s.cfg, order.ID) {
+			s.logger.Info("skip protected order cancel", "order_id", order.ID, "reason", "cancel_all")
+			remaining = append(remaining, order)
+			continue
+		}
+		if s.cfg.DryRun {
+			s.recordAction("cancel", order.Side, order.Price, order.Size, order.ID, "cancel_all", "")
+			results = append(results, control.CancelResult{OrderID: order.ID, Result: control.CancelResultError, Error: "dry run: cancel not sent"})
+			remaining = append(remaining, order)
+			continue
+		}
+		err := s.cancel(ctx, order, "cancel_all", false, category)
+		switch {
+		case err == nil:
+			results = append(results, control.CancelResult{OrderID: order.ID, Result: control.CancelResultCancelled})
+		case isOrderNotFound(err):
+			results = append(results, control.CancelResult{OrderID: order.ID, Result: control.CancelResultNotFound})
+		default:
 			s.metrics.IncErrors()
-			return err
+			results = append(results, control.CancelResult{OrderID: order.ID, Result: control.CancelResultError, Error: err.Error()})
+			remaining = append(remaining, order)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return results, remaining, nil, firstErr
+}
+
+func isOrderNotFound(err error) bool {
+	return errors.Is(err, exchange.ErrOrderNotFound) || strings.Contains(err.Error(), "active order not found")
 }
 
 func (s *Syncer) Sync(ctx context.Context, snapshot state.Snapshot, quotes strategy.Result, identities map[exchange.Side][]Identity) (SyncResult, error) {
@@ -184,8 +264,21 @@ func (s *Syncer) reconcileSide(
 				if decision.Reason == "size_mismatch" {
 					s.logger.Info("size mismatch replace", sizeMismatchAttrs(current, target, quantum, s.cfg)...)
 				}
-				if err := s.cancel(ctx, current.ID, decision.Reason, decision.EnforceRateLimit, cancelCategoryReplaceDriven); err != nil {
-					return err
+				category := cancelCategoryReplaceDriven
+				if decision.Reason == cancelReasonExpiring {
+					category = cancelCategoryExpiryReplace
+				}
+				if err := s.cancel(ctx, *current, decision.Reason, decision.EnforceRateLimit, category); err != nil {
+					// Not found means the order already left the book: filled, or reserved by the
+					// matcher between the list and the cancel. The slot is free either way, so place
+					// its replacement and carry on. With a 60s expiry every quote is cancelled about
+					// every 45s, so this race is routine; aborting here would skip the replacement,
+					// every remaining level on both sides, and this cycle's state save. cancelAll
+					// already treats it this way.
+					if !isOrderNotFound(err) {
+						return err
+					}
+					s.logger.Info("cancel target already gone", "order_id", current.ID, "reason", decision.Reason)
 				}
 				result.Changed = true
 				current = nil
@@ -199,6 +292,9 @@ func (s *Syncer) reconcileSide(
 			}
 			id := ids[i]
 			if err := s.place(ctx, snapshot.Market, *target, id); err != nil {
+				if errors.Is(err, errPlaceBlocked) {
+					continue
+				}
 				return err
 			}
 			result.Changed = true
@@ -267,6 +363,25 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 	// startup check exists to prevent.
 	if reason := staleTermsReason(cfg, current, requiredWorstFee); reason != "" {
 		return cancelDecision{Cancel: true, Reason: reason}
+	}
+	// Expiry is a signed term too, and it is checked on the same unconditional footing.
+	//
+	// A cancel is off-chain only, so the operator runs a 60s rolling expiry to bound how long a pulled
+	// quote stays takeable on-chain. That makes lapsing the normal fate of every quote on a quiet
+	// book: without this, a stable ladder -- one the quantum fix taught never to replace itself --
+	// silently expires, the book goes dark for a cycle, and every lapse reads as a fill.
+	//
+	// No minimum-lifetime suppression: a quote held back until it is old enough has expired by then.
+	// Exempt from the cancel budget: this churn is steady-state by design (a six-order ladder re-signs
+	// all six every ~45s, ~8 cancels a minute), and letting it spend the budget would starve the price
+	// replaces the budget exists to ration -- or, deferred for want of budget, lapse anyway.
+	// The replacement is placed in the same pass: reconcileSide clears current and places target.
+	//
+	// Not for protected orders: the bot never cancels those (s.cancel skips them and reports success),
+	// so a decision to roll one only frees its slot and places a duplicate beside it, every poll, for
+	// the whole margin. They expire on their own terms.
+	if expiringWithin(current, cfg.ExpiryReplaceMarginSeconds, now) && !isProtectedOrderID(cfg, current.ID) {
+		return cancelDecision{Cancel: true, Reason: cancelReasonExpiring}
 	}
 	if sizeMismatchRequiresReplace(current.Size, target.Size, cfg, quantum) {
 		return cancelDecision{Cancel: true, Reason: "size_mismatch", EnforceRateLimit: true}
@@ -393,7 +508,22 @@ func priceDriftBPS(current, target float64) float64 {
 	return math.Abs(target-current) / current * 10000.0
 }
 
-func (s *Syncer) cancel(ctx context.Context, orderID string, reason string, recordRate bool, category string) error {
+// expiringWithin reports whether an order's signed expiry is known and at most marginSeconds away.
+// Expiry 0 is "unknown" -- a row that predates the column, or a client that cannot read it -- and is
+// left alone rather than replaced on a guess.
+func expiringWithin(order *exchange.Order, marginSeconds int64, now time.Time) bool {
+	return order != nil && order.Expiry > 0 && order.Expiry-now.Unix() <= marginSeconds
+}
+
+func (s *Syncer) recordAction(action string, side exchange.Side, price, size float64, orderID, reason, errText string) {
+	s.control.RecordAction(control.Action{
+		At: time.Now().UTC(), Action: action, Side: string(side), Price: price, Size: size,
+		OrderID: orderID, Reason: reason, DryRun: s.cfg.DryRun, Error: errText,
+	})
+}
+
+func (s *Syncer) cancel(ctx context.Context, order exchange.Order, reason string, recordRate bool, category string) error {
+	orderID := order.ID
 	if isProtectedOrderID(s.cfg, orderID) {
 		s.logger.Info("skip protected order cancel", "order_id", orderID, "reason", reason)
 		return nil
@@ -401,6 +531,7 @@ func (s *Syncer) cancel(ctx context.Context, orderID string, reason string, reco
 	s.logger.Info("cancel order", "order_id", orderID, "reason", reason)
 	s.noteCancelled(orderID)
 	if s.cfg.DryRun {
+		s.recordAction("cancel", order.Side, order.Price, order.Size, orderID, reason, "")
 		if recordRate {
 			s.recordCancel()
 			s.metrics.SetCancelsPerMinute(s.cancelsPerMinute())
@@ -413,8 +544,10 @@ func (s *Syncer) cancel(ctx context.Context, orderID string, reason string, reco
 	}
 	if err := s.client.CancelOrder(ctx, orderID, reason); err != nil {
 		s.metrics.IncErrors()
+		s.recordAction("cancel", order.Side, order.Price, order.Size, orderID, reason, err.Error())
 		return fmt.Errorf("cancel order %s: %w", orderID, err)
 	}
+	s.recordAction("cancel", order.Side, order.Price, order.Size, orderID, reason, "")
 	s.metrics.IncCancels()
 	if category != "" {
 		s.metrics.IncCancelCategory(category)
@@ -427,8 +560,13 @@ func (s *Syncer) cancel(ctx context.Context, orderID string, reason string, reco
 }
 
 func (s *Syncer) place(ctx context.Context, market string, q strategy.Quote, id Identity) error {
+	if ok, why := s.control.AllowPlace(q.Side); !ok {
+		s.logger.Info("place suppressed by operator control", "market", market, "side", q.Side, "price", q.Price, "size", q.Size, "reason", why)
+		return errPlaceBlocked
+	}
 	s.logger.Info("place order", "market", market, "side", q.Side, "price", q.Price, "size", q.Size, "order_id", id.OrderID, "nonce", id.Nonce)
 	if s.cfg.DryRun {
+		s.recordAction("place", q.Side, q.Price, q.Size, id.OrderID, "quote", "")
 		return nil
 	}
 	if _, err := s.client.PlaceLimitOrder(ctx, exchange.PlaceOrderRequest{
@@ -450,6 +588,7 @@ func (s *Syncer) place(ctx context.Context, market string, q strategy.Quote, id 
 		// aggressively. The level is skipped, the rest of the ladder is placed, and the next cycle
 		// reprices this one against a book it can actually rest on.
 		if errors.Is(err, exchange.ErrPostOnlyWouldCross) {
+			s.recordAction("place", q.Side, q.Price, q.Size, id.OrderID, "quote", "post_only_would_cross")
 			s.logger.Info(
 				"post-only quote rejected",
 				"market", market, "side", q.Side, "price", q.Price, "size", q.Size,
@@ -458,12 +597,17 @@ func (s *Syncer) place(ctx context.Context, market string, q strategy.Quote, id 
 			s.metrics.IncPostOnlyRejections()
 			return nil
 		}
+		s.recordAction("place", q.Side, q.Price, q.Size, id.OrderID, "quote", err.Error())
 		s.metrics.IncErrors()
 		return fmt.Errorf("place order: %w", err)
 	}
+	s.recordAction("place", q.Side, q.Price, q.Size, id.OrderID, "quote", "")
 	s.metrics.IncPlacements()
+	s.mu.Lock()
 	s.totalPlacements++
-	s.metrics.SetCancelReplaceRatio(s.cancelReplaceRatio())
+	ratio := s.cancelReplaceRatioLocked()
+	s.mu.Unlock()
+	s.metrics.SetCancelReplaceRatio(ratio)
 	return nil
 }
 
@@ -471,6 +615,8 @@ func (s *Syncer) place(ctx context.Context, market string, q strategy.Quote, id 
 // later mistaken for a fill. Recorded on intent rather than on success: an order we asked the venue
 // to cancel is not evidence of a trade whether or not the call returned cleanly.
 func (s *Syncer) noteCancelled(orderID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.cancelledIDs == nil {
 		s.cancelledIDs = make(map[string]struct{})
 	}
@@ -483,6 +629,8 @@ func (s *Syncer) noteCancelled(orderID string) {
 // can explain a disappearance are the ones issued between them; holding older ids would suppress a
 // genuine fill on an order id the venue happened to reuse.
 func (s *Syncer) TakeCancelled() map[string]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := s.cancelledIDs
 	s.cancelledIDs = nil
 	if out == nil {
@@ -495,18 +643,24 @@ func (s *Syncer) canUseCancelSlot() bool {
 	if s.cfg.MaxCancelsPerMinute <= 0 {
 		return true
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.pruneCancelTimestamps(time.Now().UTC())
 	return len(s.cancelTimestamps) < s.cfg.MaxCancelsPerMinute
 }
 
 func (s *Syncer) recordCancel() {
 	now := time.Now().UTC()
+	s.mu.Lock()
 	s.pruneCancelTimestamps(now)
 	s.cancelTimestamps = append(s.cancelTimestamps, now)
 	s.totalCancels++
-	s.metrics.SetCancelReplaceRatio(s.cancelReplaceRatio())
+	ratio := s.cancelReplaceRatioLocked()
+	s.mu.Unlock()
+	s.metrics.SetCancelReplaceRatio(ratio)
 }
 
+// pruneCancelTimestamps drops entries older than a minute. The caller holds s.mu.
 func (s *Syncer) pruneCancelTimestamps(now time.Time) {
 	if len(s.cancelTimestamps) == 0 {
 		return
@@ -522,11 +676,14 @@ func (s *Syncer) pruneCancelTimestamps(now time.Time) {
 }
 
 func (s *Syncer) cancelsPerMinute() float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.pruneCancelTimestamps(time.Now().UTC())
 	return float64(len(s.cancelTimestamps))
 }
 
-func (s *Syncer) cancelReplaceRatio() float64 {
+// cancelReplaceRatioLocked is the cancel/placement ratio. The caller holds s.mu.
+func (s *Syncer) cancelReplaceRatioLocked() float64 {
 	if s.totalPlacements == 0 {
 		return 0
 	}
