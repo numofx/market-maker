@@ -45,6 +45,9 @@ var decimalScale = new(big.Int).Exp(big.NewInt(10), big.NewInt(assetDecimals), n
 type BookLevel struct {
 	Price float64 `json:"price"`
 	Size  float64 `json:"size"`
+	// OrderID identifies the resting order behind the level, so a bot can tell its own quotes apart
+	// from other participants'.
+	OrderID string `json:"order_id"`
 }
 
 type Book struct {
@@ -491,11 +494,13 @@ func (c *HTTPClient) GetBook(ctx context.Context, market string) (Book, error) {
 	}
 	var resp struct {
 		Bids []struct {
+			OrderID       string              `json:"order_id"`
 			LimitPrice    string              `json:"limit_price"`
 			DesiredAmount string              `json:"desired_amount"`
 			SpotContract  *spotUIPresentation `json:"spot_contract"`
 		} `json:"bids"`
 		Asks []struct {
+			OrderID       string              `json:"order_id"`
 			LimitPrice    string              `json:"limit_price"`
 			DesiredAmount string              `json:"desired_amount"`
 			SpotContract  *spotUIPresentation `json:"spot_contract"`
@@ -513,6 +518,7 @@ func (c *HTTPClient) GetBook(ctx context.Context, market string) (Book, error) {
 		if err != nil {
 			return Book{}, err
 		}
+		level.OrderID = bid.OrderID
 		switch side {
 		case SideBuy:
 			book.Bids = append(book.Bids, level)
@@ -525,6 +531,7 @@ func (c *HTTPClient) GetBook(ctx context.Context, market string) (Book, error) {
 		if err != nil {
 			return Book{}, err
 		}
+		level.OrderID = ask.OrderID
 		switch side {
 		case SideBuy:
 			book.Bids = append(book.Bids, level)

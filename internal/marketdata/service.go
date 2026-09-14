@@ -62,12 +62,7 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 		LastMarketDataRefresh: now,
 		LastBalanceRefresh:    now,
 	}
-	if len(book.Bids) > 0 {
-		snapshot.BestBid = book.Bids[0].Price
-	}
-	if len(book.Asks) > 0 {
-		snapshot.BestAsk = book.Asks[0].Price
-	}
+	snapshot.BestBid, snapshot.BestAsk = othersBestPrices(book, openOrders)
 	snapshot.LocalReferencePrice, snapshot.LocalReferenceSource = localReference(snapshot)
 	for _, balance := range balances {
 		snapshot.InventoryByAsset[balance.Asset] = balance.Total
@@ -105,6 +100,33 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 		snapshot.LastAnchorRefresh = now
 	}
 	return snapshot, nil
+}
+
+// othersBestPrices is the top of book with this bot's own resting orders taken out, so the reference
+// is the mid of what OTHER participants quote. Counting its own quotes made a one-sided ladder chase
+// the lone order opposite it: each re-quote moved the mid it was priced from. Live on 2026-09-14 the
+// bid walked from 1351.99 to 1366.23 against a trader's 1370 ask within two cycles. The open orders
+// come from the same Load, and the bot places nothing while loading, so the two agree.
+func othersBestPrices(book exchange.Book, openOrders []exchange.Order) (bestBid, bestAsk float64) {
+	own := make(map[string]struct{}, len(openOrders))
+	for _, order := range openOrders {
+		own[order.ID] = struct{}{}
+	}
+	isOwn := func(level exchange.BookLevel) bool {
+		_, ok := own[level.OrderID]
+		return level.OrderID != "" && ok
+	}
+	for _, level := range book.Bids {
+		if !isOwn(level) && level.Price > bestBid {
+			bestBid = level.Price
+		}
+	}
+	for _, level := range book.Asks {
+		if !isOwn(level) && level.Price > 0 && (bestAsk == 0 || level.Price < bestAsk) {
+			bestAsk = level.Price
+		}
+	}
+	return bestBid, bestAsk
 }
 
 func localReference(snapshot state.Snapshot) (float64, string) {

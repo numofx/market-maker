@@ -239,12 +239,13 @@ The bot then uses the configured external anchor as an indicative mark when and 
 
 External-anchor selection for `USDCcNGN-SPOT` is:
 
-1. local mid from top of book
+1. mid of other participants' best bid and ask (the bot's own resting quotes are excluded)
 2. local last trade, however old
 3. external bootstrap anchor
 4. otherwise halt with `reference price unavailable`
 
-The book is the source of truth for spot, traders' resting orders included. The external anchor only
+The book is the source of truth for spot, traders' resting orders included — but not the bot's own
+quotes, which would otherwise pull a one-sided ladder toward the single order opposite it. The external anchor only
 prices a venue with no two-sided book and no trades; it is never compared against the book, so
 `MM_MAX_ANCHOR_DEVIATION_BPS` and `MM_STALE_ANCHOR_TIMEOUT_SECONDS` do not halt spot however far the
 oracle is from the book. What bounds a mid set by a single trader's orders is the bot's inventory
