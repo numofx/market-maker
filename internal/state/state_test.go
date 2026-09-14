@@ -79,3 +79,23 @@ func TestFreshTradePrice(t *testing.T) {
 		t.Fatal("missing market-data timestamp should reject the trade")
 	}
 }
+
+func TestReferenceTradePriceOnSpotIgnoresAge(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	old := []exchange.Trade{{Price: 1327.34, CreatedAt: now.Add(-24 * time.Hour)}}
+
+	spot := Snapshot{Market: "USDCcNGN-SPOT", LastMarketDataRefresh: now, RecentTrades: old}
+	if p, ok := ReferenceTradePrice(spot); !ok || p != 1327.34 {
+		t.Fatalf("spot: got (%v,%v) want (1327.34,true)", p, ok)
+	}
+
+	// Other markets still refuse a stale print: their anchor feeds the deviation guard.
+	future := Snapshot{Market: "USDCcNGN-SEP16-2026", LastMarketDataRefresh: now, RecentTrades: old}
+	if _, ok := ReferenceTradePrice(future); ok {
+		t.Fatal("non-spot stale trade should not be a reference")
+	}
+
+	if _, ok := ReferenceTradePrice(Snapshot{Market: "USDCcNGN-SPOT"}); ok {
+		t.Fatal("spot with no trades has no trade reference")
+	}
+}

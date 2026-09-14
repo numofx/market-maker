@@ -222,7 +222,7 @@ Reference price selection is:
 3. last trade
 4. otherwise no quote
 
-The bot also computes a local reference from the market itself. If local price deviates from anchor by more than `MM_MAX_ANCHOR_DEVIATION_BPS`, quoting halts and managed orders are canceled.
+The bot also computes a local reference from the market itself. If local price deviates from anchor by more than `MM_MAX_ANCHOR_DEVIATION_BPS`, quoting halts and managed orders are canceled. `USDCcNGN-SPOT` is exempt: its book is the price, and its external anchor is a bootstrap only (below).
 
 Anchor freshness is tracked independently from exchange market-data freshness. `MM_STALE_ANCHOR_TIMEOUT_SECONDS` controls how long the bot will tolerate an old anchor before halting with `anchor data stale`.
 
@@ -240,9 +240,15 @@ The bot then uses the configured external anchor as an indicative mark when and 
 External-anchor selection for `USDCcNGN-SPOT` is:
 
 1. local mid from top of book
-2. local last trade
+2. local last trade, however old
 3. external bootstrap anchor
 4. otherwise halt with `reference price unavailable`
+
+The book is the source of truth for spot, traders' resting orders included. The external anchor only
+prices a venue with no two-sided book and no trades; it is never compared against the book, so
+`MM_MAX_ANCHOR_DEVIATION_BPS` and `MM_STALE_ANCHOR_TIMEOUT_SECONDS` do not halt spot however far the
+oracle is from the book. What bounds a mid set by a single trader's orders is the bot's inventory
+and notional caps, not the oracle.
 
 This path does not apply to:
 
@@ -292,7 +298,7 @@ When the active reference source is the external bootstrap anchor:
 - quote spread is widened by `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SPREAD_MULTIPLIER`
 - quote size is reduced by `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER`
 
-When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops polling and using the external bootstrap anchor as soon as a usable local spot book or trade reference appears.
+When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using the external bootstrap anchor as soon as a usable local spot book or trade reference appears. It keeps polling it, so the bootstrap price is warm if the book empties.
 
 ## Operator Modes
 
@@ -584,7 +590,8 @@ The harness fails loudly with actionable errors if required services are missing
 - If the deployment addresses or chain ID do not match the target environment, signed orders will be rejected.
 - If the exchange changes `/v1/orders` payload validation or market metadata format, the client must be updated.
 - If the anchor source fails and neither top-of-book nor last trade can provide a local fallback, the bot halts.
-- For `USDCcNGN-SPOT`, if the local market is empty and the external 0x bootstrap anchor is missing, stale, malformed, or rejected by the deviation guard, the bot halts with `reference price unavailable`.
+- For `USDCcNGN-SPOT`, if the local market has no two-sided book and has never traded, and the external bootstrap anchor is missing, stale, malformed, or rejected by the deviation guard, the bot halts with `reference price unavailable`.
+- A spot order is a whole-cNGN engine amount, so a side whose inventory is worth under 1 cNGN at its price cannot quote. That side is suppressed and logged every quoting cycle as `quote side suppressed` (`insufficient_base_capacity` for asks, `insufficient_quote_capacity` for bids) — the low-inventory alert — and the other side keeps quoting.
 - Available-balance accounting assumes open-order reserve semantics are:
   - bid reserves quote asset `size * price`
   - ask reserves base asset `size`

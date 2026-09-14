@@ -99,7 +99,7 @@ func ComputeLocalReference(snapshot state.Snapshot) (float64, string) {
 	if snapshot.BestBid > 0 && snapshot.BestAsk > 0 {
 		return (snapshot.BestBid + snapshot.BestAsk) / 2, "book"
 	}
-	if price, ok := state.FreshTradePrice(snapshot); ok {
+	if price, ok := state.ReferenceTradePrice(snapshot); ok {
 		return price, "trade"
 	}
 	return 0, "none"
@@ -191,20 +191,22 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 	bidSize := roundDown(minFloat(orderSize, maxBidSize), spec.SizeStep)
 	askSize := roundDown(minFloat(orderSize, maxAskSize), spec.SizeStep)
 
-	if bidSize >= spec.MinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
+	bidMinSize := minQuoteSize(spec, bidPrice)
+	askMinSize := minQuoteSize(spec, askPrice)
+	if bidSize >= bidMinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}
 		result.Bids = buildLevels(cfg, spec, exchange.SideBuy, ref, halfSpread, skew, orderSize, maxBidSize, inventory, effectiveMaxLong(cfg), askPrice)
 	} else {
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, spec.MinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, bidMinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), bidMinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 	}
-	if askSize >= spec.MinSize && inventory-askSize >= effectiveMaxShort(cfg) {
+	if askSize >= askMinSize && inventory-askSize >= effectiveMaxShort(cfg) {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
 		result.Asks = buildLevels(cfg, spec, exchange.SideSell, ref, halfSpread, skew, orderSize, maxAskSize, inventory, effectiveMaxShort(cfg), bidPrice)
 	} else if cashMarginedFuture {
 		// Short backed by cash: report cash/quote capacity, not base-asset inventory.
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, quoteAvailable, inventory, effectiveMaxShort(cfg)), spec.MinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, quoteAvailable, inventory, effectiveMaxShort(cfg)), askMinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
 	} else {
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, spec.MinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, effectiveMaxShort(cfg)), spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, effectiveMaxShort(cfg)), askMinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	}
 
 	switch cfg.OperatorMode {
@@ -385,7 +387,7 @@ func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side
 			}
 		}
 		size := roundDown(minFloat(levelSize, minFloat(remainingBudget, remainingInv)), spec.SizeStep)
-		if size < spec.MinSize {
+		if size < minQuoteSize(spec, price) {
 			break
 		}
 		quotes = append(quotes, Quote{Side: side, Price: price, Size: size})
@@ -394,6 +396,21 @@ func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side
 		levelSize *= sizeMult
 	}
 	return quotes
+}
+
+// minQuoteSize is the smallest size the venue accepts at price. A spot order is submitted as a
+// whole-cNGN engine amount (size x price, floored), so a spot quote worth less than 1 cNGN cannot be
+// placed at all. Quoting one anyway failed the whole cycle -- both sides -- when an ask was left with
+// 0.000682 USDC; below this size a side is suppressed instead, and the other side keeps quoting.
+func minQuoteSize(spec exchange.MarketSpec, price float64) float64 {
+	if spec.Symbol != "USDCcNGN-SPOT" || price <= 0 {
+		return spec.MinSize
+	}
+	size := roundUp(1/price, spec.SizeStep)
+	if size*price < 1 && spec.SizeStep > 0 {
+		size += spec.SizeStep
+	}
+	return math.Max(spec.MinSize, size)
 }
 
 func effectiveMaxLong(cfg config.Config) float64 {
