@@ -295,8 +295,10 @@ func Load() (Config, error) {
 		if cfg.MarketSymbol != "USDCcNGN-SPOT" {
 			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED is only supported for MM_MARKET_SYMBOL=USDCcNGN-SPOT")
 		}
-		if cfg.USDCCNGNSpotExternalAnchor.Provider != "0x" && cfg.USDCCNGNSpotExternalAnchor.Provider != "cngn-price-oracle" {
-			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER must be one of 0x, cngn-price-oracle")
+		switch cfg.USDCCNGNSpotExternalAnchor.Provider {
+		case "0x", "cngn-price-oracle", "cngn-rate-picker":
+		default:
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER must be one of 0x, cngn-price-oracle, cngn-rate-picker")
 		}
 		if cfg.USDCCNGNSpotExternalAnchor.Provider == "0x" {
 			if cfg.USDCCNGNSpotExternalAnchor.BaseURL == "" {

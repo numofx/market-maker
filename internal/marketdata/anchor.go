@@ -234,6 +234,7 @@ type ZeroExUSDCCNGNSpotExternalAnchor struct {
 	last          ExternalAnchorQuote
 	lastFetchWall time.Time
 	decimals      *uint8
+	picker        *ratePicker
 }
 
 // oracleRefreshThrottle bounds how often the on-chain oracle is re-read now that
@@ -251,9 +252,9 @@ func NewUSDCCNGNSpotExternalAnchor(cfg config.Config) USDCCNGNSpotExternalAnchor
 }
 
 func (s *ZeroExUSDCCNGNSpotExternalAnchor) Fetch(ctx context.Context) ExternalAnchorQuote {
-	if s.cfg.Provider == "cngn-price-oracle" {
+	if interval := s.refreshInterval(); interval > 0 {
 		s.mu.Lock()
-		if s.last.Present && time.Since(s.lastFetchWall) < oracleRefreshThrottle {
+		if s.last.Present && time.Since(s.lastFetchWall) < interval {
 			cached := s.last
 			s.mu.Unlock()
 			cached.RefreshAttempted = false
@@ -286,17 +287,18 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) Fetch(ctx context.Context) ExternalAn
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.last.Present && s.cfg.MaxDeviationBPS > 0 {
+	// Only a price that is still fresh is a baseline for the fetch-to-fetch guard. Guarding against an expired
+	// one rejected every later price after a genuine move, forever, since nothing replaced it.
+	if s.last.Present && s.cfg.MaxDeviationBPS > 0 && time.Since(s.last.FetchedAt) <= s.cfg.MaxAge {
 		deviation := absBPS(quote.Price, s.last.Price)
 		if deviation > s.cfg.MaxDeviationBPS {
 			slog.Warn("external anchor rejected", "provider", s.cfg.Provider, "market", "USDCcNGN-SPOT", "reason", "deviation_guard", "candidate_price", quote.Price, "last_price", s.last.Price, "deviation_bps", deviation)
-			if time.Since(s.last.FetchedAt) <= s.cfg.MaxAge {
-				cached := s.last
-				cached.RefreshAttempted = true
-				cached.RefreshFailed = true
-				return cached
-			}
-			return ExternalAnchorQuote{RefreshAttempted: true, RefreshFailed: true}
+			// Throttle the re-check like any refresh rather than re-reading upstream every cycle.
+			s.lastFetchWall = time.Now()
+			cached := s.last
+			cached.RefreshAttempted = true
+			cached.RefreshFailed = true
+			return cached
 		}
 	}
 	s.last = quote
@@ -304,9 +306,23 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) Fetch(ctx context.Context) ExternalAn
 	return quote
 }
 
+// refreshInterval is how long a fetched price is served before upstream is read again; 0 reads every cycle.
+func (s *ZeroExUSDCCNGNSpotExternalAnchor) refreshInterval() time.Duration {
+	switch s.cfg.Provider {
+	case "cngn-price-oracle":
+		return oracleRefreshThrottle
+	case RatePickerProvider:
+		return ratePickerRefreshInterval
+	}
+	return 0
+}
+
 func (s *ZeroExUSDCCNGNSpotExternalAnchor) fetchFresh(ctx context.Context) (ExternalAnchorQuote, error) {
 	if s.cfg.Provider == "cngn-price-oracle" {
 		return s.fetchCNGNOracleOnChain(ctx)
+	}
+	if s.cfg.Provider == RatePickerProvider {
+		return s.fetchRatePicker(ctx)
 	}
 	u, err := url.Parse(s.cfg.BaseURL)
 	if err != nil {

@@ -240,13 +240,13 @@ The bot then uses the configured external anchor as an indicative mark when and 
 External-anchor selection for `USDCcNGN-SPOT` is:
 
 1. mid of other participants' best bid and ask (the bot's own resting quotes are excluded)
-2. local last trade, however old
-3. external bootstrap anchor
+2. external fallback price (`cngn-rate-picker` in production; see below)
+3. local last trade, however old
 4. otherwise halt with `reference price unavailable`
 
 The book is the source of truth for spot, traders' resting orders included — but not the bot's own
-quotes, which would otherwise pull a one-sided ladder toward the single order opposite it. The external anchor only
-prices a venue with no two-sided book and no trades; it is never compared against the book, so
+quotes, which would otherwise pull a one-sided ladder toward the single order opposite it. The external anchor is the
+fallback when other participants quote no two-sided book, ahead of the venue's last trade; it is never compared against the book, so
 `MM_MAX_ANCHOR_DEVIATION_BPS` and `MM_STALE_ANCHOR_TIMEOUT_SECONDS` do not halt spot however far the
 oracle is from the book. What bounds a mid set by a single trader's orders is the bot's inventory
 and notional caps, not the oracle.
@@ -264,6 +264,19 @@ Bootstrap settings:
     - uses the 0x read-only price endpoint
   - `cngn-price-oracle`
     - reads the Base Chainlink cNGN/USD oracle described in `wrappedcbdc/cngn-price-oracle`
+  - `cngn-rate-picker`
+    - a Go port of [`wrappedcbdc/cngn-rate-picker`](https://github.com/wrappedcbdc/cngn-rate-picker) (v0.2.2):
+      NGN per USDT from its keyless providers in priority order, first success wins (the library's
+      threshold 1), each source failing over after 3 consecutive errors for 30s
+    - Quidax `usdtngn`: 1h TWAP of 1-minute closes, counting only candles that traded, refused when the
+      last trade is over 6h old
+    - Textile `USDT_NGN`: 1h TWAP of cleared trades, else the book mid, else the last price
+    - Bybit P2P (keyless web endpoint): mid of the modal buy/sell ad among reputable online advertisers
+      within 2% of the median
+    - sources are queried concurrently once a minute, each bounded by
+      `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_TIMEOUT_MS`; no key or base URL is needed
+    - departs from the library in reading Quidax `usdtngn` instead of `usdtcngn` and ignoring zero-volume
+      candles: `usdtcngn` served a candle a minute with no volume, which the library's staleness guard accepts
 - `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BASE_URL`
   - for `0x`: base price endpoint, for example a proxied 0x price endpoint
   - for `cngn-price-oracle`: not required by the on-chain oracle path
@@ -299,7 +312,7 @@ When the active reference source is the external bootstrap anchor:
 - quote spread is widened by `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SPREAD_MULTIPLIER`
 - quote size is reduced by `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER`
 
-When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using the external bootstrap anchor as soon as a usable local spot book or trade reference appears. It keeps polling it, so the bootstrap price is warm if the book empties.
+When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using the external anchor as soon as other participants quote a two-sided spot book. It keeps polling it, so the bootstrap price is warm if the book empties.
 
 ## Operator Modes
 
