@@ -236,9 +236,11 @@ const signedExpirySlackSeconds = 10
 // an hour of exposure while the config says sixty seconds. Lowering MM_ORDER_EXPIRY_SECONDS later
 // has the same shape.
 //
-// Unknown expiry (0) is left alone, as in expiringWithin.
+// Unknown expiry (0) is left alone, as in expiringWithin. So are protected orders (validation:,
+// test:, ...): the bot never cancels them, and cmd/acceptance-cross still signs validation: orders
+// for 3600s. Flagging one would only free its slot and place a duplicate beside it on every poll.
 func expiryBeyondConfig(cfg config.Config, order *exchange.Order, now time.Time) bool {
-	if order.Expiry <= 0 || cfg.OrderExpirySeconds <= 0 {
+	if order.Expiry <= 0 || cfg.OrderExpirySeconds <= 0 || isProtectedOrderID(cfg, order.ID) {
 		return false
 	}
 	return order.Expiry > now.Unix()+cfg.OrderExpirySeconds+signedExpirySlackSeconds

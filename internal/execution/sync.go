@@ -269,7 +269,16 @@ func (s *Syncer) reconcileSide(
 					category = cancelCategoryExpiryReplace
 				}
 				if err := s.cancel(ctx, *current, decision.Reason, decision.EnforceRateLimit, category); err != nil {
-					return err
+					// Not found means the order already left the book: filled, or reserved by the
+					// matcher between the list and the cancel. The slot is free either way, so place
+					// its replacement and carry on. With a 60s expiry every quote is cancelled about
+					// every 45s, so this race is routine; aborting here would skip the replacement,
+					// every remaining level on both sides, and this cycle's state save. cancelAll
+					// already treats it this way.
+					if !isOrderNotFound(err) {
+						return err
+					}
+					s.logger.Info("cancel target already gone", "order_id", current.ID, "reason", decision.Reason)
 				}
 				result.Changed = true
 				current = nil
@@ -367,7 +376,11 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 	// all six every ~45s, ~8 cancels a minute), and letting it spend the budget would starve the price
 	// replaces the budget exists to ration -- or, deferred for want of budget, lapse anyway.
 	// The replacement is placed in the same pass: reconcileSide clears current and places target.
-	if expiringWithin(current, cfg.ExpiryReplaceMarginSeconds, now) {
+	//
+	// Not for protected orders: the bot never cancels those (s.cancel skips them and reports success),
+	// so a decision to roll one only frees its slot and places a duplicate beside it, every poll, for
+	// the whole margin. They expire on their own terms.
+	if expiringWithin(current, cfg.ExpiryReplaceMarginSeconds, now) && !isProtectedOrderID(cfg, current.ID) {
 		return cancelDecision{Cancel: true, Reason: cancelReasonExpiring}
 	}
 	if sizeMismatchRequiresReplace(current.Size, target.Size, cfg, quantum) {
