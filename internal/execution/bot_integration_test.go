@@ -464,6 +464,71 @@ func TestSpotQuotesOffTheBookWhenTheOracleDisagrees(t *testing.T) {
 	}
 }
 
+// Live after #21 deployed: the bot's own bid (1366.23) was the best bid opposite a trader's 1370 ask,
+// so each re-quote raised the mid it priced from and the bid walked toward 1370. The reference is
+// now the trader's orders alone: (1333.97 + 1370) / 2.
+func TestSpotReferenceIgnoresTheBotsOwnQuotes(t *testing.T) {
+	ownBid := exchange.Order{ID: "mm:USDCcNGN-SPOT:buy:1", Market: "USDCcNGN-SPOT", Side: exchange.SideBuy, Price: 1366.23, Size: 1.2, Managed: true}
+	for _, tt := range []struct {
+		name       string
+		book       exchange.Book
+		wantRef    float64
+		wantSource string
+	}{
+		{
+			name: "trader on both sides",
+			book: exchange.Book{
+				Bids: []exchange.BookLevel{{Price: 1366.23, OrderID: ownBid.ID}, {Price: 1333.97, OrderID: "spot-trader-bid"}},
+				Asks: []exchange.BookLevel{{Price: 1370, OrderID: "spot-trader-ask"}},
+			},
+			wantRef:    1351.985,
+			wantSource: "book",
+		},
+		{
+			// Others quote one side only, so there is no two-sided book to take a mid from.
+			name: "trader ask only falls back to the last trade",
+			book: exchange.Book{
+				Bids: []exchange.BookLevel{{Price: 1366.23, OrderID: ownBid.ID}},
+				Asks: []exchange.BookLevel{{Price: 1370, OrderID: "spot-trader-ask"}},
+			},
+			wantRef:    1327.34,
+			wantSource: "trade",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &integrationClient{
+				mockClient: mockClient{openOrders: []exchange.Order{ownBid}},
+				spec:       exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001},
+				book:       tt.book,
+				trades:     []exchange.Trade{{Price: 1327.34, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)}},
+				balances: []exchange.Balance{
+					{Asset: "USDC", Total: 0.000682, Available: 0.000682},
+					{Asset: "cNGN", Total: 8980, Available: 8980},
+				},
+			}
+			cfg := config.Config{
+				MarketSymbol:         "USDCcNGN-SPOT",
+				StateFile:            filepath.Join(t.TempDir(), "state.json"),
+				OrderSize:            1.2,
+				HalfSpreadBPS:        10,
+				QuoteLevels:          5,
+				LevelSpreadStepBPS:   15,
+				LevelSizeMult:        1.2,
+				MaxNetInventory:      60,
+				MaxNotionalPerSide:   15000,
+				QuoteRefreshInterval: 0,
+			}
+			bot := NewBot(cfg, client, client.spec, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)), state.NewStore(cfg.StateFile))
+			if err := bot.RunCycle(context.Background()); err != nil {
+				t.Fatalf("RunCycle() error = %v", err)
+			}
+			if bot.snapshot.ReferenceSource != tt.wantSource || math.Abs(bot.snapshot.ReferencePrice-tt.wantRef) > 1e-9 {
+				t.Fatalf("reference = %v (%s), want %v (%s)", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource, tt.wantRef, tt.wantSource)
+			}
+		})
+	}
+}
+
 func TestPauseModeCancelsAndDoesNotPlace(t *testing.T) {
 	client := &integrationClient{
 		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},

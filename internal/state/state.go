@@ -60,7 +60,9 @@ type AssetPosition struct {
 }
 
 type Snapshot struct {
-	Market                         string
+	Market string
+	// BestBid and BestAsk are other participants' best prices: the bot's own resting orders are
+	// excluded, since the reference must not be priced off the bot's own quotes.
 	BestBid                        float64
 	BestAsk                        float64
 	ReferencePrice                 float64
