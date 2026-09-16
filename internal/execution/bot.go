@@ -877,16 +877,14 @@ func (b *Bot) observeFills(previous, current state.Snapshot, cancelled map[strin
 		}
 		return
 	}
-	if len(previous.InventoryByAsset) == 0 {
-		return
-	}
-	delta := current.Inventory(b.spec.BaseAsset) - previous.Inventory(b.spec.BaseAsset)
-	if delta > 0 {
-		b.metrics.IncFill(string(exchange.SideBuy))
-	}
-	if delta < 0 {
-		b.metrics.IncFill(string(exchange.SideSell))
-	}
+	// A balance change on its own is NOT evidence of a trade, and the inventory-delta fallback that
+	// used to live here could not tell the two apart. On 2026-09-16 a 10 USDC deposit into
+	// subaccount 15 arrived while five bids rested untouched and the venue's tape was unchanged, so
+	// both observations above abstained and the delta was booked as a buy fill that never happened.
+	// Deposits, withdrawals and transfers all move inventory without trading.
+	//
+	// Every real fill leaves one of two marks: it changes one of our resting orders, or it appears
+	// on the venue's tape. Anything left over is somebody moving money, so nothing is counted.
 }
 
 // observeOrderStateFills turns two consecutive snapshots into fill counts.
