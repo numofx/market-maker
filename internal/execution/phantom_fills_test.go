@@ -169,3 +169,70 @@ func TestARestartStillSeesAFillItDidNotCause(t *testing.T) {
 		t.Fatalf("fills = %v, want the cancelled order ignored", fills)
 	}
 }
+
+func fillBot(t *testing.T) (*Bot, *metrics.Registry) {
+	t.Helper()
+	reg := metrics.New()
+	bot := NewBot(config.Config{}, &mockClient{},
+		exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN"},
+		reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	return bot, reg
+}
+
+// A deposit is not a fill. Funding subaccount 15 with 10 USDC on 2026-09-16 moved inventory while
+// five bids rested untouched and the venue's tape was unchanged -- its last trade was two days old.
+// The order comparison abstained (nothing vanished or shrank), the tape had nothing new, and the
+// inventory-delta fallback booked a buy fill that never happened. Withdrawals did the same in
+// reverse. Nothing about a balance change says a trade occurred.
+func TestADepositIsNotAFill(t *testing.T) {
+	bot, _ := fillBot(t)
+	bids := []exchange.Order{
+		resting("b1", exchange.SideBuy, 0.599412),
+		resting("b2", exchange.SideBuy, 0.719500),
+	}
+	before := snap(bids...)
+	before.InventoryByAsset = map[string]float64{"USDC": 0.000682}
+	after := snap(bids...)
+	after.InventoryByAsset = map[string]float64{"USDC": 10.000682}
+
+	bot.observeFills(before, after, map[string]struct{}{})
+
+	if fills := bot.Summary().FillsBySide; len(fills) != 0 {
+		t.Fatalf("fills = %v; a 10 USDC deposit is not a trade", fills)
+	}
+}
+
+// The counter must still do its job through the same entry point: the two observations that remain
+// cover every real fill, one by what happened to our orders and one by the venue's own tape.
+func TestObserveFillsStillCountsRealFills(t *testing.T) {
+	t.Run("an order that vanished without us cancelling it", func(t *testing.T) {
+		bot, _ := fillBot(t)
+		before := snap(resting("b1", exchange.SideBuy, 1.2))
+		before.InventoryByAsset = map[string]float64{"USDC": 10}
+		after := snap()
+		after.InventoryByAsset = map[string]float64{"USDC": 11.2}
+
+		bot.observeFills(before, after, map[string]struct{}{})
+
+		if got := bot.Summary().FillsBySide[string(exchange.SideBuy)]; got != 1 {
+			t.Fatalf("buy fills = %d, want 1", got)
+		}
+	})
+
+	t.Run("a new trade on the venue tape", func(t *testing.T) {
+		bot, _ := fillBot(t)
+		before := snap()
+		before.RecentTrades = []exchange.Trade{{ID: 348, Side: exchange.SideBuy}}
+		before.InventoryByAsset = map[string]float64{"USDC": 10}
+		after := snap()
+		// The aggressor sold, so we bought.
+		after.RecentTrades = []exchange.Trade{{ID: 349, Side: exchange.SideSell}, {ID: 348, Side: exchange.SideBuy}}
+		after.InventoryByAsset = map[string]float64{"USDC": 11}
+
+		bot.observeFills(before, after, map[string]struct{}{})
+
+		if got := bot.Summary().FillsBySide[string(exchange.SideBuy)]; got != 1 {
+			t.Fatalf("buy fills = %d, want 1", got)
+		}
+	})
+}
