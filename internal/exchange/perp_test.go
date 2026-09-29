@@ -94,7 +94,7 @@ func TestPerpBalancesFlipAndValueThePosition(t *testing.T) {
 		AssetAddress: "0xperp", SubID: "0", QuoteAddress: "0xcash",
 		Perp: &PerpState{IndexPriceUI: 1374},
 	}
-	balances, err := perpBalances(spec, map[string]float64{"0xperp|0": 1_374_000, "0xcash|0": 5_000})
+	balances, err := PerpBalances(spec, map[string]float64{"0xperp|0": 1_374_000, "0xcash|0": 5_000})
 	if err != nil {
 		t.Fatalf("perpBalances: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestPerpBalancesFlipAndValueThePosition(t *testing.T) {
 	if balances[1].Asset != "cNGN" || balances[1].Total != 5_000 || balances[1].Reserved != 0 {
 		t.Fatalf("cash = %+v", balances[1])
 	}
-	if _, err := perpBalances(MarketSpec{Kind: MarketKindPerp}, nil); err == nil {
+	if _, err := PerpBalances(MarketSpec{Kind: MarketKindPerp}, nil); err == nil {
 		t.Fatal("a perp without an index must not value its position")
 	}
 }

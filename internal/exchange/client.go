@@ -674,7 +674,7 @@ func (c *HTTPClient) GetBalances(ctx context.Context) ([]Balance, error) {
 		return nil, err
 	}
 	if spec, specErr := c.marketForBalances(); specErr == nil && spec.IsPerp() {
-		return perpBalances(spec, positions)
+		return PerpBalances(spec, positions)
 	}
 
 	exposures := make(map[string]float64)
@@ -760,7 +760,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 	return dedupeBalances(out), nil
 }
 
-// perpBalances maps a perp account onto the two balances the strategy reads:
+// PerpBalances maps a perp account onto the two balances the strategy reads:
 //
 //   - base (USDC): the position, as a SIGNED UI notional in USD at the index. Positive is a UI long,
 //     which is SHORT the on-chain NGN perp, so the engine balance's sign flips. Inventory skew and
@@ -770,7 +770,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 // Nothing is reserved against resting orders. A perp order reserves margin, not notional, and the
 // strategy budgets from cash Total (see strategy.perpCapacity), so a notional reservation here
 // would double-count exactly as it did for futures.
-func perpBalances(spec MarketSpec, positions map[string]float64) ([]Balance, error) {
+func PerpBalances(spec MarketSpec, positions map[string]float64) ([]Balance, error) {
 	if spec.Perp == nil || spec.Perp.IndexPriceUI <= 0 {
 		return nil, fmt.Errorf("perp %s has no index in /v1/markets: cannot value the position", spec.Symbol)
 	}
@@ -876,7 +876,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	payloadLimitPrice := normalizePrice(req.Price)
 	payload := map[string]any{}
 	if spec.UIInverted() {
-		engineSide, enginePrice, engineAmount, err = spotEngineFromUI(req.Side, req.Price, req.Size)
+		engineSide, enginePrice, engineAmount, err = EngineOrderFromUI(spec, req.Side, req.Price, req.Size)
 		if err != nil {
 			return Order{}, fmt.Errorf("translate spot order: %w", err)
 		}
@@ -2012,6 +2012,16 @@ func (c *HTTPClient) reservedExposureKey(side string, size float64, px float64, 
 		return strings.ToLower(assetAddress) + "|" + subID, size * px
 	}
 	return strings.ToLower(assetAddress) + "|" + subID, size
+}
+
+// EngineOrderFromUI is the order the engine sees for a UI order on this market: on spot and the
+// perp the side flips, the price inverts (NGN per USD -> USD per NGN) and the size becomes the engine
+// amount (USD -> NGN); futures are already engine-native. PlaceLimitOrder signs exactly this.
+func EngineOrderFromUI(spec MarketSpec, uiSide Side, uiPrice, uiSize float64) (Side, float64, float64, error) {
+	if !spec.UIInverted() {
+		return uiSide, uiPrice, uiSize, nil
+	}
+	return spotEngineFromUI(uiSide, uiPrice, uiSize)
 }
 
 func spotEngineFromUI(uiSide Side, uiPrice float64, uiSize float64) (Side, float64, float64, error) {
