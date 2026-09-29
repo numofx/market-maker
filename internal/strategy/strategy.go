@@ -64,6 +64,10 @@ type Result struct {
 }
 
 func ComputeReferencePrice(snapshot state.Snapshot) (float64, string) {
+	if snapshot.Perp != nil {
+		// The loader already chose: other traders' mid inside the basis band, else the index.
+		return snapshot.Perp.Reference, snapshot.Perp.ReferenceSource
+	}
 	if snapshot.Market == "USDCcNGN-SPOT" {
 		// Other participants' two-sided book first; then the external fallback price; the venue's own last
 		// trade only when neither exists. A thin venue's last print can be hours old and far from the market
@@ -227,6 +231,11 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	if cashMarginedFuture {
 		maxAskSize = quoteAvailable / askPrice
 	}
+	if spec.IsPerp() && snapshot.Perp != nil {
+		// Sizes are USD here, and so is the perp's cash: capacity is a leverage bound, not a price
+		// conversion.
+		maxBidSize, maxAskSize = perpCapacity(cfg, *snapshot.Perp, quotePosition.Total, inventory)
+	}
 	if cfg.MaxNotionalPerSide > 0 {
 		maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide/bidPrice)
 		maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide/askPrice)
@@ -250,6 +259,16 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, quoteAvailable, inventory, effectiveMaxShort(cfg)), askMinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
 	} else {
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, effectiveMaxShort(cfg)), askMinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
+	}
+
+	if spec.IsPerp() && (snapshot.Perp == nil || !snapshot.Perp.TradingEnabled) {
+		// Closed until the enable vault action: the matcher skips the market, so quotes would only
+		// rest (and count against the bot's margin) until launch.
+		result.Bid, result.Ask, result.Bids, result.Asks = nil, nil, nil, nil
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "perp_trading_disabled", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "perp_trading_disabled", spec.MinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
+		result.SkewBPS = skewBPS
+		return result, nil
 	}
 
 	switch cfg.OperatorMode {
@@ -301,12 +320,33 @@ func bidSuppressionReason(orderSize, bidSize, minSize, maxBidSize, quoteAvailabl
 	return "bid_quote_suppressed"
 }
 
-// isCashMarginedFuture reports whether the market is a cash-margined future (as opposed
-// to the spot contract). The MM's MarketSpec does not carry ContractType/SettlementType,
-// so the spot symbol is the discriminator: every other configured market is a future whose
-// short side is backed by cash margin rather than held base-asset inventory.
+// isCashMarginedFuture reports whether both sides of a quote are backed by cash margin rather than
+// held inventory: every market but spot, i.e. the dated futures and the perp.
 func isCashMarginedFuture(spec exchange.MarketSpec) bool {
-	return spec.Symbol != "" && spec.Symbol != "USDCcNGN-SPOT"
+	return spec.Symbol != "" && !spec.IsSpot()
+}
+
+// perpCapacity is the most each side may quote, in USD, on the perp:
+//
+//   - the bot's own leverage cap: its gross position after a fill stays within cash x
+//     min(MM_PERP_MAX_LEVERAGE, the SRM's max leverage). A bid may first close a short and then open
+//     up to that bound long, and an ask the reverse, so the limit is the bound minus the position
+//     on the side being added to;
+//   - the OI cap: what opens a NEW position uses room under the cap, what closes one does not.
+//
+// inventory is the signed UI position in USD (long positive), as perpBalances reports it.
+func perpCapacity(cfg config.Config, perp state.PerpSnapshot, cash, inventory float64) (maxBid, maxAsk float64) {
+	leverage := cfg.PerpMaxLeverage
+	if perp.MaxLeverage > 0 && perp.MaxLeverage < leverage {
+		leverage = perp.MaxLeverage
+	}
+	bound := math.Max(0, cash) * leverage
+	maxBid = math.Max(0, bound-inventory)
+	maxAsk = math.Max(0, bound+inventory)
+	room := math.Max(0, perp.SideRoomUSD)
+	maxBid = math.Min(maxBid, math.Max(0, -inventory)+room)
+	maxAsk = math.Min(maxAsk, math.Max(0, inventory)+room)
+	return maxBid, maxAsk
 }
 
 // futureAskSuppressionReason mirrors bidSuppressionReason for the short (sell) side of a
@@ -458,7 +498,7 @@ func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side
 // placed at all. Quoting one anyway failed the whole cycle -- both sides -- when an ask was left with
 // 0.000682 USDC; below this size a side is suppressed instead, and the other side keeps quoting.
 func minQuoteSize(spec exchange.MarketSpec, price float64) float64 {
-	if spec.Symbol != "USDCcNGN-SPOT" || price <= 0 {
+	if !spec.UIInverted() || price <= 0 {
 		return spec.MinSize
 	}
 	size := roundUp(1/price, spec.SizeStep)

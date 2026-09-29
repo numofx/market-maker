@@ -31,6 +31,12 @@ const (
 	// Short enough that a fee change reaches the signed bound within a cycle or two; long enough
 	// that it is one request a minute, not one per order.
 	defaultMarketRefreshSeconds = 60
+	// The MM's own perp leverage cap: half the SRM's 3x, so a 20% adverse move leaves it well above
+	// maintenance margin (20%) without the keeper ever being involved.
+	defaultPerpMaxLeverage = 1.5
+	// Under markets-service's own 200bps mark clamp, so the bot never quotes around a mid the mark
+	// feed would refuse to follow.
+	defaultPerpMaxBasisBPS = 100
 	// A cancel on this venue is off-chain only. markets-service drops the order from its book, but
 	// TradeModule has no nonce invalidation, so the signed action stays executable on-chain -- by
 	// anyone holding the signature -- until its expiry. The expiry, not the cancel, is the real bound
@@ -110,21 +116,28 @@ type Config struct {
 	// ControlAddr/ControlToken configure the operator control API. It listens only when the token
 	// is set, and defaults to loopback: the terminal runs as a sidecar in the same Fargate task and
 	// reaches the bot on 127.0.0.1, so nothing outside the task needs to.
-	ControlAddr                  string
-	ControlToken                 string
-	StateFile                    string
-	MarketSymbol                 string
-	PollInterval                 time.Duration
-	QuoteRefreshInterval         time.Duration
-	OrderSize                    float64
-	HalfSpreadBPS                float64
-	InventorySkewBPS             float64
-	MaxLongInventory             float64
-	MaxShortInventory            float64
-	MinBaseBalance               float64
-	MinQuoteBalance              float64
-	MaxNotionalPerSide           float64
-	MaxNetInventory              float64
+	ControlAddr          string
+	ControlToken         string
+	StateFile            string
+	MarketSymbol         string
+	PollInterval         time.Duration
+	QuoteRefreshInterval time.Duration
+	OrderSize            float64
+	HalfSpreadBPS        float64
+	InventorySkewBPS     float64
+	MaxLongInventory     float64
+	MaxShortInventory    float64
+	MinBaseBalance       float64
+	MinQuoteBalance      float64
+	MaxNotionalPerSide   float64
+	MaxNetInventory      float64
+	// PerpMaxLeverage caps the bot's own perp exposure at this multiple of its cash, below the
+	// SRM's 3x: the bot's gross position after a fill may not exceed cash x this. It is the MM's
+	// own risk limit, separate from what the venue would let a trader open.
+	PerpMaxLeverage float64
+	// PerpMaxBasisBPS is how far from the index the perp reference may sit. Other traders' book mid
+	// is the reference when it is two-sided, clamped to index +/- this; otherwise the index.
+	PerpMaxBasisBPS              float64
 	MaxQuoteAge                  time.Duration
 	MaxAnchorDeviationBPS        float64
 	StaleMarketDataTimeout       time.Duration
@@ -210,6 +223,8 @@ func Load() (Config, error) {
 		MaxShortInventory:            envFloat("MM_MAX_SHORT_INVENTORY", defaultMaxShortInventory),
 		MaxNotionalPerSide:           envFloat("MM_MAX_NOTIONAL_PER_SIDE", 0),
 		MaxNetInventory:              envFloat("MM_MAX_NET_INVENTORY", 0),
+		PerpMaxLeverage:              envFloat("MM_PERP_MAX_LEVERAGE", defaultPerpMaxLeverage),
+		PerpMaxBasisBPS:              envFloat("MM_PERP_MAX_BASIS_BPS", defaultPerpMaxBasisBPS),
 		MaxQuoteAge:                  time.Duration(envInt("MM_MAX_QUOTE_AGE_SECONDS", 0)) * time.Second,
 		MaxAnchorDeviationBPS:        envFloat("MM_MAX_ANCHOR_DEVIATION_BPS", 0),
 		StaleMarketDataTimeout:       time.Duration(envInt("MM_STALE_MARKET_DATA_TIMEOUT_SECONDS", 0)) * time.Second,
@@ -303,6 +318,12 @@ func Load() (Config, error) {
 	}
 	if cfg.OrderSize <= 0 {
 		return Config{}, fmt.Errorf("MM_ORDER_SIZE must be > 0")
+	}
+	if cfg.PerpMaxLeverage <= 0 || cfg.PerpMaxLeverage > 3 {
+		return Config{}, fmt.Errorf("MM_PERP_MAX_LEVERAGE must be > 0 and <= 3 (the SRM's ceiling), got %v", cfg.PerpMaxLeverage)
+	}
+	if cfg.PerpMaxBasisBPS <= 0 || cfg.PerpMaxBasisBPS > 200 {
+		return Config{}, fmt.Errorf("MM_PERP_MAX_BASIS_BPS must be > 0 and <= 200 (the mark feed's clamp), got %v", cfg.PerpMaxBasisBPS)
 	}
 	if cfg.MaxShortInventory > cfg.MaxLongInventory {
 		return Config{}, fmt.Errorf("MM_MAX_SHORT_INVENTORY must be <= MM_MAX_LONG_INVENTORY")

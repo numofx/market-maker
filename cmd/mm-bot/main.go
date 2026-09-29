@@ -89,6 +89,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := client.CheckPerpWiring(ctx, spec); err != nil {
+		logger.Error("perp wiring", "error", err, "market", cfg.MarketSymbol)
+		os.Exit(1)
+	}
+
 	metricRegistry := metrics.New()
 	store := state.NewStore(cfg.StateFile)
 	// Built even when the control API is disabled: a kill or pause persisted by an earlier run must

@@ -62,7 +62,8 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 	}
 
 	basePosition := snapshot.Position(spec.BaseAsset)
-	if basePosition.Available < cfg.MinBaseBalance {
+	// On the perp the base "balance" is the signed position, not a holding a quote draws on.
+	if !spec.IsPerp() && basePosition.Available < cfg.MinBaseBalance {
 		return Decision{Halt: true, Reason: fmt.Sprintf("available base balance below threshold for %s", spec.BaseAsset)}
 	}
 	quotePosition := snapshot.Position(spec.QuoteAsset)

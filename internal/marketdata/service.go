@@ -15,6 +15,13 @@ type Loader struct {
 	anchor                    AnchorSource
 	spotExternal              USDCCNGNSpotExternalAnchor
 	spotExternalBootstrapOnly bool
+	perpMaxBasisBPS           float64
+}
+
+// WithPerpBasis sets how far from the index the perp reference may sit (MM_PERP_MAX_BASIS_BPS).
+func (l *Loader) WithPerpBasis(bps float64) *Loader {
+	l.perpMaxBasisBPS = bps
+	return l
 }
 
 func NewLoader(client exchange.Client, spec exchange.MarketSpec, anchor AnchorSource) *Loader {
@@ -73,7 +80,10 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 			Reusable:  balance.Reusable,
 		}
 	}
-	if l.spec.Symbol == "USDCcNGN-SPOT" {
+	if l.spec.IsPerp() {
+		return l.loadPerp(ctx, snapshot)
+	}
+	if l.spec.IsSpot() {
 		// The book is spot's source of truth: the reference is its mid, else its last trade, and
 		// the oracle is only a bootstrap for a venue with neither (strategy.ComputeReferencePrice).
 		// So the oracle is deliberately NOT the snapshot's AnchorPrice: that is what the risk
@@ -100,6 +110,54 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 		snapshot.LastAnchorRefresh = now
 	}
 	return snapshot, nil
+}
+
+// loadPerp prices the perp off its index. The venue publishes the index (the rate-picker sources'
+// TWAP) and a mark that is the book mid clamped to index +/- 200bps; the bot follows other traders'
+// two-sided mid inside a tighter band, and the index otherwise. The index is also the snapshot's
+// anchor, so the stale-anchor guard halts the bot when /v1/markets stops refreshing it.
+func (l *Loader) loadPerp(ctx context.Context, snapshot state.Snapshot) (state.Snapshot, error) {
+	spec, err := l.client.GetMarket(ctx, l.spec.Symbol)
+	if err != nil {
+		return state.Snapshot{}, &LoadError{Stage: "perp_state", Err: fmt.Errorf("get market: %w", err)}
+	}
+	if spec.Perp == nil || spec.Perp.IndexPriceUI <= 0 {
+		return state.Snapshot{}, &LoadError{Stage: "perp_state", Err: fmt.Errorf("%s has no index in /v1/markets (feeds stale?)", spec.Symbol)}
+	}
+	perp := spec.Perp
+	reference, source := PerpReference(snapshot.BestBid, snapshot.BestAsk, perp.IndexPriceUI, l.perpMaxBasisBPS)
+	snapshot.Perp = &state.PerpSnapshot{
+		Reference:       reference,
+		ReferenceSource: source,
+		IndexPrice:      perp.IndexPriceUI,
+		MarkPrice:       perp.MarkPriceUI,
+		TradingEnabled:  perp.TradingEnabled,
+		SideRoomUSD:     perp.SideRoomUSD(),
+		MaxLeverage:     perp.MaxLeverage,
+	}
+	snapshot.AnchorPrice = perp.IndexPriceUI
+	snapshot.AnchorSource = "perp_index"
+	snapshot.LastAnchorRefresh = perp.FetchedAt
+	return snapshot, nil
+}
+
+// PerpReference is other traders' mid when their book is two-sided, clamped to index +/- maxBasisBPS;
+// the index otherwise. A clamp rather than a halt: a far-off book is exactly when the market needs
+// quotes near fair value, and the halt would cancel them.
+func PerpReference(bestBid, bestAsk, index, maxBasisBPS float64) (float64, string) {
+	if bestBid <= 0 || bestAsk <= 0 || bestBid >= bestAsk {
+		return index, "index"
+	}
+	mid := (bestBid + bestAsk) / 2
+	band := index * maxBasisBPS / 10000
+	switch {
+	case mid > index+band:
+		return index + band, "book_clamped"
+	case mid < index-band:
+		return index - band, "book_clamped"
+	default:
+		return mid, "book"
+	}
 }
 
 // othersBestPrices is the top of book with this bot's own resting orders taken out, so the reference

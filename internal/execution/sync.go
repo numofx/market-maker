@@ -470,7 +470,7 @@ func toleranceSource(absolute, relative, quantum float64) string {
 }
 
 func sizeQuantumUI(spec exchange.MarketSpec, price float64) float64 {
-	if spec.Symbol == "USDCcNGN-SPOT" {
+	if spec.UIInverted() {
 		if price <= 0 {
 			return 0
 		}
