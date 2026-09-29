@@ -261,9 +261,10 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, effectiveMaxShort(cfg)), askMinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
 	}
 
-	if spec.IsPerp() && (snapshot.Perp == nil || !snapshot.Perp.TradingEnabled) {
+	if spec.IsPerp() && (snapshot.Perp == nil || (!snapshot.Perp.TradingEnabled && !cfg.PerpQuoteWhileClosed)) {
 		// Closed until the enable vault action: the matcher skips the market, so quotes would only
-		// rest (and count against the bot's margin) until launch.
+		// rest. MM_PERP_QUOTE_WHILE_CLOSED rests them anyway, for the launch: the enable gate needs a
+		// two-sided book before it will open the market.
 		result.Bid, result.Ask, result.Bids, result.Asks = nil, nil, nil, nil
 		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "perp_trading_disabled", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
 		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "perp_trading_disabled", spec.MinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)

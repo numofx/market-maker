@@ -137,7 +137,11 @@ type Config struct {
 	PerpMaxLeverage float64
 	// PerpMaxBasisBPS is how far from the index the perp reference may sit. Other traders' book mid
 	// is the reference when it is two-sided, clamped to index +/- this; otherwise the index.
-	PerpMaxBasisBPS              float64
+	PerpMaxBasisBPS float64
+	// PerpQuoteWhileClosed lets the bot rest quotes while the perp is not yet enabled. The launch
+	// needs it: the enable gate requires a two-sided book before it opens the market, and the matcher
+	// skips a closed market, so nothing can fill until the vault opens it.
+	PerpQuoteWhileClosed         bool
 	MaxQuoteAge                  time.Duration
 	MaxAnchorDeviationBPS        float64
 	StaleMarketDataTimeout       time.Duration
@@ -225,6 +229,7 @@ func Load() (Config, error) {
 		MaxNetInventory:              envFloat("MM_MAX_NET_INVENTORY", 0),
 		PerpMaxLeverage:              envFloat("MM_PERP_MAX_LEVERAGE", defaultPerpMaxLeverage),
 		PerpMaxBasisBPS:              envFloat("MM_PERP_MAX_BASIS_BPS", defaultPerpMaxBasisBPS),
+		PerpQuoteWhileClosed:         envBool("MM_PERP_QUOTE_WHILE_CLOSED", false),
 		MaxQuoteAge:                  time.Duration(envInt("MM_MAX_QUOTE_AGE_SECONDS", 0)) * time.Second,
 		MaxAnchorDeviationBPS:        envFloat("MM_MAX_ANCHOR_DEVIATION_BPS", 0),
 		StaleMarketDataTimeout:       time.Duration(envInt("MM_STALE_MARKET_DATA_TIMEOUT_SECONDS", 0)) * time.Second,

@@ -348,7 +348,10 @@ When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using
   cash × min(that, the SRM's max leverage). A bid may first buy back a short and an ask sell a
   long. Opening size is also bounded by the room left under the OI cap; closing size is not.
 - **Closed until launch.** While `/v1/markets` reports `trading_enabled: false`, both sides are
-  suppressed with the reason `perp_trading_disabled`.
+  suppressed with the reason `perp_trading_disabled`, unless `MM_PERP_QUOTE_WHILE_CLOSED=true`. Set
+  that for the launch: the enable gate (`propose_perp_enable_batch.py`) needs a two-sided book of at
+  least $1k within 2% of the index before it opens the market. The matcher skips a closed market,
+  so the quotes only rest until the vault opens it.
 
 ## Operator Modes
 

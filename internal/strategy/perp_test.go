@@ -106,6 +106,23 @@ func TestPerpQuotesNothingUntilTradingIsEnabled(t *testing.T) {
 	}
 }
 
+// The launch: the enable gate needs a two-sided book before it opens the market, so the bot can be
+// told to rest quotes while closed. Nothing fills until the vault opens it.
+func TestPerpQuotesWhileClosedWhenTheLaunchAsksForIt(t *testing.T) {
+	cfg := baseCfg()
+	cfg.PerpMaxLeverage = 1.5
+	cfg.PerpQuoteWhileClosed = true
+	perp := livePerp()
+	perp.TradingEnabled = false
+	res, err := BuildQuotes(cfg, perpSpec(), perpSnapshot(10_000, 0, perp))
+	if err != nil {
+		t.Fatalf("BuildQuotes: %v", err)
+	}
+	if res.Bid == nil || res.Ask == nil {
+		t.Fatalf("want a two-sided quote for the enable gate, got %+v / %+v", res.BidSuppression, res.AskSuppression)
+	}
+}
+
 func TestPerpReferenceComesFromTheLoader(t *testing.T) {
 	perp := livePerp()
 	perp.Reference, perp.ReferenceSource = 1360.26, "book_clamped"
