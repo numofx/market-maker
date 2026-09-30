@@ -115,7 +115,74 @@ type Order struct {
 	Expiry int64 `json:"expiry"`
 }
 
+// MarketKind is what a market is, from /v1/markets: it decides how UI prices and sizes map to the
+// engine, and what backs a quote.
+type MarketKind string
+
+const (
+	// MarketKindSpot is USDCcNGN-SPOT: UI price cNGN per USDC, size in USDC, engine side flipped;
+	// each side of a quote is backed by the token it delivers.
+	MarketKindSpot MarketKind = "spot"
+	// MarketKindPerp is USDCcNGN-PERP: the same UI<->engine translation as spot (the venue presents it
+	// identically), but both sides are backed by cash margin, and the position is a perp balance.
+	MarketKindPerp MarketKind = "perp"
+	// MarketKindFuture is a dated, cash-margined future sized in 0.001 contract lots.
+	MarketKindFuture MarketKind = "future"
+)
+
+const (
+	spotOrderEntrySpec = "usdc_cngn_spot_v1"
+	perpOrderEntrySpec = "usdc_cngn_perp_v1"
+)
+
+// marketKind classifies a /v1/markets row. The order entry spec is the venue's own statement of the
+// translation; the spot symbol is kept as a fallback for a markets-service that omits it.
+func marketKind(symbol, contractType, orderEntrySpec string) MarketKind {
+	switch {
+	case orderEntrySpec == spotOrderEntrySpec || symbol == "USDCcNGN-SPOT":
+		return MarketKindSpot
+	case orderEntrySpec == perpOrderEntrySpec || contractType == "perpetual":
+		return MarketKindPerp
+	default:
+		return MarketKindFuture
+	}
+}
+
+// PerpState is the perp's live chain state as /v1/markets serves it (the `perp` object), refreshed
+// with the rest of the market schedule. Prices are UI orientation: cNGN per USDC.
+type PerpState struct {
+	TradeModule   string
+	QuoteAsset    string
+	MarginManager string
+	MarkPriceUI   float64
+	IndexPriceUI  float64
+	// TradingEnabled is false until the enable vault action: the matcher skips the market, so quotes
+	// would only rest.
+	TradingEnabled bool
+	// PositionCapNGN sums |position| over BOTH sides; OpenInterestNGN is one side.
+	PositionCapNGN  float64
+	OpenInterestNGN float64
+	MaxLeverage     float64
+	FetchedAt       time.Time
+}
+
+// SideRoomUSD is how much more one side of the market can open before the OI cap, in USDC at the
+// index. A fill that opens both counterparties uses a unit of room on each side.
+func (p PerpState) SideRoomUSD() float64 {
+	if p.IndexPriceUI <= 0 {
+		return 0
+	}
+	room := p.PositionCapNGN/2 - p.OpenInterestNGN
+	if room <= 0 {
+		return 0
+	}
+	return room / p.IndexPriceUI
+}
+
 type MarketSpec struct {
+	Kind MarketKind
+	// Perp is set for a perp market with a readable `perp` object; nil otherwise.
+	Perp           *PerpState
 	Symbol         string
 	BaseAsset      string
 	QuoteAsset     string
@@ -137,6 +204,27 @@ type MarketSpec struct {
 	// ExpiryTimestamp is the market's expiry (unix seconds) from /v1/markets;
 	// zero for spot / perpetual markets.
 	ExpiryTimestamp int64
+}
+
+// UIInverted reports whether orders, book levels and trades are translated between the UI (cNGN per
+// USDC, sized in USDC, side as the trader sees it) and the engine (USDC per cNGN, sized in cNGN, side
+// flipped). True for spot and the perp; futures are quoted engine-native.
+func (s MarketSpec) UIInverted() bool {
+	kind := s.kind()
+	return kind == MarketKindSpot || kind == MarketKindPerp
+}
+
+func (s MarketSpec) IsSpot() bool { return s.kind() == MarketKindSpot }
+
+func (s MarketSpec) IsPerp() bool { return s.kind() == MarketKindPerp }
+
+// kind is Kind when loadMarkets set it, else derived the same way from what the spec carries, so a
+// spec built by hand (tests, tools) classifies exactly as a loaded one.
+func (s MarketSpec) kind() MarketKind {
+	if s.Kind != "" {
+		return s.Kind
+	}
+	return marketKind(s.Symbol, "", s.OrderEntrySpec)
 }
 
 type AssetCodeCheck struct {
@@ -470,8 +558,11 @@ func assetCodeReadinessError(checks []AssetCodeCheck) error {
 }
 
 func assetAddressEnvVar(spec MarketSpec) string {
-	if spec.Symbol == "USDCcNGN-SPOT" {
+	if spec.IsSpot() {
 		return "CNGN_SPOT_ASSET_ADDRESS"
+	}
+	if spec.IsPerp() {
+		return "CNGN_PERP_ASSET_ADDRESS"
 	}
 	return "MARKET_ASSET_ADDRESS"
 }
@@ -557,8 +648,8 @@ func (c *HTTPClient) GetTrades(ctx context.Context, market string) ([]Trade, err
 		tm, _ := time.Parse(time.RFC3339Nano, item.CreatedAt)
 		side := item.AggressorSide
 		size := rawOrderSizeToFloat(spec, item.Size)
-		if spec.Symbol == "USDCcNGN-SPOT" {
-			// Spot trades are stored engine-side (price in USDC-per-cNGN, size in
+		if spec.UIInverted() {
+			// Spot (and perp) trades are stored engine-side (price in USDC-per-cNGN, size in
 			// cNGN). Convert to UI orientation so a trade-derived reference price is
 			// comparable to quotes (cNGN per USDC).
 			side, price, size, err = spotUIFromEngine(side, price, size)
@@ -581,6 +672,9 @@ func (c *HTTPClient) GetBalances(ctx context.Context) ([]Balance, error) {
 	positions, rawBalances, err := c.readAccountBalances(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if spec, specErr := c.marketForBalances(); specErr == nil && spec.IsPerp() {
+		return PerpBalances(spec, positions)
 	}
 
 	exposures := make(map[string]float64)
@@ -666,6 +760,31 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 	return dedupeBalances(out), nil
 }
 
+// PerpBalances maps a perp account onto the two balances the strategy reads:
+//
+//   - base (USDC): the position, as a SIGNED UI notional in USD at the index. Positive is a UI long,
+//     which is SHORT the on-chain cNGN perp, so the engine balance's sign flips. Inventory skew and
+//     MM_MAX_LONG/SHORT_INVENTORY then read in USDC, the way the ticket shows the position.
+//   - quote (cNGN label, but it is the perp's USDC cash): the margin collateral.
+//
+// Nothing is reserved against resting orders. A perp order reserves margin, not notional, and the
+// strategy budgets from cash Total (see strategy.perpCapacity), so a notional reservation here
+// would double-count exactly as it did for futures.
+func PerpBalances(spec MarketSpec, positions map[string]float64) ([]Balance, error) {
+	if spec.Perp == nil || spec.Perp.IndexPriceUI <= 0 {
+		return nil, fmt.Errorf("perp %s has no index in /v1/markets: cannot value the position", spec.Symbol)
+	}
+	baseKey, quoteKey := balanceKeys(spec)
+	engineNGN := positions[baseKey]
+	uiPositionUSD := -engineNGN / spec.Perp.IndexPriceUI
+	cash := positions[quoteKey]
+	slog.Info("perp account mapped", "market", spec.Symbol, "engine_position_ngn", engineNGN, "ui_position_usd", uiPositionUSD, "cash_usd", cash, "index_ui", spec.Perp.IndexPriceUI)
+	return []Balance{
+		{Asset: spec.BaseAsset, Total: uiPositionUSD, Available: uiPositionUSD},
+		{Asset: spec.QuoteAsset, Total: cash, Available: maxFloat(0, cash)},
+	}, nil
+}
+
 func (c *HTTPClient) ListOpenOrders(ctx context.Context, market string) ([]Order, error) {
 	spec, err := c.GetMarket(ctx, market)
 	if err != nil {
@@ -713,7 +832,7 @@ order by created_at asc
 		}
 		sideValue := Side(side)
 		size := orderAmountToFloat(spec, remainingRaw)
-		if spec.Symbol == "USDCcNGN-SPOT" {
+		if spec.UIInverted() {
 			sideValue, price, size, err = spotUIFromEngine(sideValue, price, size)
 			if err != nil {
 				return nil, fmt.Errorf("decode spot open order: %w", err)
@@ -756,8 +875,8 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	signedDesiredAmount := marketSizeToRawOrder(spec, req.Size)
 	payloadLimitPrice := normalizePrice(req.Price)
 	payload := map[string]any{}
-	if spec.Symbol == "USDCcNGN-SPOT" {
-		engineSide, enginePrice, engineAmount, err = spotEngineFromUI(req.Side, req.Price, req.Size)
+	if spec.UIInverted() {
+		engineSide, enginePrice, engineAmount, err = EngineOrderFromUI(spec, req.Side, req.Price, req.Size)
 		if err != nil {
 			return Order{}, fmt.Errorf("translate spot order: %w", err)
 		}
@@ -860,7 +979,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	price, _ := strconv.ParseFloat(resp.Order.LimitPrice, 64)
 	size := orderAmountToFloat(spec, resp.Order.DesiredAmount)
 	side := resp.Order.Side
-	if spec.Symbol == "USDCcNGN-SPOT" {
+	if spec.UIInverted() {
 		side, price, size, err = spotUIFromEngine(resp.Order.Side, price, size)
 		if err != nil {
 			return Order{}, fmt.Errorf("decode spot placed order: %w", err)
@@ -1038,6 +1157,18 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		OrderEntrySpec   string `json:"order_entry_spec"`
 		TakerFeeBps      int    `json:"taker_fee_bps"`
 		ExpiryTimestamp  int64  `json:"expiry_timestamp"`
+		ContractType     string `json:"contract_type"`
+		Perp             *struct {
+			MarkPriceUI    string `json:"mark_price_ui"`
+			IndexPriceUI   string `json:"index_price_ui"`
+			OpenInterest   string `json:"open_interest"`
+			MaxLeverage    string `json:"max_leverage"`
+			TradeModule    string `json:"trade_module_address"`
+			QuoteAsset     string `json:"quote_asset_address"`
+			MarginManager  string `json:"margin_manager_address"`
+			TradingEnabled bool   `json:"trading_enabled"`
+			PositionCap    string `json:"position_cap"`
+		} `json:"perp"`
 	}
 	if err := c.get(ctx, "/v1/markets", nil, &resp); err != nil {
 		return err
@@ -1059,21 +1190,37 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			OrderEntrySpec:  item.OrderEntrySpec,
 			TakerFeeBps:     item.TakerFeeBps,
 			ExpiryTimestamp: item.ExpiryTimestamp,
+			Kind:            marketKind(item.Market, item.ContractType, item.OrderEntrySpec),
 		}
-		switch item.Market {
-		case "USDCcNGN-SPOT":
+		if spec.IsPerp() && item.Perp != nil {
+			spec.Perp = &PerpState{
+				TradeModule:     strings.ToLower(item.Perp.TradeModule),
+				QuoteAsset:      strings.ToLower(item.Perp.QuoteAsset),
+				MarginManager:   strings.ToLower(item.Perp.MarginManager),
+				MarkPriceUI:     parseFloatOrZero(item.Perp.MarkPriceUI),
+				IndexPriceUI:    parseFloatOrZero(item.Perp.IndexPriceUI),
+				TradingEnabled:  item.Perp.TradingEnabled,
+				PositionCapNGN:  parseFloatOrZero(item.Perp.PositionCap),
+				OpenInterestNGN: parseFloatOrZero(item.Perp.OpenInterest),
+				MaxLeverage:     parseFloatOrZero(item.Perp.MaxLeverage),
+				FetchedAt:       time.Now().UTC(),
+			}
+		}
+		switch {
+		case spec.UIInverted():
+			// Spot and the perp both submit whole engine units of cNGN, sized in USDC in the UI.
 			spec.SizeStep = 0.000001
 			spec.MinSize = 0.000001
-		case "USDCcNGN-APR30-2026", "USDCcNGN-SEP16-2026", "USDCcNGN-NOV30-2026", "USDCcNGN-MAY31-2027":
+		case item.Market == "USDCcNGN-APR30-2026", item.Market == "USDCcNGN-SEP16-2026", item.Market == "USDCcNGN-NOV30-2026", item.Market == "USDCcNGN-MAY31-2027":
 			// cNGN deliverable FX futures: markets-service enforces a 0.001 atomic
 			// amount step (registry MinSize) for these symbols; the order body must
 			// align to it (see futureOrderAmounts).
 			spec.SizeStep = 0.001
 			spec.MinSize = 0.001
 		default:
-			// Any non-spot market is a future settled in 0.001 contract steps. Spot is
-			// the only 0.000001 market and is cased explicitly above, so defaulting to
-			// 0.001 keeps a newly listed future expiry aligned without a code change.
+			// Any other market is a future settled in 0.001 contract steps. Spot and the
+			// perp are the 0.000001 markets and are cased explicitly above, so defaulting
+			// to 0.001 keeps a newly listed future expiry aligned without a code change.
 			spec.SizeStep = 0.001
 			spec.MinSize = 0.001
 		}
@@ -1192,6 +1339,50 @@ func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float6
 		raw = append(raw, RawBalance{Asset: item.Asset.Hex(), SubID: item.SubId.String(), RawBalance: item.Balance.String(), HumanAmount: amount})
 	}
 	return positions, raw, nil
+}
+
+// CheckPerpWiring refuses a perp run whose configuration does not match the venue's perp stack. The
+// bot signs for one module (MM_TRADE_MODULE_ADDRESS) and reads its cash as that module's
+// quoteAsset(), so both must be the perp's; and its subaccount must sit under the perp SRM, or the
+// orders would be margined by a manager that knows nothing about the perp. Spot and futures pass.
+func (c *HTTPClient) CheckPerpWiring(ctx context.Context, spec MarketSpec) error {
+	if !spec.IsPerp() {
+		return nil
+	}
+	if spec.Perp == nil {
+		return fmt.Errorf("%s: /v1/markets serves no perp state", spec.Symbol)
+	}
+	if !strings.EqualFold(c.tradeModule.Hex(), spec.Perp.TradeModule) {
+		return fmt.Errorf("MM_TRADE_MODULE_ADDRESS %s is not the perp's module %s", c.tradeModule.Hex(), spec.Perp.TradeModule)
+	}
+	if !strings.EqualFold(c.quoteAsset.Hex(), spec.Perp.QuoteAsset) {
+		return fmt.Errorf("the module's quoteAsset %s is not the perp's cash %s", c.quoteAsset.Hex(), spec.Perp.QuoteAsset)
+	}
+	subaccountID, ok := new(big.Int).SetString(c.cfg.SubaccountID, 10)
+	if !ok {
+		return fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
+	}
+	managerABI, err := abi.JSON(strings.NewReader(`[{"name":"manager","type":"function","stateMutability":"view","inputs":[{"name":"accountId","type":"uint256"}],"outputs":[{"name":"","type":"address"}]}]`))
+	if err != nil {
+		return err
+	}
+	input, err := managerABI.Pack("manager", subaccountID)
+	if err != nil {
+		return err
+	}
+	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(c.subAccounts, input), nil)
+	if err != nil {
+		return fmt.Errorf("SubAccounts.manager rpc: %w", err)
+	}
+	values, err := managerABI.Unpack("manager", output)
+	if err != nil || len(values) != 1 {
+		return fmt.Errorf("decode SubAccounts.manager: %v", err)
+	}
+	manager, _ := values[0].(common.Address)
+	if !strings.EqualFold(manager.Hex(), spec.Perp.MarginManager) {
+		return fmt.Errorf("MM_SUBACCOUNT_ID %s is under manager %s, not the perp SRM %s", c.cfg.SubaccountID, manager.Hex(), spec.Perp.MarginManager)
+	}
+	return nil
 }
 
 func (c *HTTPClient) readAddressCall(ctx context.Context, address common.Address, method string, abiJSON string) (common.Address, error) {
@@ -1563,7 +1754,7 @@ func rawBigToFloat(value *big.Int) float64 {
 // of ~1.8 million, which would reject every resting order on every restart.
 func (c *HTTPClient) RequiredWorstFee(spec MarketSpec, uiPrice float64) (string, error) {
 	enginePrice := uiPrice
-	if spec.Symbol == "USDCcNGN-SPOT" {
+	if spec.UIInverted() {
 		if uiPrice <= 0 {
 			return "", fmt.Errorf("cannot derive a bound from ui price %v", uiPrice)
 		}
@@ -1686,7 +1877,7 @@ func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, sign
 }
 
 func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
-	if spec.Symbol == "USDCcNGN-SPOT" {
+	if spec.UIInverted() {
 		// Spot amounts are stored by markets-service in atomic whole-cNGN units
 		// (amount step "1"), not wei — the raw value IS the engine cNGN amount.
 		if n, ok := new(big.Rat).SetString(strings.TrimSpace(raw)); ok {
@@ -1732,7 +1923,7 @@ func rawPositionToMarketSize(spec MarketSpec, position float64) float64 {
 }
 
 func usesContractLots(spec MarketSpec) bool {
-	return spec.Symbol != "" && spec.Symbol != "USDCcNGN-SPOT" && spec.SizeStep > 0
+	return spec.Symbol != "" && spec.kind() == MarketKindFuture && spec.SizeStep > 0
 }
 
 func (c *HTTPClient) marketSpecForAsset(assetAddress, subID string) MarketSpec {
@@ -1776,7 +1967,7 @@ func normalizeDecimalString(raw string) string {
 }
 
 func parsePresentedBookLevel(spec MarketSpec, rawPrice, rawAmount string, spot *spotUIPresentation, fallbackSide Side) (BookLevel, Side, error) {
-	if spec.Symbol == "USDCcNGN-SPOT" && spot != nil {
+	if spec.UIInverted() && spot != nil {
 		price, err := strconv.ParseFloat(spot.UIIntent.Price, 64)
 		if err != nil {
 			return BookLevel{}, "", fmt.Errorf("parse spot book ui price: %w", err)
@@ -1795,7 +1986,7 @@ func parsePresentedBookLevel(spec MarketSpec, rawPrice, rawAmount string, spot *
 }
 
 func balanceKeys(spec MarketSpec) (string, string) {
-	if spec.Symbol == "USDCcNGN-SPOT" {
+	if spec.IsSpot() {
 		return strings.ToLower(spec.QuoteAddress) + "|0", strings.ToLower(spec.AssetAddress) + "|" + spec.SubID
 	}
 	return strings.ToLower(spec.AssetAddress) + "|" + spec.SubID, strings.ToLower(spec.QuoteAddress) + "|0"
@@ -1806,7 +1997,7 @@ func (c *HTTPClient) reservedExposureKey(side string, size float64, px float64, 
 		if strings.ToLower(spec.AssetAddress) != strings.ToLower(assetAddress) || spec.SubID != subID {
 			continue
 		}
-		if spec.Symbol == "USDCcNGN-SPOT" {
+		if spec.IsSpot() {
 			if Side(side) == SideBuy {
 				return strings.ToLower(spec.QuoteAddress) + "|0", size * px
 			}
@@ -1821,6 +2012,16 @@ func (c *HTTPClient) reservedExposureKey(side string, size float64, px float64, 
 		return strings.ToLower(assetAddress) + "|" + subID, size * px
 	}
 	return strings.ToLower(assetAddress) + "|" + subID, size
+}
+
+// EngineOrderFromUI is the order the engine sees for a UI order on this market: on spot and the
+// perp the side flips, the price inverts (cNGN per USDC -> USDC per cNGN) and the size becomes the engine
+// amount (USD -> NGN); futures are already engine-native. PlaceLimitOrder signs exactly this.
+func EngineOrderFromUI(spec MarketSpec, uiSide Side, uiPrice, uiSize float64) (Side, float64, float64, error) {
+	if !spec.UIInverted() {
+		return uiSide, uiPrice, uiSize, nil
+	}
+	return spotEngineFromUI(uiSide, uiPrice, uiSize)
 }
 
 func spotEngineFromUI(uiSide Side, uiPrice float64, uiSize float64) (Side, float64, float64, error) {
@@ -1918,4 +2119,12 @@ func managedOrderPrefix(market string) string {
 
 func ethereumCallMsg(to common.Address, data []byte) ethereum.CallMsg {
 	return ethereum.CallMsg{To: &to, Data: data}
+}
+
+func parseFloatOrZero(raw string) float64 {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }

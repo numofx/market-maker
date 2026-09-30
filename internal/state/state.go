@@ -87,6 +87,24 @@ type Snapshot struct {
 	LastAnchorRefresh              time.Time
 	LocalQuoteAge                  time.Duration
 	ExchangeQuoteAge               time.Duration
+	// Perp is set on a perp market: the reference the loader derived and what the venue says about
+	// the market this cycle. Nil on spot and futures.
+	Perp *PerpSnapshot
+}
+
+// PerpSnapshot is one cycle's view of the perp, from /v1/markets.
+type PerpSnapshot struct {
+	// Reference is other traders' two-sided book mid clamped to IndexPrice +/- the basis band, or
+	// the index when the book is not two-sided. ReferenceSource says which ("book", "book_clamped",
+	// "index").
+	Reference       float64
+	ReferenceSource string
+	IndexPrice      float64
+	MarkPrice       float64
+	TradingEnabled  bool
+	// SideRoomUSD is how much more either side can open before the OI cap.
+	SideRoomUSD float64
+	MaxLeverage float64
 }
 
 func (s Snapshot) Inventory(asset string) float64 {
