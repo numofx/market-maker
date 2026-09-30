@@ -327,7 +327,7 @@ func isCashMarginedFuture(spec exchange.MarketSpec) bool {
 	return spec.Symbol != "" && !spec.IsSpot()
 }
 
-// perpCapacity is the most each side may quote, in USD, on the perp:
+// perpCapacity is the most each side may quote, in USDC, on the perp:
 //
 //   - the bot's own leverage cap: its gross position after a fill stays within cash x
 //     min(MM_PERP_MAX_LEVERAGE, the SRM's max leverage). A bid may first close a short and then open
@@ -335,7 +335,7 @@ func isCashMarginedFuture(spec exchange.MarketSpec) bool {
 //     on the side being added to;
 //   - the OI cap: what opens a NEW position uses room under the cap, what closes one does not.
 //
-// inventory is the signed UI position in USD (long positive), as perpBalances reports it.
+// inventory is the signed UI position in USDC (long positive), as perpBalances reports it.
 func perpCapacity(cfg config.Config, perp state.PerpSnapshot, cash, inventory float64) (maxBid, maxAsk float64) {
 	leverage := cfg.PerpMaxLeverage
 	if perp.MaxLeverage > 0 && perp.MaxLeverage < leverage {

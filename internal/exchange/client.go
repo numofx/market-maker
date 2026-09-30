@@ -149,7 +149,7 @@ func marketKind(symbol, contractType, orderEntrySpec string) MarketKind {
 }
 
 // PerpState is the perp's live chain state as /v1/markets serves it (the `perp` object), refreshed
-// with the rest of the market schedule. Prices are UI orientation: NGN per USD.
+// with the rest of the market schedule. Prices are UI orientation: cNGN per USDC.
 type PerpState struct {
 	TradeModule   string
 	QuoteAsset    string
@@ -166,7 +166,7 @@ type PerpState struct {
 	FetchedAt       time.Time
 }
 
-// SideRoomUSD is how much more one side of the market can open before the OI cap, in USD at the
+// SideRoomUSD is how much more one side of the market can open before the OI cap, in USDC at the
 // index. A fill that opens both counterparties uses a unit of room on each side.
 func (p PerpState) SideRoomUSD() float64 {
 	if p.IndexPriceUI <= 0 {
@@ -206,8 +206,8 @@ type MarketSpec struct {
 	ExpiryTimestamp int64
 }
 
-// UIInverted reports whether orders, book levels and trades are translated between the UI (NGN per
-// USD, sized in USD, side as the trader sees it) and the engine (USD per NGN, sized in NGN, side
+// UIInverted reports whether orders, book levels and trades are translated between the UI (cNGN per
+// USDC, sized in USDC, side as the trader sees it) and the engine (USDC per cNGN, sized in cNGN, side
 // flipped). True for spot and the perp; futures are quoted engine-native.
 func (s MarketSpec) UIInverted() bool {
 	kind := s.kind()
@@ -763,9 +763,9 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 // PerpBalances maps a perp account onto the two balances the strategy reads:
 //
 //   - base (USDC): the position, as a SIGNED UI notional in USD at the index. Positive is a UI long,
-//     which is SHORT the on-chain NGN perp, so the engine balance's sign flips. Inventory skew and
-//     MM_MAX_LONG/SHORT_INVENTORY then read in USD, the way the ticket shows the position.
-//   - quote (cNGN label, but it is the perp's USD cash): the margin collateral.
+//     which is SHORT the on-chain cNGN perp, so the engine balance's sign flips. Inventory skew and
+//     MM_MAX_LONG/SHORT_INVENTORY then read in USDC, the way the ticket shows the position.
+//   - quote (cNGN label, but it is the perp's USDC cash): the margin collateral.
 //
 // Nothing is reserved against resting orders. A perp order reserves margin, not notional, and the
 // strategy budgets from cash Total (see strategy.perpCapacity), so a notional reservation here
@@ -1208,7 +1208,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		}
 		switch {
 		case spec.UIInverted():
-			// Spot and the perp both submit whole engine units (cNGN / NGN), sized in USD in the UI.
+			// Spot and the perp both submit whole engine units of cNGN, sized in USDC in the UI.
 			spec.SizeStep = 0.000001
 			spec.MinSize = 0.000001
 		case item.Market == "USDCcNGN-APR30-2026", item.Market == "USDCcNGN-SEP16-2026", item.Market == "USDCcNGN-NOV30-2026", item.Market == "USDCcNGN-MAY31-2027":
@@ -2015,7 +2015,7 @@ func (c *HTTPClient) reservedExposureKey(side string, size float64, px float64, 
 }
 
 // EngineOrderFromUI is the order the engine sees for a UI order on this market: on spot and the
-// perp the side flips, the price inverts (NGN per USD -> USD per NGN) and the size becomes the engine
+// perp the side flips, the price inverts (cNGN per USDC -> USDC per cNGN) and the size becomes the engine
 // amount (USD -> NGN); futures are already engine-native. PlaceLimitOrder signs exactly this.
 func EngineOrderFromUI(spec MarketSpec, uiSide Side, uiPrice, uiSize float64) (Side, float64, float64, error) {
 	if !spec.UIInverted() {

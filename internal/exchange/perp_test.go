@@ -80,14 +80,14 @@ func TestLoadMarketsReadsThePerpObject(t *testing.T) {
 	if p.IndexPriceUI != 1374 || !p.TradingEnabled || p.PositionCapNGN != 50_000_000 || p.MarginManager != "0x5dca1d15c325a5693bb07b1d0add01a887204deb" {
 		t.Fatalf("perp state = %+v", p)
 	}
-	// 25M NGN a side under the cap, 10M open: 15M NGN of room, $10,917 at 1374.
+	// 25M cNGN a side under the cap, 10M open: 15M cNGN of room, $10,917 at 1374.
 	if room := p.SideRoomUSD(); room < 10_916 || room > 10_918 {
 		t.Fatalf("side room = %v", room)
 	}
 }
 
-// The engine holds the perp in NGN, long NGN positive; the bot reads a UI position in USD, long USD
-// positive. A NGN long is therefore a negative UI position.
+// The engine holds the perp in cNGN, long cNGN positive; the bot reads a UI position in USDC, long
+// USDC positive. A cNGN long is therefore a negative UI position.
 func TestPerpBalancesFlipAndValueThePosition(t *testing.T) {
 	spec := MarketSpec{
 		Kind: MarketKindPerp, Symbol: "USDCcNGN-PERP", BaseAsset: "USDC", QuoteAsset: "cNGN",

@@ -327,7 +327,7 @@ When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using
 `MM_MARKET_SYMBOL=USDCcNGN-PERP` quotes the USDC-settled perp. The market kind comes from
 `/v1/markets` (`order_entry_spec: usdc_cngn_perp_v1`), not the symbol.
 
-- **Orders** use spot's translation: a UI price in NGN per USD, a size in USD, the engine price
+- **Orders** use spot's translation: a UI price in cNGN per USDC, a size in USDC, the engine price
   inverted, and the side flipped. Engine amounts are whole NGN. The venue presents the perp's book
   and trades exactly as it presents spot's.
 - **Wiring**, checked at startup against the `perp` object; the bot refuses to start if any of it
@@ -337,8 +337,8 @@ When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using
   - `MM_SUBACCOUNT_ID` must sit under the perp SRM. It is a separate account from the spot bot's,
     funded with the perp's cash.
 - **Position and cash.** The base balance (USDC) is the position as a signed USD notional at the
-  index, where a UI long is positive (it is short the on-chain NGN perp). The quote balance is the
-  cash. `MM_MAX_LONG_INVENTORY`, `MM_MAX_SHORT_INVENTORY` and `MM_ORDER_SIZE` are all in USD.
+  index, where a UI long is positive (it is short the on-chain cNGN perp). The quote balance is the
+  cash. `MM_MAX_LONG_INVENTORY`, `MM_MAX_SHORT_INVENTORY` and `MM_ORDER_SIZE` are all in USDC.
 - **Reference.** Other traders' two-sided mid, clamped to the index ± `MM_PERP_MAX_BASIS_BPS`
   (default 100, at most the mark feed's 200). With no two-sided book it is the index. The index is
   the snapshot's anchor, so `MM_STALE_ANCHOR_TIMEOUT_SECONDS` halts on a `/v1/markets` that stopped

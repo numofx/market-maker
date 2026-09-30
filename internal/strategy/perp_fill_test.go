@@ -11,8 +11,8 @@ import (
 // fill to the on-chain NGN position, reads the position back the way GetBalances does, requotes,
 // and checks direction, sign and lean in both units:
 //
-//   - displayed: NGN per USD, sized in USD, a UI long is long USD;
-//   - on chain: USD per NGN, sized in NGN, long NGN positive -- every side and sign flipped.
+//   - displayed: cNGN per USDC, sized in USDC, a UI long is long USDC;
+//   - on chain: USDC per cNGN, sized in cNGN, long NGN positive -- every side and sign flipped.
 //
 // A bot that got any one of the flips wrong would lean INTO its inventory: after being lifted it
 // would quote cheaper and keep selling.
@@ -40,7 +40,7 @@ func TestPerpFillEachSide(t *testing.T) {
 		}
 		return res
 	}
-	// The engine price of a displayed quote, USD per NGN.
+	// The engine price of a displayed quote, USDC per cNGN.
 	engine := func(t *testing.T, q *Quote) (exchange.Side, float64, float64) {
 		t.Helper()
 		side, price, amount, err := exchange.EngineOrderFromUI(spec, q.Side, q.Price, q.Size)
@@ -63,7 +63,7 @@ func TestPerpFillEachSide(t *testing.T) {
 	_, flatBidEngine, _ := engine(t, flat.Bid)
 	_, flatAskEngine, _ := engine(t, flat.Ask)
 
-	t.Run("bid filled: the bot is long USD, short the NGN perp, and leans to sell", func(t *testing.T) {
+	t.Run("bid filled: the bot is long USDC, short the cNGN perp, and leans to sell", func(t *testing.T) {
 		side, price, amount := engine(t, flat.Bid)
 		// Displayed: a buy of USD. On chain: a SELL of NGN at 1/price.
 		if side != exchange.SideSell {
@@ -83,11 +83,11 @@ func TestPerpFillEachSide(t *testing.T) {
 		}
 
 		after := quote(t, ui)
-		// Displayed: long USD, so both quotes move DOWN in NGN per USD -- buy less, sell more.
+		// Displayed: long USDC, so both quotes move DOWN in cNGN per USDC -- buy less, sell more.
 		if !(after.Bid.Price < flat.Bid.Price && after.Ask.Price < flat.Ask.Price) {
 			t.Fatalf("displayed quotes %v/%v did not lean down from %v/%v", after.Bid.Price, after.Ask.Price, flat.Bid.Price, flat.Ask.Price)
 		}
-		// On chain: short NGN, so both move UP in USD per NGN -- the engine bid for NGN (the UI ask)
+		// On chain: short NGN, so both move UP in USDC per cNGN -- the engine bid for NGN (the UI ask)
 		// pays more to buy NGN back, and the engine ask (the UI bid) asks more to sell further.
 		askSide, askEngine, _ := engine(t, after.Ask)
 		_, bidEngine, _ := engine(t, after.Bid)
@@ -99,7 +99,7 @@ func TestPerpFillEachSide(t *testing.T) {
 		}
 	})
 
-	t.Run("ask filled: the bot is short USD, long the NGN perp, and leans to buy", func(t *testing.T) {
+	t.Run("ask filled: the bot is short USDC, long the cNGN perp, and leans to buy", func(t *testing.T) {
 		side, price, amount := engine(t, flat.Ask)
 		if side != exchange.SideBuy {
 			t.Fatalf("a UI ask must reach the engine as a buy of NGN, got %s", side)
