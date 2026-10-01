@@ -351,7 +351,8 @@ When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using
   suppressed with the reason `perp_trading_disabled`, unless `MM_PERP_QUOTE_WHILE_CLOSED=true`. Set
   that for the launch: the enable gate (`propose_perp_enable_batch.py`) needs a two-sided book of at
   least $1k within 2% of the index before it opens the market. The matcher skips a closed market,
-  so the quotes only rest until the vault opens it.
+  so the quotes only rest until the vault opens it. While closed, the OI-cap room (0, since the cap
+  is 0) is not applied to the quote size; it binds again from the first cycle after the cap opens.
 
 ## Operator Modes
 
