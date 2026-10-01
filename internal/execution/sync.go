@@ -205,11 +205,93 @@ func (s *Syncer) Sync(ctx context.Context, snapshot state.Snapshot, quotes strat
 	return result, nil
 }
 
-// reconcileSide pairs the resting orders of one side (best-first) against the
-// target ladder (best-first) by rank: slot k's resting order is replaced/kept
-// against target level k, resting orders beyond the ladder depth are cancelled,
-// and target levels beyond the resting depth are placed. With one target and one
-// resting order this is exactly the original single-level reconcile.
+// reconcileSlot is one resting order, one target level, or both: a pair the cancel decision is
+// taken on. level is the target's depth in the ladder, which is the identity it is placed with.
+type reconcileSlot struct {
+	current *exchange.Order
+	target  *strategy.Quote
+	level   int
+}
+
+// pairByPrice matches each target level (best-first) with the unmatched resting order nearest to
+// it in price, within toleranceBPS; what is left over on either side becomes a slot of its own.
+//
+// Pairing by rank -- slot k's order against level k -- broke the moment one order was missing from
+// the list: an order the matcher has reserved mid-fill is absent for a cycle, so every order below
+// it shifted up a rank, read as "stale" against the level above, and was cancelled and re-placed
+// (2026-10-01, the first perp fill: a 25 bps gap between rungs, a 5 bps threshold, two rungs
+// churned twice over six seconds for a 0.025 bps move). Price proximity pairs each rung with the
+// level it actually quotes, leaves a gap where the missing order was, and lets the drift threshold
+// decide only about real moves. toleranceBPS 0 keeps rank pairing for configurations that ask for it.
+func pairByPrice(existing []exchange.Order, targets []strategy.Quote, toleranceBPS float64) []reconcileSlot {
+	slots := make([]reconcileSlot, 0, len(existing)+len(targets))
+	if toleranceBPS <= 0 {
+		n := len(existing)
+		if len(targets) > n {
+			n = len(targets)
+		}
+		for i := 0; i < n; i++ {
+			slot := reconcileSlot{level: i}
+			if i < len(existing) {
+				slot.current = &existing[i]
+			}
+			if i < len(targets) {
+				slot.target = &targets[i]
+			}
+			slots = append(slots, slot)
+		}
+		return slots
+	}
+	matched := make([]bool, len(existing))
+	claimed := make([]int, len(targets))
+	nearest := func(k int, within float64) int {
+		best, bestDrift := -1, math.Inf(1)
+		for j := range existing {
+			if matched[j] {
+				continue
+			}
+			if drift := priceDriftBPS(existing[j].Price, targets[k].Price); drift < bestDrift && drift < within {
+				best, bestDrift = j, drift
+			}
+		}
+		return best
+	}
+	// First the orders that already quote a level (within the drift threshold): those pairs are
+	// kept, whatever rank they sit at. Then the leftovers, nearest first, so an order that has to
+	// move is replaced through the rate-limited stale path rather than cancelled as unclaimed.
+	for k := range targets {
+		claimed[k] = nearest(k, toleranceBPS)
+		if claimed[k] >= 0 {
+			matched[claimed[k]] = true
+		}
+	}
+	for k := range targets {
+		if claimed[k] < 0 {
+			claimed[k] = nearest(k, math.Inf(1))
+			if claimed[k] >= 0 {
+				matched[claimed[k]] = true
+			}
+		}
+	}
+	for k := range targets {
+		slot := reconcileSlot{target: &targets[k], level: k}
+		if claimed[k] >= 0 {
+			slot.current = &existing[claimed[k]]
+		}
+		slots = append(slots, slot)
+	}
+	for j := range existing {
+		if !matched[j] {
+			slots = append(slots, reconcileSlot{current: &existing[j], level: -1})
+		}
+	}
+	return slots
+}
+
+// reconcileSide pairs the resting orders of one side against the target ladder by price
+// (pairByPrice): a paired order is kept or replaced against its level, a resting order no level
+// claims is cancelled, and a level no order claims is placed. With one target and one resting
+// order this is exactly the original single-level reconcile.
 func (s *Syncer) reconcileSide(
 	ctx context.Context,
 	snapshot state.Snapshot,
@@ -219,19 +301,10 @@ func (s *Syncer) reconcileSide(
 	ids []Identity,
 	result *SyncResult,
 ) error {
-	slots := len(existing)
-	if len(targets) > slots {
-		slots = len(targets)
-	}
-	for i := 0; i < slots; i++ {
-		var current *exchange.Order
-		if i < len(existing) {
-			current = &existing[i]
-		}
-		var target *strategy.Quote
-		if i < len(targets) {
-			target = &targets[i]
-		}
+	for _, slot := range pairByPrice(existing, targets, s.cfg.CancelStaleOrderThreshold) {
+		i := slot.level
+		current := slot.current
+		target := slot.target
 
 		if current != nil {
 			quantum := sizeQuantumUI(s.spec, current.Price)
@@ -285,7 +358,7 @@ func (s *Syncer) reconcileSide(
 			}
 		}
 		if current == nil && target != nil {
-			if i >= len(ids) {
+			if i < 0 || i >= len(ids) {
 				// No identity allocated for this depth; skip rather than reuse a nonce.
 				s.logger.Warn("no identity for quote level", "side", target.Side, "level", i)
 				continue
