@@ -324,3 +324,53 @@ func TestSyncSkipsProtectedOrderCancels(t *testing.T) {
 		t.Fatalf("protected order should not be canceled, got %#v", client.cancelled)
 	}
 }
+
+// The first perp fill (2026-10-01): the hit rung was reserved by the matcher for a cycle and so
+// missing from the open orders. Rank pairing then read the two remaining rungs as stale against
+// the levels above them and churned both. By price, the gap is simply the level to place.
+func TestAMissingRungDoesNotChurnTheOnesBelowIt(t *testing.T) {
+	client := &mockClient{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-PERP"}, config.Config{CancelStaleOrderThreshold: 5}, metrics.New(), logger)
+	client.openOrders = []exchange.Order{
+		{ID: "a2", Side: exchange.SideSell, Price: 1365.79, Size: 1000},
+		{ID: "a3", Side: exchange.SideSell, Price: 1369.19, Size: 1000},
+	}
+	quotes := strategy.Result{Asks: []strategy.Quote{
+		{Side: exchange.SideSell, Price: 1362.40, Size: 1000},
+		{Side: exchange.SideSell, Price: 1365.79, Size: 1000},
+		{Side: exchange.SideSell, Price: 1369.19, Size: 1000},
+	}}
+	ids := map[exchange.Side][]Identity{exchange.SideSell: {{OrderID: "l0", Nonce: "1"}, {OrderID: "l1", Nonce: "2"}, {OrderID: "l2", Nonce: "3"}}}
+	if _, err := syncer.Sync(context.Background(), state.Snapshot{Market: "USDCcNGN-PERP", OpenOrders: client.openOrders}, quotes, ids); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(client.cancelled) != 0 {
+		t.Fatalf("cancelled %v: the resting rungs still quote their own levels", client.cancelled)
+	}
+	if len(client.placed) != 1 || client.placed[0].Price != 1362.40 || client.placed[0].OrderID != "l0" {
+		t.Fatalf("placed %+v: want only the missing best rung, with level 0's identity", client.placed)
+	}
+	// Once the reserved rung is back, nothing moves at all.
+	client.openOrders = append([]exchange.Order{{ID: "a1", Side: exchange.SideSell, Price: 1362.40, Size: 1000}}, client.openOrders...)
+	client.placed, client.cancelled = nil, nil
+	if _, err := syncer.Sync(context.Background(), state.Snapshot{Market: "USDCcNGN-PERP", OpenOrders: client.openOrders}, quotes, ids); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(client.placed) != 0 || len(client.cancelled) != 0 {
+		t.Fatalf("placed %d cancelled %d: a ladder on its levels is left alone", len(client.placed), len(client.cancelled))
+	}
+	// A real move of the whole ladder still replaces every rung, by its own level.
+	moved := strategy.Result{Asks: []strategy.Quote{
+		{Side: exchange.SideSell, Price: 1372.00, Size: 1000},
+		{Side: exchange.SideSell, Price: 1375.40, Size: 1000},
+		{Side: exchange.SideSell, Price: 1378.80, Size: 1000},
+	}}
+	client.placed, client.cancelled = nil, nil
+	if _, err := syncer.Sync(context.Background(), state.Snapshot{Market: "USDCcNGN-PERP", OpenOrders: client.openOrders}, moved, ids); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(client.placed) != 3 || len(client.cancelled) != 3 {
+		t.Fatalf("placed %d cancelled %d: a 70 bps move re-quotes the whole ladder", len(client.placed), len(client.cancelled))
+	}
+}
