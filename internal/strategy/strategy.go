@@ -334,6 +334,10 @@ func isCashMarginedFuture(spec exchange.MarketSpec) bool {
 //     up to that bound long, and an ask the reverse, so the limit is the bound minus the position
 //     on the side being added to;
 //   - the OI cap: what opens a NEW position uses room under the cap, what closes one does not.
+//     Not while the market is closed and MM_PERP_QUOTE_WHILE_CLOSED is set: a closed perp has a cap
+//     of 0, so its room is 0 and the clamp would suppress exactly the quotes the flag exists to
+//     rest (seen at launch, 2026-10-01). Those quotes cannot fill -- the matcher skips a closed
+//     market -- and the clamp applies again on the first cycle after the cap opens.
 //
 // inventory is the signed UI position in USDC (long positive), as perpBalances reports it.
 func perpCapacity(cfg config.Config, perp state.PerpSnapshot, cash, inventory float64) (maxBid, maxAsk float64) {
@@ -344,6 +348,9 @@ func perpCapacity(cfg config.Config, perp state.PerpSnapshot, cash, inventory fl
 	bound := math.Max(0, cash) * leverage
 	maxBid = math.Max(0, bound-inventory)
 	maxAsk = math.Max(0, bound+inventory)
+	if !perp.TradingEnabled && cfg.PerpQuoteWhileClosed {
+		return maxBid, maxAsk
+	}
 	room := math.Max(0, perp.SideRoomUSD)
 	maxBid = math.Min(maxBid, math.Max(0, -inventory)+room)
 	maxAsk = math.Min(maxAsk, math.Max(0, inventory)+room)

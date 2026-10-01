@@ -123,6 +123,37 @@ func TestPerpQuotesWhileClosedWhenTheLaunchAsksForIt(t *testing.T) {
 	}
 }
 
+func TestPerpQuotesWhileClosedIgnoreTheZeroCapRoom(t *testing.T) {
+	// A closed perp has totalPositionCap 0, so SideRoomUSD is 0. The flag must still rest quotes
+	// (the enable gate needs them); without the flag, or once the market is open, room binds.
+	cfg := baseCfg()
+	cfg.PerpMaxLeverage = 1.5
+	cfg.PerpQuoteWhileClosed = true
+	closed := livePerp()
+	closed.TradingEnabled, closed.SideRoomUSD = false, 0
+	res, err := BuildQuotes(cfg, perpSpec(), perpSnapshot(4_000, 0, closed))
+	if err != nil {
+		t.Fatalf("BuildQuotes: %v", err)
+	}
+	if res.Bid == nil || res.Ask == nil {
+		t.Fatalf("want a two-sided quote against a closed cap-0 perp, got %+v / %+v", res.BidSuppression, res.AskSuppression)
+	}
+	maxBid, maxAsk := perpCapacity(cfg, closed, 4_000, 0)
+	if maxBid != 6_000 || maxAsk != 6_000 {
+		t.Fatalf("closed + flag: capacity is the leverage bound, got %v / %v", maxBid, maxAsk)
+	}
+	cfg.PerpQuoteWhileClosed = false
+	if b, a := perpCapacity(cfg, closed, 4_000, 0); b != 0 || a != 0 {
+		t.Fatalf("closed without the flag: room 0 binds, got %v / %v", b, a)
+	}
+	cfg.PerpQuoteWhileClosed = true
+	open := closed
+	open.TradingEnabled = true
+	if b, a := perpCapacity(cfg, open, 4_000, 0); b != 0 || a != 0 {
+		t.Fatalf("open with room 0: room binds regardless of the flag, got %v / %v", b, a)
+	}
+}
+
 func TestPerpReferenceComesFromTheLoader(t *testing.T) {
 	perp := livePerp()
 	perp.Reference, perp.ReferenceSource = 1360.26, "book_clamped"
