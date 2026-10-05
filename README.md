@@ -746,3 +746,21 @@ What a passing run proves:
 - `restart_under_open_order`: restart stability with live managed quotes
 - `stale_startup`: stale managed orders are canceled, not adopted
 - `duplicate_startup`: duplicate managed orders are cleaned up deterministically
+
+## Perp fill report (read-only)
+
+`cmd/perp-fill-report` reports on the USDCcNGN-PERP maker's account for a time window and changes
+nothing: fills from `/v1/trades` (the bot's orders carry the `mm:USDCcNGN-PERP:` prefix), the index
+just before and after each fill from the index feed's `SpotPriceUpdated` events, a flag on fills
+followed within 60 s by an index move of more than 20 bps against the bot, realized P&L (cash against
+the starting cash) and unrealized P&L (`PerpAsset.getUnsettledAndUnrealizedCash`), and the account's
+inventory at every on-chain balance change (`SubAccounts.BalanceAdjusted`).
+
+```bash
+MM_RPC_URL=https://... go run ./cmd/perp-fill-report -from 24h
+go run ./cmd/perp-fill-report -from 2026-10-05T14:00:00Z -to 2026-10-05T16:00:00Z -rpc https://...
+```
+
+Flags: `-from` (RFC3339 or a duration back from `-to`), `-to` (RFC3339 or `now`), `-account`
+(default 24), `-start-cash` (default 4000.14), `-api` (default `https://api.numofx.com`), `-rpc`
+(default `MM_RPC_URL`). Base mainnet addresses are built in.
