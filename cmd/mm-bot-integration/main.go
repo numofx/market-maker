@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -17,6 +18,22 @@ import (
 	"github.com/numofx/market-maker/internal/execution"
 	"github.com/numofx/market-maker/internal/metrics"
 	"github.com/numofx/market-maker/internal/state"
+)
+
+// seedSizeCNGN is the size of the orders the startup scenarios seed: engine terms, whole cNGN,
+// like every order the harness places. The bot's own quotes are MM_ORDER_SIZE in USDC converted
+// at the reference, so they are not reused here.
+const seedSizeCNGN = 1000
+
+// Stale seeds rest far from any plausible USDC-per-cNGN market (~0.00073) on the side that cannot
+// cross: a bid far below it and an ask far above it. The duplicate seeds sit closer but still off
+// the market, two bids and one ask, so startup has duplicates to clean up without a fill.
+const (
+	staleBidPrice      = 0.0000001
+	staleAskPrice      = 1
+	duplicateBidPrice  = 0.0005
+	duplicateBidPrice2 = 0.00049
+	duplicateAskPrice  = 0.001
 )
 
 type integrationConfig struct {
@@ -253,7 +270,8 @@ func runPartialFill(ctx context.Context, env *environment) (runResult, error) {
 	if err != nil {
 		return runResult{}, err
 	}
-	partialSize := ask.Size / 2
+	// Sizes are whole cNGN; half of the resting ask, floored, is what the taker can actually send.
+	partialSize := math.Floor(ask.Size / 2)
 	if partialSize <= 0 {
 		return runResult{}, fmt.Errorf("calculated partial size <= 0")
 	}
@@ -347,8 +365,8 @@ func runStaleStartup(ctx context.Context, env *environment) (runResult, error) {
 		return runResult{}, err
 	}
 	staleOrders, err := seedManagedOrders(ctx, env, []seedOrder{
-		{Side: exchange.SideBuy, Price: 1, Size: env.cfg.OrderSize, Nonce: "900001"},
-		{Side: exchange.SideSell, Price: 999999, Size: env.cfg.OrderSize, Nonce: "900002"},
+		{Side: exchange.SideBuy, Price: staleBidPrice, Size: seedSizeCNGN, Nonce: "900001"},
+		{Side: exchange.SideSell, Price: staleAskPrice, Size: seedSizeCNGN, Nonce: "900002"},
 	})
 	if err != nil {
 		return runResult{}, err
@@ -388,9 +406,9 @@ func runDuplicateStartup(ctx context.Context, env *environment) (runResult, erro
 		return runResult{}, err
 	}
 	duplicateOrders, err := seedManagedOrders(ctx, env, []seedOrder{
-		{Side: exchange.SideBuy, Price: 99, Size: env.cfg.OrderSize, Nonce: "910001"},
-		{Side: exchange.SideBuy, Price: 98.9, Size: env.cfg.OrderSize, Nonce: "910002"},
-		{Side: exchange.SideSell, Price: 101, Size: env.cfg.OrderSize, Nonce: "910003"},
+		{Side: exchange.SideBuy, Price: duplicateBidPrice, Size: seedSizeCNGN, Nonce: "910001"},
+		{Side: exchange.SideBuy, Price: duplicateBidPrice2, Size: seedSizeCNGN, Nonce: "910002"},
+		{Side: exchange.SideSell, Price: duplicateAskPrice, Size: seedSizeCNGN, Nonce: "910003"},
 	})
 	if err != nil {
 		return runResult{}, err
@@ -632,8 +650,9 @@ func waitForInventoryChange(ctx context.Context, env *environment, asset string,
 	return out, err
 }
 
+// submitTakerCross lifts the bot's ask: an engine BUY (of cNGN) at the ask's price for size cNGN.
 func submitTakerCross(ctx context.Context, env *environment, price, size float64, label string) error {
-	env.logger.Info("phase", "name", label, "price", price, "size", size)
+	env.logger.Info("phase", "name", label, "price_usdc_per_cngn", price, "size_cngn", size)
 	nonce := strconv.FormatInt(time.Now().UnixMicro(), 10)
 	orderID := fmt.Sprintf("integration-taker:%s:%s:%s", env.intCfg.Scenario, env.spec.Symbol, nonce)
 	_, err := env.takerClient.PlaceLimitOrder(ctx, exchange.PlaceOrderRequest{

@@ -44,6 +44,9 @@ func newClient(ctx context.Context, subaccountID string) *exchange.HTTPClient {
 	return client
 }
 
+// main crosses one validation pair on the dated APR30-2026 future. The future keeps its own engine
+// orientation -- a price in cNGN per USDC and a size in USDC contracts -- which is unrelated to the
+// cNGN markets' USDC-per-cNGN orientation; PlaceLimitOrder takes engine terms on every market.
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
