@@ -265,10 +265,11 @@ func TestRatePickerExternalAnchorRefreshesOncePerInterval(t *testing.T) {
 		picker: &ratePicker{sources: []rateSource{source}, timeout: time.Second, now: time.Now, health: map[string]*rateSourceHealth{}},
 	}
 
+	// The picker quotes 1371.41 NGN per USDT; the anchor serves it as USDC per cNGN.
 	first := anchor.Fetch(context.Background())
 	second := anchor.Fetch(context.Background())
-	if !first.Present || first.Price != 1371.41 || !second.Present || second.Price != 1371.41 {
-		t.Fatalf("first = %+v, second = %+v", first, second)
+	if !first.Present || first.Price != 1/1371.41 || !second.Present || second.Price != 1/1371.41 {
+		t.Fatalf("first = %+v, second = %+v, want 1/1371.41", first, second)
 	}
 	if second.RefreshAttempted {
 		t.Fatal("second fetch inside the refresh interval should serve the cached price")
@@ -295,11 +296,12 @@ func TestExternalAnchorAcceptsAMoveOnceTheBaselineExpired(t *testing.T) {
 		}),
 	}
 
-	if first := anchor.Fetch(context.Background()); !first.Present || first.Price != 1326 {
-		t.Fatalf("first = %+v", first)
+	// 0x quotes cNGN per USDC; the anchor serves USDC per cNGN.
+	if first := anchor.Fetch(context.Background()); !first.Present || first.Price != 1/1326.0 {
+		t.Fatalf("first = %+v, want 1/1326", first)
 	}
 	time.Sleep(20 * time.Millisecond)
-	if second := anchor.Fetch(context.Background()); !second.Present || second.Price != 1371 {
-		t.Fatalf("second = %+v, want 1371 accepted once 1326 expired", second)
+	if second := anchor.Fetch(context.Background()); !second.Present || second.Price != 1/1371.0 {
+		t.Fatalf("second = %+v, want 1/1371 accepted once 1/1326 expired", second)
 	}
 }

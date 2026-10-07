@@ -16,9 +16,9 @@ import (
 )
 
 func restingOrder(id string, side exchange.Side, postOnly bool, worstFee string) exchange.Order {
-	price := 99.9
+	price := 0.999
 	if side == exchange.SideSell {
-		price = 100.1
+		price = 1.001
 	}
 	return exchange.Order{
 		ID: "mm:USDCcNGN-SPOT:" + string(side) + ":" + id, Market: "USDCcNGN-SPOT",
@@ -34,11 +34,11 @@ func restingOrder(id string, side exchange.Side, postOnly bool, worstFee string)
 // "not rejected for reason X", and the first version of these tests fell for exactly that.
 func staleTermsClient(orders []exchange.Order, requiredWorstFee string) *integrationClient {
 	return &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 50, Available: 50},
-			{Asset: "cNGN", Total: 10000, Available: 10000},
+			{Asset: "cNGN", Total: 50, Available: 50},
+			{Asset: "USDC", Total: 10000, Available: 10000},
 		},
 		mockClient: mockClient{openOrders: orders, requiredWorstFee: requiredWorstFee},
 	}
@@ -154,7 +154,7 @@ func TestStartupKeepsOrdersWhenTheRequiredBoundIsUnknown(t *testing.T) {
 // Driven through Sync, not through startup, because the whole point is that startup is over.
 func TestSteadyStateCycleReplacesAPredecessorsStaleQuote(t *testing.T) {
 	client := &mockClient{requiredWorstFee: "1000"}
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1},
 		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001, PostOnlyQuotes: true},
 		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -187,7 +187,7 @@ func TestSteadyStateCycleReplacesAPredecessorsStaleQuote(t *testing.T) {
 // the entire ladder on every cycle, which is worse than the problem it fixes.
 func TestSteadyStateCycleKeepsACompliantQuote(t *testing.T) {
 	client := &mockClient{requiredWorstFee: "1000"}
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1},
 		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001, PostOnlyQuotes: true},
 		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -211,7 +211,7 @@ func TestSteadyStateCycleKeepsACompliantQuote(t *testing.T) {
 // order that can take when the operator said it must not is not churn to be smoothed out.
 func TestStaleTermsAreNotDeferredByTheCancelBudget(t *testing.T) {
 	client := &mockClient{requiredWorstFee: "1000"}
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1},
 		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001,
 			PostOnlyQuotes: true, MaxCancelsPerMinute: 1},
 		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))

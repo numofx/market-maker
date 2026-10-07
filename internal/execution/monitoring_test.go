@@ -23,7 +23,7 @@ func TestReadinessFailsOnStaleDependencies(t *testing.T) {
 		StaleBalanceTimeout:          time.Second,
 		StaleAnchorTimeout:           time.Second,
 		ReadinessMissingQuoteTimeout: time.Minute,
-	}, &mockClient{}, exchange.MarketSpec{BaseAsset: "USDC", QuoteAsset: "cNGN"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	}, &mockClient{}, exchange.MarketSpec{BaseAsset: "cNGN", QuoteAsset: "USDC"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	now := time.Now().UTC()
 	bot.updateReadiness(state.Snapshot{
@@ -45,7 +45,7 @@ func TestReadinessFailsWhenRequiredQuotesMissing(t *testing.T) {
 	bot := NewBot(config.Config{
 		OperatorMode:                 config.ModeNormal,
 		ReadinessMissingQuoteTimeout: time.Second,
-	}, &mockClient{}, exchange.MarketSpec{BaseAsset: "USDC", QuoteAsset: "cNGN"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	}, &mockClient{}, exchange.MarketSpec{BaseAsset: "cNGN", QuoteAsset: "USDC"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	bot.updateReadiness(state.Snapshot{
 		LastQuoteUpdate: time.Now().UTC().Add(-2 * time.Second),
@@ -66,7 +66,7 @@ func TestStatusSummaryFieldsUpdate(t *testing.T) {
 	reg := metrics.New()
 	bot := NewBot(config.Config{
 		OperatorMode: config.ModeNormal,
-	}, &mockClient{}, exchange.MarketSpec{BaseAsset: "USDC", QuoteAsset: "cNGN"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	}, &mockClient{}, exchange.MarketSpec{BaseAsset: "cNGN", QuoteAsset: "USDC"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	bot.snapshot = state.Snapshot{
 		ReferencePrice:        100,
 		InventoryByAsset:      map[string]float64{"USDC": 12.5, "cNGN": 1000},
@@ -104,7 +104,7 @@ func TestStatusSummaryFieldsUpdate(t *testing.T) {
 
 func TestShutdownSummaryGeneration(t *testing.T) {
 	reg := metrics.New()
-	bot := NewBot(config.Config{}, &mockClient{}, exchange.MarketSpec{BaseAsset: "USDC", QuoteAsset: "cNGN"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	bot := NewBot(config.Config{}, &mockClient{}, exchange.MarketSpec{BaseAsset: "cNGN", QuoteAsset: "USDC"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	bot.haltCount = 2
 	bot.persisted.LastHaltReason = "balances stale"
 	bot.maxQuoteAge = 10 * time.Second

@@ -28,12 +28,12 @@ func attrMap(t *testing.T, attrs []any) map[string]any {
 // to infer from elsewhere while chasing the churn, and inferred wrong twice.
 func TestTheCancelLineCarriesEveryDecisionInput(t *testing.T) {
 	current := &exchange.Order{
-		ID: "lvl3", Side: exchange.SideSell, Price: 1331.847318, Size: 0.359651, RawSize: "479",
+		ID: "lvl3", Side: exchange.SideSell, Price: 0.000750, Size: 479, RawSize: "479",
 	}
-	target := &strategy.Quote{Side: exchange.SideSell, Price: 1331.847318, Size: 0.359975}
+	target := &strategy.Quote{Side: exchange.SideSell, Price: 0.000750, Size: 1600}
 	cfg := config.Config{AdoptSizeTolerance: 0.000001}
 
-	got := attrMap(t, sizeMismatchAttrs(current, target, sizeQuantumUI(spotSpec, current.Price), cfg))
+	got := attrMap(t, sizeMismatchAttrs(current, target, sizeQuantum(spotSpec), cfg))
 
 	for _, key := range []string{
 		"order_id", "side", "current_size", "target_size", "diff", "quantum",
@@ -55,10 +55,11 @@ func TestTheCancelLineCarriesEveryDecisionInput(t *testing.T) {
 // guessed at from the book.
 func TestSizeFromRawExposesAConversionDisagreement(t *testing.T) {
 	cfg := config.Config{AdoptSizeTolerance: 0.000001}
-	target := &strategy.Quote{Side: exchange.SideSell, Price: 1331.847318, Size: 0.359975}
+	target := &strategy.Quote{Side: exchange.SideSell, Price: 0.000750, Size: 1600}
 
+	// On the cNGN markets the raw amount IS the size.
 	agreeing := &exchange.Order{
-		ID: "ok", Side: exchange.SideSell, Price: 1331.847318, Size: 479 / 1331.847318, RawSize: "479",
+		ID: "ok", Side: exchange.SideSell, Price: 0.000750, Size: 479, RawSize: "479",
 	}
 	got := attrMap(t, sizeMismatchAttrs(agreeing, target, 0, cfg))
 	if diff := got["size_from_raw"].(float64) - agreeing.Size; diff > 1e-12 || diff < -1e-12 {
@@ -68,7 +69,7 @@ func TestSizeFromRawExposesAConversionDisagreement(t *testing.T) {
 
 	// A size that does not follow from the raw amount is precisely the bug being hunted.
 	disagreeing := &exchange.Order{
-		ID: "bad", Side: exchange.SideSell, Price: 1331.847318, Size: 1.2, RawSize: "479",
+		ID: "bad", Side: exchange.SideSell, Price: 0.000750, Size: 1600, RawSize: "479",
 	}
 	got = attrMap(t, sizeMismatchAttrs(disagreeing, target, 0, cfg))
 	if got["size_from_raw"].(float64) == disagreeing.Size {
@@ -83,9 +84,9 @@ func TestToleranceSourceNamesTheWinningBound(t *testing.T) {
 		abs, rel, quantum float64
 		want              string
 	}{
-		{0.000001, 0.00018, 0.00075, "quantum"},
-		{0.000001, 0.0006, 0.0, "relative_dust_bps"},
-		{0.01, 0.0006, 0.00075, "absolute_adopt_tolerance"},
+		{0.000001, 0.8, 1, "quantum"},
+		{0.000001, 27.5, 1, "relative_dust_bps"},
+		{50, 27.5, 1, "absolute_adopt_tolerance"},
 	} {
 		if got := toleranceSource(tc.abs, tc.rel, tc.quantum); got != tc.want {
 			t.Errorf("toleranceSource(%v,%v,%v) = %q, want %q", tc.abs, tc.rel, tc.quantum, got, tc.want)

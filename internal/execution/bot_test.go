@@ -11,15 +11,16 @@ import (
 func TestMarketMetadataAttrsIncludesExecutionMetadata(t *testing.T) {
 	spec := exchange.MarketSpec{
 		Symbol:         "USDCcNGN-SPOT",
-		BaseAsset:      "USDC",
-		QuoteAsset:     "cNGN",
-		AssetAddress:   "0xe4b6e05b9910ab08a947a20faecc4524bf8a7f7e",
-		QuoteAddress:   "0x1917960763bf3a0dfa10a05f0a112e828c1a934f",
+		BaseAsset:      "cNGN",
+		QuoteAsset:     "USDC",
+		AssetAddress:   "0x9d806fd040a719d27a8e5e77dc5ae0ed1e089493",
+		QuoteAddress:   "0x364058aff6f36e01505fb2cc870f8b6bd4835e84",
 		SubID:          "0",
-		TickSize:       0.01,
-		SizeStep:       0.000001,
-		MinSize:        0.000001,
-		OrderEntrySpec: "usdc_cngn_spot_v1",
+		TickSize:       0.000000000000000001,
+		SizeStep:       1,
+		MinSize:        1,
+		OrderEntrySpec: exchange.SpecCNGNUSDCSpot,
+		Orientation:    exchange.OrientationEngine,
 	}
 	attrs := marketMetadataAttrs(spec)
 	values := map[string]any{}
@@ -27,13 +28,16 @@ func TestMarketMetadataAttrsIncludesExecutionMetadata(t *testing.T) {
 		values[attrs[i].(string)] = attrs[i+1]
 	}
 	for key, want := range map[string]any{
-		"market":           spec.Symbol,
-		"asset_address":    spec.AssetAddress,
-		"quote_address":    spec.QuoteAddress,
-		"sub_id":           spec.SubID,
-		"size_step":        spec.SizeStep,
-		"min_size":         spec.MinSize,
-		"order_entry_spec": spec.OrderEntrySpec,
+		"market":            spec.Symbol,
+		"asset_address":     spec.AssetAddress,
+		"quote_address":     spec.QuoteAddress,
+		"sub_id":            spec.SubID,
+		"size_step":         spec.SizeStep,
+		"min_size":          spec.MinSize,
+		"order_entry_spec":  spec.OrderEntrySpec,
+		"venue_orientation": spec.Orientation,
+		"price_unit":        "USDC per cNGN",
+		"size_unit":         "cNGN",
 	} {
 		if values[key] != want {
 			t.Fatalf("%s = %#v want %#v", key, values[key], want)

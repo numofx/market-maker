@@ -82,7 +82,7 @@ func TestExpiringQuoteIsReplacedInTheSameCycleWithoutSpendingTheCancelBudget(t *
 	reg := metrics.New()
 	cfg := expiryCfg()
 	cfg.MaxCancelsPerMinute = 1
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001}, cfg, reg,
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1}, cfg, reg,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	syncer.cancelTimestamps = []time.Time{time.Now().UTC().Add(-10 * time.Second)} // budget spent
 
@@ -123,7 +123,7 @@ func TestExpiringQuotesDoNotCountTowardTheRateLimit(t *testing.T) {
 	client := &mockClient{requiredWorstFee: "1000"}
 	cfg := expiryCfg()
 	cfg.MaxCancelsPerMinute = 1
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001}, cfg, metrics.New(),
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1}, cfg, metrics.New(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	soon := time.Now().UTC().Unix() + 5
@@ -154,15 +154,15 @@ func TestRunCycleSkipsTheRefreshThrottleForAnExpiringQuote(t *testing.T) {
 		t.Helper()
 		now := time.Now().UTC()
 		client := &integrationClient{
-			spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-			book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+			spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+			book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 			balances: []exchange.Balance{
-				{Asset: "USDC", Total: 50, Available: 50},
-				{Asset: "cNGN", Total: 10000, Available: 10000},
+				{Asset: "cNGN", Total: 50, Available: 50},
+				{Asset: "USDC", Total: 10000, Available: 10000},
 			},
 			mockClient: mockClient{openOrders: []exchange.Order{
-				{ID: "mm:USDCcNGN-SPOT:buy:10", Side: exchange.SideBuy, Price: 99.9, Size: 10, Managed: true, Nonce: "10", CreatedAt: now.Add(-50 * time.Second), Expiry: bidExpiry},
-				{ID: "mm:USDCcNGN-SPOT:sell:11", Side: exchange.SideSell, Price: 100.1, Size: 10, Managed: true, Nonce: "11", CreatedAt: now.Add(-5 * time.Second), Expiry: now.Unix() + 55},
+				{ID: "mm:USDCcNGN-SPOT:buy:10", Side: exchange.SideBuy, Price: 0.999, Size: 10, Managed: true, Nonce: "10", CreatedAt: now.Add(-50 * time.Second), Expiry: bidExpiry},
+				{ID: "mm:USDCcNGN-SPOT:sell:11", Side: exchange.SideSell, Price: 1.001, Size: 10, Managed: true, Nonce: "11", CreatedAt: now.Add(-5 * time.Second), Expiry: now.Unix() + 55},
 			}},
 		}
 		cfg := config.Config{

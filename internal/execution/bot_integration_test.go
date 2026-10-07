@@ -81,16 +81,16 @@ func TestStartupReconciliationCancelsExistingOrders(t *testing.T) {
 
 func TestInitializeAdoptsExistingManagedQuotesAndNextCycleDoesNotDuplicate(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 50, Available: 50},
-			{Asset: "cNGN", Total: 10000, Available: 10000},
+			{Asset: "cNGN", Total: 50, Available: 50},
+			{Asset: "USDC", Total: 10000, Available: 10000},
 		},
 		mockClient: mockClient{
 			openOrders: []exchange.Order{
-				{ID: "mm:USDCcNGN-SPOT:buy:10", Side: exchange.SideBuy, Price: 99.9, Size: 10, Managed: true, Nonce: "10"},
-				{ID: "mm:USDCcNGN-SPOT:sell:11", Side: exchange.SideSell, Price: 100.1, Size: 10, Managed: true, Nonce: "11"},
+				{ID: "mm:USDCcNGN-SPOT:buy:10", Side: exchange.SideBuy, Price: 0.999, Size: 10, Managed: true, Nonce: "10"},
+				{ID: "mm:USDCcNGN-SPOT:sell:11", Side: exchange.SideSell, Price: 1.001, Size: 10, Managed: true, Nonce: "11"},
 			},
 		},
 	}
@@ -123,11 +123,11 @@ func TestInitializeAdoptsExistingManagedQuotesAndNextCycleDoesNotDuplicate(t *te
 
 func TestCancelReplaceAfterRestartAllocatesNewNonces(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 100, Available: 100},
-			{Asset: "cNGN", Total: 100000, Available: 100000},
+			{Asset: "cNGN", Total: 50, Available: 50},
+			{Asset: "USDC", Total: 100000, Available: 100000},
 		},
 		mockClient: mockClient{
 			openOrders: []exchange.Order{{ID: "old-bid", Side: exchange.SideBuy, Nonce: "5"}},
@@ -162,7 +162,7 @@ func TestCancelReplaceAfterRestartAllocatesNewNonces(t *testing.T) {
 func TestNoDuplicateQuotesOnPartialFailure(t *testing.T) {
 	client := &integrationClient{
 		spec: exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
 			{Asset: "USDC", Total: 0, Available: 0},
 			{Asset: "cNGN", Total: 100000, Available: 100000},
@@ -200,11 +200,11 @@ func TestNoDuplicateQuotesOnPartialFailure(t *testing.T) {
 
 func TestHaltedWhenBalancesInsufficient(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 1, Available: 1},
 			{Asset: "cNGN", Total: 5, Available: 5},
+			{Asset: "USDC", Total: 1, Available: 1},
 		},
 		mockClient: mockClient{
 			openOrders: []exchange.Order{
@@ -236,14 +236,14 @@ func TestHaltedWhenBalancesInsufficient(t *testing.T) {
 
 func TestEmptySpotMarketUsesFreshExternalAnchor(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 0, Available: 100},
-			{Asset: "cNGN", Total: 100000, Available: 100000},
+			{Asset: "cNGN", Total: 20000, Available: 20000},
+			{Asset: "USDC", Total: 100000, Available: 100000},
 		},
 	}
 	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
-		Price:            1500,
+		Price:            1 / 1500.0,
 		Present:          true,
 		FetchedAt:        time.Now().UTC(),
 		RefreshAttempted: true,
@@ -293,10 +293,10 @@ func TestEmptySpotMarketUsesFreshExternalAnchor(t *testing.T) {
 
 func TestEmptySpotMarketInvalidExternalAnchorHalts(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 100, Available: 100},
-			{Asset: "cNGN", Total: 100000, Available: 100000},
+			{Asset: "cNGN", Total: 20000, Available: 20000},
+			{Asset: "USDC", Total: 100000, Available: 100000},
 		},
 	}
 	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
@@ -343,14 +343,14 @@ func TestEmptySpotMarketInvalidExternalAnchorHalts(t *testing.T) {
 
 func TestBootstrapOnlySwitchesFromExternalToLocal(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 100, Available: 100},
-			{Asset: "cNGN", Total: 100000, Available: 100000},
+			{Asset: "cNGN", Total: 20000, Available: 20000},
+			{Asset: "USDC", Total: 100000, Available: 100000},
 		},
 	}
 	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
-		Price:            1500,
+		Price:            1 / 1500.0,
 		Present:          true,
 		FetchedAt:        time.Now().UTC(),
 		RefreshAttempted: true,
@@ -387,7 +387,7 @@ func TestBootstrapOnlySwitchesFromExternalToLocal(t *testing.T) {
 	if bot.snapshot.ReferenceSource != "external" {
 		t.Fatalf("first source = %q want external", bot.snapshot.ReferenceSource)
 	}
-	client.book = exchange.Book{Bids: []exchange.BookLevel{{Price: 1499}}, Asks: []exchange.BookLevel{{Price: 1501}}}
+	client.book = exchange.Book{Bids: []exchange.BookLevel{{Price: 1 / 1501.0}}, Asks: []exchange.BookLevel{{Price: 1 / 1499.0}}}
 	client.openOrders = nil
 	client.placed = nil
 	if err := bot.RunCycle(context.Background()); err != nil {
@@ -398,22 +398,23 @@ func TestBootstrapOnlySwitchesFromExternalToLocal(t *testing.T) {
 	}
 }
 
-// Live on 2026-09-14: a trader's bid 1333.97 and ask 1370 were the whole book, so its mid (1351.985)
-// sat 196 bps from the cNGN oracle (1326.01). With the oracle as the spot anchor that tripped the
-// 150 bps deviation guard, cancelled everything and stayed halted. The book is spot's source of
-// truth: the bot now prices off that mid, and quotes the one side it can fund.
+// Live on 2026-09-14: a trader's two orders were the whole book, a mid 196 bps from the cNGN
+// oracle. With the oracle as the spot anchor that tripped the 150 bps deviation guard, cancelled
+// everything and stayed halted. The book is spot's source of truth: the bot prices off that mid,
+// and quotes the one side it can fund -- here the ask, since it holds cNGN and dust USDC.
 func TestSpotQuotesOffTheBookWhenTheOracleDisagrees(t *testing.T) {
+	const bookBid, bookAsk = 0.000730, 0.000750
 	client := &integrationClient{
-		spec:   exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001},
-		book:   exchange.Book{Bids: []exchange.BookLevel{{Price: 1333.97}}, Asks: []exchange.BookLevel{{Price: 1370}}},
-		trades: []exchange.Trade{{Price: 1327.34, CreatedAt: time.Now().UTC().Add(-10 * time.Minute)}},
+		spec:   exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.000000001, SizeStep: 1, MinSize: 1},
+		book:   exchange.Book{Bids: []exchange.BookLevel{{Price: bookBid}}, Asks: []exchange.BookLevel{{Price: bookAsk}}},
+		trades: []exchange.Trade{{Price: 0.000753, CreatedAt: time.Now().UTC().Add(-10 * time.Minute)}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 0.000682, Available: 0.000682},
 			{Asset: "cNGN", Total: 8980, Available: 8980},
+			{Asset: "USDC", Total: 0.000682, Available: 0.000682},
 		},
 	}
 	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
-		Price:            1326.01,
+		Price:            0.000755,
 		Present:          true,
 		FetchedAt:        time.Now().UTC().Add(-20 * time.Minute),
 		RefreshAttempted: true,
@@ -451,24 +452,25 @@ func TestSpotQuotesOffTheBookWhenTheOracleDisagrees(t *testing.T) {
 	if bot.currentHalted {
 		t.Fatalf("halted: %q; an oracle that disagrees with the book must not stop spot quoting", bot.persisted.LastHaltReason)
 	}
-	if bot.snapshot.ReferenceSource != "book" || math.Abs(bot.snapshot.ReferencePrice-1351.985) > 1e-9 {
-		t.Fatalf("reference = %v (%s), want the book mid 1351.985", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource)
+	if bot.snapshot.ReferenceSource != "book" || math.Abs(bot.snapshot.ReferencePrice-(bookBid+bookAsk)/2) > 1e-15 {
+		t.Fatalf("reference = %v (%s), want the book mid %v", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource, (bookBid+bookAsk)/2)
 	}
 	if len(client.placed) == 0 {
-		t.Fatal("placed nothing; the cNGN-funded bid side should quote")
+		t.Fatal("placed nothing; the cNGN-funded ask side should quote")
 	}
 	for _, order := range client.placed {
-		if order.Side != exchange.SideBuy {
-			t.Fatalf("placed %+v; 0.000682 USDC cannot fund an ask", order)
+		if order.Side != exchange.SideSell || order.Size < 1 || order.Size != math.Floor(order.Size) {
+			t.Fatalf("placed %+v; 0.000682 USDC cannot fund a bid, and sizes are whole cNGN", order)
 		}
 	}
 }
 
-// Live after #21 deployed: the bot's own bid (1366.23) was the best bid opposite a trader's 1370 ask,
-// so each re-quote raised the mid it priced from and the bid walked toward 1370. The reference is
-// now the trader's orders alone: (1333.97 + 1370) / 2.
+// Live after #21 deployed: the bot's own order was the best on its side opposite a trader's, so
+// each re-quote moved the mid it priced from and walked toward the trader. The reference is now
+// the trader's orders alone. In engine terms the bot's order is an ask (a sell of cNGN at
+// 0.000732) against the trader's bid at 0.000730 and ask at 0.000750.
 func TestSpotReferenceIgnoresTheBotsOwnQuotes(t *testing.T) {
-	ownBid := exchange.Order{ID: "mm:USDCcNGN-SPOT:buy:1", Market: "USDCcNGN-SPOT", Side: exchange.SideBuy, Price: 1366.23, Size: 1.2, Managed: true}
+	ownAsk := exchange.Order{ID: "mm:USDCcNGN-SPOT:sell:1", Market: "USDCcNGN-SPOT", Side: exchange.SideSell, Price: 0.000732, Size: 1600, Managed: true}
 	for _, tt := range []struct {
 		name       string
 		book       exchange.Book
@@ -478,32 +480,32 @@ func TestSpotReferenceIgnoresTheBotsOwnQuotes(t *testing.T) {
 		{
 			name: "trader on both sides",
 			book: exchange.Book{
-				Bids: []exchange.BookLevel{{Price: 1366.23, OrderID: ownBid.ID}, {Price: 1333.97, OrderID: "spot-trader-bid"}},
-				Asks: []exchange.BookLevel{{Price: 1370, OrderID: "spot-trader-ask"}},
+				Bids: []exchange.BookLevel{{Price: 0.000730, OrderID: "spot-trader-bid"}},
+				Asks: []exchange.BookLevel{{Price: 0.000732, OrderID: ownAsk.ID}, {Price: 0.000750, OrderID: "spot-trader-ask"}},
 			},
-			wantRef:    1351.985,
+			wantRef:    0.000740,
 			wantSource: "book",
 		},
 		{
 			// Others quote one side only, so there is no two-sided book to take a mid from.
-			name: "trader ask only falls back to the last trade",
+			name: "trader bid only falls back to the last trade",
 			book: exchange.Book{
-				Bids: []exchange.BookLevel{{Price: 1366.23, OrderID: ownBid.ID}},
-				Asks: []exchange.BookLevel{{Price: 1370, OrderID: "spot-trader-ask"}},
+				Bids: []exchange.BookLevel{{Price: 0.000730, OrderID: "spot-trader-bid"}},
+				Asks: []exchange.BookLevel{{Price: 0.000732, OrderID: ownAsk.ID}},
 			},
-			wantRef:    1327.34,
+			wantRef:    0.000753,
 			wantSource: "trade",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &integrationClient{
-				mockClient: mockClient{openOrders: []exchange.Order{ownBid}},
-				spec:       exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001},
+				mockClient: mockClient{openOrders: []exchange.Order{ownAsk}},
+				spec:       exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.000000001, SizeStep: 1, MinSize: 1},
 				book:       tt.book,
-				trades:     []exchange.Trade{{Price: 1327.34, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)}},
+				trades:     []exchange.Trade{{Price: 0.000753, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)}},
 				balances: []exchange.Balance{
-					{Asset: "USDC", Total: 0.000682, Available: 0.000682},
 					{Asset: "cNGN", Total: 8980, Available: 8980},
+					{Asset: "USDC", Total: 0.000682, Available: 0.000682},
 				},
 			}
 			cfg := config.Config{
@@ -522,32 +524,34 @@ func TestSpotReferenceIgnoresTheBotsOwnQuotes(t *testing.T) {
 			if err := bot.RunCycle(context.Background()); err != nil {
 				t.Fatalf("RunCycle() error = %v", err)
 			}
-			if bot.snapshot.ReferenceSource != tt.wantSource || math.Abs(bot.snapshot.ReferencePrice-tt.wantRef) > 1e-9 {
+			if bot.snapshot.ReferenceSource != tt.wantSource || math.Abs(bot.snapshot.ReferencePrice-tt.wantRef) > 1e-15 {
 				t.Fatalf("reference = %v (%s), want %v (%s)", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource, tt.wantRef, tt.wantSource)
 			}
 		})
 	}
 }
 
-// After #22 deployed, with only a trader's 1370 ask opposite the bot, the reference fell back to the venue's
-// last trade (1327.34, hours old) while the market was ~1371. The rate picker's price now comes first.
+// After #22 deployed, with only a trader's order opposite the bot, the reference fell back to the
+// venue's last trade (hours old) while the market had moved. The rate picker's price now comes
+// first. In engine terms: the bot's own ask at 0.000740, a trader's bid at 0.000730, an old trade
+// at 0.000753, and the rate picker at 0.000729.
 func TestSpotFallsBackToTheRatePickerBeforeTheLastTrade(t *testing.T) {
-	ownBid := exchange.Order{ID: "mm:USDCcNGN-SPOT:buy:1", Market: "USDCcNGN-SPOT", Side: exchange.SideBuy, Price: 1350.63, Size: 1.2, Managed: true}
+	ownAsk := exchange.Order{ID: "mm:USDCcNGN-SPOT:sell:1", Market: "USDCcNGN-SPOT", Side: exchange.SideSell, Price: 0.000740, Size: 1600, Managed: true}
 	client := &integrationClient{
-		mockClient: mockClient{openOrders: []exchange.Order{ownBid}},
-		spec:       exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001},
+		mockClient: mockClient{openOrders: []exchange.Order{ownAsk}},
+		spec:       exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.000000001, SizeStep: 1, MinSize: 1},
 		book: exchange.Book{
-			Bids: []exchange.BookLevel{{Price: 1350.63, OrderID: ownBid.ID}},
-			Asks: []exchange.BookLevel{{Price: 1370, OrderID: "spot-trader-ask"}},
+			Bids: []exchange.BookLevel{{Price: 0.000730, OrderID: "spot-trader-bid"}},
+			Asks: []exchange.BookLevel{{Price: 0.000740, OrderID: ownAsk.ID}},
 		},
-		trades: []exchange.Trade{{Price: 1327.34, CreatedAt: time.Now().UTC().Add(-3 * time.Hour)}},
+		trades: []exchange.Trade{{Price: 0.000753, CreatedAt: time.Now().UTC().Add(-3 * time.Hour)}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 0.000682, Available: 0.000682},
 			{Asset: "cNGN", Total: 8980, Available: 8980},
+			{Asset: "USDC", Total: 0.000682, Available: 0.000682},
 		},
 	}
 	anchor := &fakeSpotExternalAnchor{quotes: []marketdata.ExternalAnchorQuote{{
-		Price:            1371.41,
+		Price:            0.000729,
 		Present:          true,
 		FetchedAt:        time.Now().UTC(),
 		RefreshAttempted: true,
@@ -579,23 +583,26 @@ func TestSpotFallsBackToTheRatePickerBeforeTheLastTrade(t *testing.T) {
 	if err := bot.RunCycle(context.Background()); err != nil {
 		t.Fatalf("RunCycle() error = %v", err)
 	}
-	if bot.snapshot.ReferenceSource != "external" || bot.snapshot.ReferencePrice != 1371.41 {
-		t.Fatalf("reference = %v (%s), want the rate picker's 1371.41", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource)
+	if bot.snapshot.ReferenceSource != "external" || bot.snapshot.ReferencePrice != 0.000729 {
+		t.Fatalf("reference = %v (%s), want the rate picker's 0.000729", bot.snapshot.ReferencePrice, bot.snapshot.ReferenceSource)
+	}
+	if len(client.placed) == 0 {
+		t.Fatal("placed nothing; the cNGN-funded ask side should quote above the fallback price")
 	}
 	for _, order := range client.placed {
-		if order.Side != exchange.SideBuy || order.Price >= 1371.41 {
-			t.Fatalf("placed %+v; want only bids below the fallback price", order)
+		if order.Side != exchange.SideSell || order.Price <= 0.000729 {
+			t.Fatalf("placed %+v; want only asks above the fallback price", order)
 		}
 	}
 }
 
 func TestPauseModeCancelsAndDoesNotPlace(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 100, Available: 100},
-			{Asset: "cNGN", Total: 100000, Available: 100000},
+			{Asset: "cNGN", Total: 50, Available: 50},
+			{Asset: "USDC", Total: 100000, Available: 100000},
 		},
 		mockClient: mockClient{
 			openOrders: []exchange.Order{
@@ -634,8 +641,8 @@ func TestPauseModeCancelsAndDoesNotPlace(t *testing.T) {
 // re-quoted on each restart.)
 func TestPauseModeInitializeDoesNotPlaceFromEmpty(t *testing.T) {
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
 			{Asset: "USDC", Total: 100, Available: 100},
 			{Asset: "cNGN", Total: 100000, Available: 100000},
@@ -689,8 +696,8 @@ func (c *failingLoadClient) GetBalances(context.Context) ([]exchange.Balance, er
 func TestStaleDependencyLoadErrorCancelsManagedOrders(t *testing.T) {
 	client := &failingLoadClient{
 		integrationClient: integrationClient{
-			spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-			book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+			spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+			book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 			balances: []exchange.Balance{
 				{Asset: "USDC", Total: 100, Available: 100},
 				{Asset: "cNGN", Total: 100000, Available: 100000},
@@ -732,10 +739,10 @@ func TestStaleDependencyLoadErrorCancelsManagedOrders(t *testing.T) {
 func TestStaleAnchorIsolatedFromExchangeMarketData(t *testing.T) {
 	client := &integrationClient{
 		spec: exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 100, Available: 100},
-			{Asset: "cNGN", Total: 100000, Available: 100000},
+			{Asset: "cNGN", Total: 50, Available: 50},
+			{Asset: "USDC", Total: 100000, Available: 100000},
 		},
 		mockClient: mockClient{
 			openOrders: []exchange.Order{{ID: "live-bid", Side: exchange.SideBuy, Nonce: "10"}},
@@ -781,11 +788,11 @@ func TestStaleAnchorIsolatedFromExchangeMarketData(t *testing.T) {
 func TestPersistedStateSurvivesRestart(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 50, Available: 50},
-			{Asset: "cNGN", Total: 100000, Available: 100000},
+			{Asset: "cNGN", Total: 50, Available: 50},
+			{Asset: "USDC", Total: 100000, Available: 100000},
 		},
 	}
 	cfg := config.Config{
@@ -810,7 +817,7 @@ func TestPersistedStateSurvivesRestart(t *testing.T) {
 	if persisted.LastSubmittedBidOrder == "" || persisted.LastSubmittedAskOrder == "" {
 		t.Fatalf("submitted ids missing: %#v", persisted)
 	}
-	if persisted.LastInventorySnapshot["USDC"] == 0 && persisted.LastInventorySnapshot["cNGN"] == 0 {
+	if persisted.LastInventorySnapshot["cNGN"] == 0 && persisted.LastInventorySnapshot["USDC"] == 0 {
 		t.Fatalf("inventory snapshot missing: %#v", persisted.LastInventorySnapshot)
 	}
 }
@@ -823,7 +830,7 @@ func TestKillSwitchCancelsAllAndHaltsQuoting(t *testing.T) {
 	}
 	stateFile := filepath.Join(dir, "state.json")
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
 		mockClient: mockClient{
 			openOrders: []exchange.Order{
 				{ID: "live-bid", Side: exchange.SideBuy, Nonce: "10"},

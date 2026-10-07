@@ -92,7 +92,7 @@ func TestTakeCancelledDrains(t *testing.T) {
 // shape -- the ladder churning and reporting fills that never happened.
 func TestAReplaceDoesNotRegisterAsAFill(t *testing.T) {
 	client := &mockClient{openOrders: []exchange.Order{resting("b1", exchange.SideBuy, 1.2)}}
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1},
 		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001},
 		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 

@@ -33,7 +33,7 @@ func (g *goneClient) CancelOrder(ctx context.Context, orderID string, reason str
 // rolls in the same Sync.
 func TestAFillRacingTheExpiryRollDoesNotAbortTheCycle(t *testing.T) {
 	client := &goneClient{mockClient: mockClient{requiredWorstFee: "1000"}, gone: map[string]bool{"bid-filled": true}}
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001}, expiryCfg(), metrics.New(),
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1}, expiryCfg(), metrics.New(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	soon := time.Now().UTC().Unix() + 5
@@ -73,7 +73,7 @@ func TestAFillRacingTheExpiryRollDoesNotAbortTheCycle(t *testing.T) {
 // order that may still be resting.
 func TestOtherCancelErrorsStillAbortTheCycle(t *testing.T) {
 	client := &failingCancelClient{mockClient: mockClient{requiredWorstFee: "1000"}}
-	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001}, expiryCfg(), metrics.New(),
+	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1}, expiryCfg(), metrics.New(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	_, err := syncer.Sync(context.Background(),

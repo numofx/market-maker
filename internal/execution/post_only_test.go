@@ -30,7 +30,7 @@ func (p *postOnlyClient) PlaceLimitOrder(_ context.Context, req exchange.PlaceOr
 }
 
 func postOnlySyncer(client exchange.Client, postOnly bool) *Syncer {
-	return NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 0.000001},
+	return NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", MinSize: 1},
 		config.Config{CancelStaleOrderThreshold: 10, AdoptSizeTolerance: 0.000001, PostOnlyQuotes: postOnly},
 		metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }

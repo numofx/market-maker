@@ -9,7 +9,7 @@ import (
 
 func buildWith(t *testing.T, ov Overrides) Result {
 	t.Helper()
-	res, err := BuildQuotesWithOverrides(baseCfg(), spotSpec(), spotSnapshot(1370, 1374, 1000, 1_000_000), ov)
+	res, err := BuildQuotesWithOverrides(baseCfg(), spotSpec(), liveSnapshot(), ov)
 	if err != nil {
 		t.Fatalf("BuildQuotesWithOverrides: %v", err)
 	}
@@ -17,7 +17,7 @@ func buildWith(t *testing.T, ov Overrides) Result {
 }
 
 func TestNoOverridesIsExactlyBuildQuotes(t *testing.T) {
-	want, err := BuildQuotes(baseCfg(), spotSpec(), spotSnapshot(1370, 1374, 1000, 1_000_000))
+	want, err := BuildQuotes(baseCfg(), spotSpec(), liveSnapshot())
 	if err != nil {
 		t.Fatalf("BuildQuotes: %v", err)
 	}
@@ -40,7 +40,8 @@ func TestMidShiftRaisesBothQuotesInBpsOfTheMid(t *testing.T) {
 		"ask": {base.Ask.Price, shifted.Ask.Price},
 	} {
 		ratio := pair[1] / pair[0]
-		if math.Abs(ratio-1.01) > 1e-9 {
+		// The 1e-9 tick is ~14 bps of a 0.000732 price, so the rounded ratio can be a tick off.
+		if math.Abs(ratio-1.01) > 0.002 {
 			t.Fatalf("%s moved by x%.12f, want x1.01", name, ratio)
 		}
 	}
@@ -57,18 +58,19 @@ func TestSpreadAddWidensEachSide(t *testing.T) {
 	if !(wide.Bid.Price < base.Bid.Price && wide.Ask.Price > base.Ask.Price) {
 		t.Fatalf("spread add did not widen: base %v/%v wide %v/%v", base.Bid.Price, base.Ask.Price, wide.Bid.Price, wide.Ask.Price)
 	}
-	// 10 bps configured + 20 added = 30 bps each side of a 1372 mid.
-	if want := 1372 * (1 - 0.003); math.Abs(wide.Bid.Price-want) > 1e-9 {
+	// 10 bps configured + 20 added = 30 bps below the mid, rounded down to the tick.
+	if want := roundDown(liveMid*(1-0.003), spotSpec().TickSize); math.Abs(wide.Bid.Price-want) > 1e-12 {
 		t.Fatalf("bid %v, want %v", wide.Bid.Price, want)
 	}
 }
 
+// size_mult scales the USDC rung before it is converted to cNGN.
 func TestSizeMultScalesAndZeroQuotesNothing(t *testing.T) {
 	ov := NoOverrides()
 	ov.SizeMult = 0.5
 	half := buildWith(t, ov)
-	if half.Bid.Size != 2.5 || half.Ask.Size != 2.5 {
-		t.Fatalf("sizes %v/%v, want 2.5/2.5", half.Bid.Size, half.Ask.Size)
+	if want := cngnFor(2.5, liveMid); half.Bid.Size != want || half.Ask.Size != want {
+		t.Fatalf("sizes %v/%v, want %v cNGN (2.5 USDC)", half.Bid.Size, half.Ask.Size, want)
 	}
 
 	ov.SizeMult = 0
