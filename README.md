@@ -10,8 +10,9 @@ This bot keeps one market non-empty with one resting bid and one resting ask. It
 
 It supports one market per process. The intended symbols are:
 
-- `USDCcNGN-SPOT`
-- `USDCcNGN-APR30-2026`
+- `USDCcNGN-SPOT` (displayed by the venue as `cNGN-USDC`)
+- `USDCcNGN-PERP` (displayed as `cNGN-PERP`)
+- the dated `USDCcNGN-*-2026` futures (legacy; see Orientation)
 
 ## What The Bot Does
 
@@ -36,6 +37,57 @@ On each cycle it:
 7. computes one target bid and one target ask
 8. cancels stale or wrong orders
 9. places missing passive quotes using signed `POST /v1/orders` payloads
+
+## Orientation: cNGN-USDC
+
+The bot's internal model is the engine's, on every code path and whichever public contract the
+venue serves:
+
+- **price**: USDC per cNGN (~0.00073)
+- **size**: whole cNGN
+- **side**: `buy` is a buy of cNGN; on the perp a long is long the on-chain cNGN perp, and the
+  position is the engine's signed cNGN amount, long positive
+- **base / quote**: cNGN / USDC
+
+Orders are submitted engine-native (`side`, `limit_price`, `desired_amount`, no `order_entry_spec`
+or `ui_intent`), the book and the tape are read from their engine fields (`limit_price`,
+`desired_amount`, `price`, `size`, `aggressor_side`), and balances are read from the chain. None of
+that depends on how markets-service presents the market. The one place the presentation matters
+is `/v1/markets`, and `internal/exchange/orientation.go` is the only code that knows about it,
+keyed on each market's `order_entry_spec`:
+
+| `order_entry_spec` | venue presentation | `base_asset_symbol` / `quote_asset_symbol` | `mark_price_ui`, `index_price_ui`, `liquidation_price_ui` | `spot_contract.ui_intent` |
+| --- | --- | --- | --- | --- |
+| `cngn_usdc_spot_v1`, `cngn_usdc_perp_v1` | engine | cNGN / USDC, used as is | USDC per cNGN, used as is | the engine order |
+| `usdc_cngn_spot_v1`, `usdc_cngn_perp_v1` (production until the cutover) | inverted | USDC / cNGN, swapped on ingest | cNGN per USDC, inverted (1/x) on ingest | price 1/x, size × price, side flipped (`EngineOrderFromUIIntent`) |
+| unknown or missing | assumed engine; logged once per market | as served | used as is | as is |
+
+The perp's engine fields (`perp.mark_price`, `perp.index_price`) are USDC per cNGN under both
+contracts and are preferred when present; the `*_ui` fields are the fallback, converted through
+the market's orientation. Which presentation was read is logged at startup as
+`venue_orientation` and exposed on `/control/state` as `units`.
+
+The dated futures are untouched: they keep their own engine orientation (a price in cNGN per
+USDC, a size in USDC contracts, 0.001 lots), and so do the anchors that feed them
+(`MM_ANCHOR_*`, `cmd/fair-anchor`, `oracle_carry`).
+
+### Operator units on the cNGN markets
+
+The operator's configuration keeps the units it had, and the bot converts at the quote price:
+
+| Variable | Unit | Notes |
+| --- | --- | --- |
+| `MM_ORDER_SIZE` | USDC per rung | placed as that many USDC worth of cNGN at the reference, whole cNGN; `40` is ~54,900 cNGN at 0.000728 |
+| `MM_MAX_LONG_INVENTORY`, `MM_MAX_SHORT_INVENTORY`, `MM_MAX_NET_INVENTORY` | USDC | the cNGN held (spot) or the signed cNGN position (perp, long cNGN positive) valued at the reference. On spot this now bounds the **cNGN** leg: the old bot's inventory was the USDC held |
+| `MM_MAX_NOTIONAL_PER_SIDE` | cNGN | the most cNGN one side may rest, and the largest single rung; it has always been the cNGN amount of the order (production's `450000`), only the name predates it |
+| `MM_MIN_BASE_BALANCE` / `MM_MIN_QUOTE_BALANCE` | cNGN / USDC | base and quote are the engine's now; they were USDC / cNGN |
+| `MM_ADOPT_SIZE_TOLERANCE` | cNGN | the one-cNGN quantum floors it |
+| `MM_ANCHOR_FIXED_PRICE`, `MM_ANCHOR_URL` | cNGN per USDC | futures only; spot and the perp never read the generic anchor |
+| `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_*` | — | every provider delivers NGN per USD and is inverted to USDC per cNGN on ingest; bps guards are unit-free |
+
+Inventory is reported both ways: `mm_bot_net_inventory` (and `inv=` on the soak line) is cNGN,
+`mm_bot_net_inventory_usd` (`inv_usd=`) is the same at the reference. `mm_bot_inventory{asset=...}`
+is per asset in that asset's units.
 
 ## Repo Layout
 
@@ -205,15 +257,17 @@ The bot reads total balances from `SubAccounts.getAccountBalances(accountId)` an
 - `reserved`: open-order exposure inferred from active orders
 - `available`: `total - reserved`
 
-Sizing rules:
+Sizing rules (base cNGN, quote USDC):
 
-- bids are capped by available quote balance divided by bid price
-- asks are capped by available base balance
-- inventory caps still apply after available-balance capping
+- bids are capped by available USDC divided by the bid price, in cNGN
+- asks are capped by available cNGN
+- inventory caps (USDC at the reference) still apply after available-balance capping
+- every size is rounded down to a whole cNGN; a side whose budget is under 1 cNGN is suppressed
 
 ## Anchor Price And Fair Value
 
-The bot can consume an external anchor price:
+The bot can consume an external anchor price. Only a dated future reads it (spot prices off its
+book and the rate picker, the perp off its index), so it is in the future's own unit, cNGN per USDC:
 
 - `MM_ANCHOR_SOURCE_TYPE=none`
   - disables external anchor pricing
@@ -222,6 +276,9 @@ The bot can consume an external anchor price:
 - `MM_ANCHOR_SOURCE_TYPE=http`
   - fetches `MM_ANCHOR_URL?market=<symbol>`
   - accepts either `{"price":123.45}` or a plain numeric response body
+- `MM_ANCHOR_SOURCE_TYPE=oracle_carry`
+  - reads the on-chain cNGN feed (USDC per cNGN), inverts it to the future's cNGN per USDC and
+    applies `MM_CARRY_RATE_APR` to the market's expiry
 
 Reference price selection is:
 
@@ -275,7 +332,8 @@ Bootstrap settings:
   - `cngn-rate-picker`
     - a Go port of [`wrappedcbdc/cngn-rate-picker`](https://github.com/wrappedcbdc/cngn-rate-picker) (v0.2.2):
       NGN per USDT from its keyless providers in priority order, first success wins (the library's
-      threshold 1), each source failing over after 3 consecutive errors for 30s
+      threshold 1), each source failing over after 3 consecutive errors for 30s; the picked rate is
+      inverted to USDC per cNGN on ingest (both are logged on `rate picker quote`)
     - Quidax `usdtngn`: 1h TWAP of 1-minute closes, counting only candles that traded, refused when the
       last trade is over 6h old
     - Textile `USDT_NGN`: 1h TWAP of cleared trades, else the book mid, else the last price
@@ -313,7 +371,11 @@ For `cngn-price-oracle`, the bot reads the Base mainnet Chainlink cNGN/USD feed 
 
 - contract `0xdfbb5Cbc88E382de007bfe6CE99C388176ED80aD`
 - reference endpoint shape if you run the repo's API server yourself: `GET /api/price`
-- the bot converts the on-chain feed into `cNGN per USDC` before using it as the spot bootstrap mark
+- the feed answers USD per NGN, which is the bot's own USDC per cNGN: it is used as is (it used to
+  be inverted into cNGN per USDC)
+
+For `0x`, the quote is configured as a sale of USDC for cNGN (`price` is cNGN per USDC) and is
+inverted on ingest.
 
 When the active reference source is the external bootstrap anchor:
 
@@ -324,29 +386,34 @@ When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using
 
 ## USDCcNGN-PERP
 
-`MM_MARKET_SYMBOL=USDCcNGN-PERP` quotes the USDC-settled perp. The market kind comes from
-`/v1/markets` (`order_entry_spec: usdc_cngn_perp_v1`), not the symbol.
+`MM_MARKET_SYMBOL=USDCcNGN-PERP` quotes the USDC-settled cNGN perp (`cNGN-PERP`). The market kind
+comes from `/v1/markets` (`order_entry_spec: cngn_usdc_perp_v1`, or the older `usdc_cngn_perp_v1`),
+not the symbol.
 
-- **Orders** use spot's translation: a UI price in cNGN per USDC, a size in USDC, the engine price
-  inverted, and the side flipped. Engine amounts are whole NGN. The venue presents the perp's book
-  and trades exactly as it presents spot's.
+- **Orders** are the engine's: a price in USDC per cNGN, a size in whole cNGN, a bid is a long of
+  cNGN. The venue presents the perp's book and trades exactly as it presents spot's, and the bot
+  reads both from their engine fields.
 - **Wiring**, checked at startup against the `perp` object; the bot refuses to start if any of it
   is wrong:
   - `MM_TRADE_MODULE_ADDRESS` must be the perp's TradeModule;
   - that module's `quoteAsset()` must be the perp's cash;
   - `MM_SUBACCOUNT_ID` must sit under the perp SRM. It is a separate account from the spot bot's,
     funded with the perp's cash.
-- **Position and cash.** The base balance (USDC) is the position as a signed USD notional at the
-  index, where a UI long is positive (it is short the on-chain cNGN perp). The quote balance is the
-  cash. `MM_MAX_LONG_INVENTORY`, `MM_MAX_SHORT_INVENTORY` and `MM_ORDER_SIZE` are all in USDC.
+- **Position and cash.** The base balance (cNGN) is the position exactly as the engine holds it, a
+  signed cNGN amount, long cNGN positive. The quote balance (USDC) is the cash.
+  `MM_MAX_LONG_INVENTORY`, `MM_MAX_SHORT_INVENTORY` and `MM_ORDER_SIZE` are all in USDC: the
+  position is valued at the reference price before it is compared, and a rung is that many USDC of
+  cNGN. `perp account mapped` logs the position in both units.
 - **Reference.** Other traders' two-sided mid, clamped to the index ± `MM_PERP_MAX_BASIS_BPS`
-  (default 100, at most the mark feed's 200). With no two-sided book it is the index. The index is
-  the snapshot's anchor, so `MM_STALE_ANCHOR_TIMEOUT_SECONDS` halts on a `/v1/markets` that stopped
-  refreshing.
+  (default 100, at most the mark feed's 200). With no two-sided book it is the index, in USDC per
+  cNGN (`perp.index_price`, else `perp.index_price_ui` through the market's orientation). The index
+  is the snapshot's anchor, so `MM_STALE_ANCHOR_TIMEOUT_SECONDS` halts on a `/v1/markets` that
+  stopped refreshing.
 - **Size.** Each side is limited by the bot's own leverage cap, `MM_PERP_MAX_LEVERAGE` (default
   1.5x, at most the SRM's 3x). After a fill the bot's gross position stays within
-  cash × min(that, the SRM's max leverage). A bid may first buy back a short and an ask sell a
-  long. Opening size is also bounded by the room left under the OI cap; closing size is not.
+  cash × min(that, the SRM's max leverage), converted to cNGN at the reference. A bid may first buy
+  back a short and an ask sell a long. Opening size is also bounded by the room left under the OI
+  cap (`position_cap / 2 - open_interest`, in cNGN); closing size is not.
 - **Closed until launch.** While `/v1/markets` reports `trading_enabled: false`, both sides are
   suppressed with the reason `perp_trading_disabled`, unless `MM_PERP_QUOTE_WHILE_CLOSED=true`. Set
   that for the launch: the enable gate (`propose_perp_enable_batch.py`) needs a two-sided book of at
@@ -437,7 +504,7 @@ A JSON API for the operator terminal, served on `MM_CONTROL_ADDR` (default `127.
 | `POST /control/side` | `{"side":"bid"\|"ask","enabled","reason"}` | Pulling a side cancels that side's orders and suppresses it |
 | `POST /control/adjust` | `{"mid_shift_bps"?,"spread_add_bps"?,"size_mult"?,"reason"}` | Partial update. Bounds: `\|mid_shift_bps\| <= 200`, `spread_add_bps` in `[-(MM_HALF_SPREAD_BPS-1), 500]`, `size_mult` in `[0, 5]` |
 
-State precedence is `KILLED > PAUSED > HALTED > RUNNING`. Every change wakes the quoting loop instead of waiting for the next poll. Prices are cNGN per USDC, sizes are USDC, and `buy` is a bid for USDC. `not_found` on a kill means the order was already off the book (filled, cancelled, or mid-settlement). In `MM_DRY_RUN` nothing is sent: cancel results read `error: "dry run: cancel not sent"` and `last_actions` entries carry `dry_run: true`.
+State precedence is `KILLED > PAUSED > HALTED > RUNNING`. Every change wakes the quoting loop instead of waiting for the next poll. Prices are USDC per cNGN, sizes are cNGN, `buy` is a buy of cNGN (a perp long is long cNGN), and `positions` is keyed `cNGN` / `USDC` in those units (the perp's `cNGN` is the signed position). `config.order_size` and `config.max_net_inventory` are USDC, `config.max_notional_per_side` is cNGN; the response's `units` object says so per market. `not_found` on a kill means the order was already off the book (filled, cancelled, or mid-settlement). In `MM_DRY_RUN` nothing is sent: cancel results read `error: "dry run: cancel not sent"` and `last_actions` entries carry `dry_run: true`.
 
 **KILLED** survives an in-task restart (persisted in `MM_STATE_FILE` under `control`), but `/tmp` is ephemeral on Fargate, so a replaced task starts un-killed; the terminal re-asserts kill on connect. Even after a kill, orders already signed remain executable on-chain for up to `MM_ORDER_EXPIRY_SECONDS`. Side pulls and adjustments are not persisted.
 
@@ -461,11 +528,15 @@ go run ./cmd/mm-bot
 
 For futures markets (for example `USDCcNGN-APR30-2026`), run a local anchor service that derives fair value from spot:
 
-`fair = spot * exp(r * T) + carry_abs + spot * (carry_bps / 10000)`
+`fair = S * exp(r * T) + carry_abs + S * (carry_bps / 10000)`, with `S = 1 / spot`
 
 where:
 
-- `spot` comes from `USDCcNGN-SPOT` top-of-book mid (or last trade fallback)
+- `spot` is resolved in USDC per cNGN from StablesRail (quoted cNGN per USDC, inverted), else
+  `USDCcNGN-SPOT`'s top of book (`limit_price`, or a row's `ui_intent` through its own
+  `spot_contract.spec`), else its last trade; `S` is the same price in the future's cNGN per USDC
+- `/price?market=<future>` is cNGN per USDC and `/price?market=USDCcNGN-SPOT` is USDC per cNGN;
+  every response carries `price_unit` and `spot_unit`
 - `r` is `FAIR_ANCHOR_RATE_APR`
 - `T` is years until `FAIR_ANCHOR_EXPIRY_UTC`
 
@@ -670,10 +741,10 @@ The harness fails loudly with actionable errors if required services are missing
 - If the exchange changes `/v1/orders` payload validation or market metadata format, the client must be updated.
 - If the anchor source fails and neither top-of-book nor last trade can provide a local fallback, the bot halts.
 - For `USDCcNGN-SPOT`, if the local market has no two-sided book and has never traded, and the external bootstrap anchor is missing, stale, malformed, or rejected by the deviation guard, the bot halts with `reference price unavailable`.
-- A spot order is a whole-cNGN engine amount, so a side whose inventory is worth under 1 cNGN at its price cannot quote. That side is suppressed and logged every quoting cycle as `quote side suppressed` (`insufficient_base_capacity` for asks, `insufficient_quote_capacity` for bids) — the low-inventory alert — and the other side keeps quoting.
+- A cNGN-market order is a whole number of cNGN, so a side whose budget is under 1 cNGN (an ask with no cNGN, a bid with less USDC than one cNGN costs) cannot quote. That side is suppressed and logged every quoting cycle as `quote side suppressed` (`insufficient_base_capacity` for asks, `insufficient_quote_capacity` for bids) — the low-inventory alert — and the other side keeps quoting.
 - Available-balance accounting assumes open-order reserve semantics are:
-  - bid reserves quote asset `size * price`
-  - ask reserves base asset `size`
+  - bid reserves USDC `size * price`
+  - ask reserves cNGN `size`
 - Ownership is considered unambiguous only when the order matches the bot-managed order-id convention already used by this bot.
 - Reconciliation adopts at most one order per side. Any duplicates on a side are canceled rather than partially adopted.
 - The live integration harness requires an isolated market. If external orders remain in the book after cleanup, it aborts rather than running nondeterministically.
@@ -754,7 +825,11 @@ nothing: fills from `/v1/trades` (the bot's orders carry the `mm:USDCcNGN-PERP:`
 just before and after each fill from the index feed's `SpotPriceUpdated` events, a flag on fills
 followed within 60 s by an index move of more than 20 bps against the bot, realized P&L (cash against
 the starting cash) and unrealized P&L (`PerpAsset.getUnsettledAndUnrealizedCash`), and the account's
-inventory at every on-chain balance change (`SubAccounts.BalanceAdjusted`).
+inventory at every on-chain balance change (`SubAccounts.BalanceAdjusted`). Everything is in engine
+terms: prices and the index in USDC per cNGN, sizes and the position in cNGN, `buy cNGN` /
+`sell cNGN` for the bot's side. Fills are read from each trade's engine fields; a row carrying only a
+`ui_intent` is decoded through its own `spot_contract.spec`, so a window spanning the venue's
+cutover reads correctly on both sides of it.
 
 ```bash
 MM_RPC_URL=https://... go run ./cmd/perp-fill-report -from 24h
