@@ -14,8 +14,17 @@ import (
 // state.ReferenceTradeMaxAge, so it counts as a live local reference.
 var freshTradeAt = time.Unix(1_700_000_000, 0).UTC()
 
+// A funded spot account: 50,000 cNGN (~36 USDC) and 1,000 USDC, with the cNGN as the inventory
+// the way the loader reports it.
+func fundedPositions() map[string]state.AssetPosition {
+	return map[string]state.AssetPosition{
+		"cNGN": {Total: 50_000, Available: 50_000},
+		"USDC": {Total: 1_000, Available: 1_000},
+	}
+}
+
 func TestBuildQuotes(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := spotSpec()
 	cfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     50,
@@ -34,32 +43,26 @@ func TestBuildQuotes(t *testing.T) {
 		{
 			name: "mid from top of book",
 			snapshot: state.Snapshot{
-				BestBid:          1490,
-				BestAsk:          1510,
-				InventoryByAsset: map[string]float64{"USDC": 0},
-				Positions: map[string]state.AssetPosition{
-					"USDC": {Total: 100, Available: 100},
-					"cNGN": {Total: 100000, Available: 100000},
-				},
+				BestBid:          0.000720,
+				BestAsk:          0.000740,
+				InventoryByAsset: map[string]float64{"cNGN": 0},
+				Positions:        fundedPositions(),
 			},
-			wantRef: 1500,
-			wantBid: 1492.5,
-			wantAsk: 1507.5,
+			wantRef: 0.000730,
+			wantBid: 0.000730 * 0.995,
+			wantAsk: 0.000730 * 1.005,
 		},
 		{
 			name: "fallback to last trade",
 			snapshot: state.Snapshot{
 				LastMarketDataRefresh: freshTradeAt,
-				RecentTrades:          []exchange.Trade{{Price: 2000, CreatedAt: freshTradeAt}},
-				InventoryByAsset:      map[string]float64{"USDC": 0},
-				Positions: map[string]state.AssetPosition{
-					"USDC": {Total: 100, Available: 100},
-					"cNGN": {Total: 100000, Available: 100000},
-				},
+				RecentTrades:          []exchange.Trade{{Price: 0.000800, CreatedAt: freshTradeAt}},
+				InventoryByAsset:      map[string]float64{"cNGN": 0},
+				Positions:             fundedPositions(),
 			},
-			wantRef: 2000,
-			wantBid: 1990,
-			wantAsk: 2010,
+			wantRef: 0.000800,
+			wantBid: 0.000800 * 0.995,
+			wantAsk: 0.000800 * 1.005,
 		},
 	}
 
@@ -72,12 +75,18 @@ func TestBuildQuotes(t *testing.T) {
 			assertClose(t, got.ReferencePrice, tt.wantRef)
 			assertClose(t, got.Bid.Price, tt.wantBid)
 			assertClose(t, got.Ask.Price, tt.wantAsk)
+			// 10 USDC a rung, as whole cNGN at the reference.
+			if want := math.Floor(10 / tt.wantRef); got.Bid.Size != want || got.Ask.Size != want {
+				t.Fatalf("sizes %v/%v, want %v cNGN", got.Bid.Size, got.Ask.Size, want)
+			}
 		})
 	}
 }
 
+// Inventory is cNGN held. Long cNGN (relative to the USDC limits) leans both prices DOWN in USDC
+// per cNGN -- sell cNGN cheaper, bid for it lower -- and short leans up.
 func TestInventorySkewBehavior(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := spotSpec()
 	cfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     20,
@@ -85,15 +94,15 @@ func TestInventorySkewBehavior(t *testing.T) {
 		MaxLongInventory:  100,
 		MaxShortInventory: -100,
 	}
-	neutral, err := BuildQuotes(cfg, spec, state.Snapshot{
-		BestBid:          999,
-		BestAsk:          1001,
-		InventoryByAsset: map[string]float64{"USDC": 0},
-		Positions: map[string]state.AssetPosition{
-			"USDC": {Total: 100, Available: 100},
-			"cNGN": {Total: 100000, Available: 100000},
-		},
-	})
+	snapshot := func(inventoryCNGN float64) state.Snapshot {
+		return state.Snapshot{
+			BestBid:          0.000729,
+			BestAsk:          0.000731,
+			InventoryByAsset: map[string]float64{"cNGN": inventoryCNGN},
+			Positions:        fundedPositions(),
+		}
+	}
+	neutral, err := BuildQuotes(cfg, spec, snapshot(0))
 	if err != nil {
 		t.Fatalf("BuildQuotes() neutral error = %v", err)
 	}
@@ -102,21 +111,14 @@ func TestInventorySkewBehavior(t *testing.T) {
 		name      string
 		inventory float64
 	}{
-		{name: "long inventory moves quotes down", inventory: 80},
-		{name: "short inventory moves quotes up", inventory: -80},
+		// 80 USDC of cNGN at 0.00073 is ~109,600 cNGN.
+		{name: "long inventory moves quotes down", inventory: 80 / 0.00073},
+		{name: "short inventory moves quotes up", inventory: -80 / 0.00073},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := BuildQuotes(cfg, spec, state.Snapshot{
-				BestBid:          999,
-				BestAsk:          1001,
-				InventoryByAsset: map[string]float64{"USDC": tt.inventory},
-				Positions: map[string]state.AssetPosition{
-					"USDC": {Total: 100, Available: 100},
-					"cNGN": {Total: 100000, Available: 100000},
-				},
-			})
+			got, err := BuildQuotes(cfg, spec, snapshot(tt.inventory))
 			if err != nil {
 				t.Fatalf("BuildQuotes() error = %v", err)
 			}
@@ -133,8 +135,9 @@ func TestInventorySkewBehavior(t *testing.T) {
 	}
 }
 
+// An ask is capped by the cNGN held; a bid by the USDC held at the bid price.
 func TestAvailableBalanceCapsQuoteSize(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := spotSpec()
 	cfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     20,
@@ -143,25 +146,25 @@ func TestAvailableBalanceCapsQuoteSize(t *testing.T) {
 		MaxShortInventory: -100,
 	}
 	got, err := BuildQuotes(cfg, spec, state.Snapshot{
-		BestBid:          99,
-		BestAsk:          101,
-		InventoryByAsset: map[string]float64{"USDC": 0},
+		BestBid:          0.000729,
+		BestAsk:          0.000731,
+		InventoryByAsset: map[string]float64{"cNGN": 0},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Total: 1.3, Available: 1.3},
-			"cNGN": {Total: 250, Available: 250},
+			"cNGN": {Total: 1300, Available: 1300},
+			"USDC": {Total: 2.5, Available: 2.5},
 		},
 	})
 	if err != nil {
 		t.Fatalf("BuildQuotes() error = %v", err)
 	}
-	assertClose(t, got.Ask.Size, 1.3)
-	if got.Bid == nil || got.Bid.Size <= 0 {
-		t.Fatal("expected affordable bid")
+	assertClose(t, got.Ask.Size, 1300)
+	if got.Bid == nil || got.Bid.Size <= 0 || got.Bid.Size > math.Floor(2.5/got.Bid.Price) {
+		t.Fatalf("bid %+v, want one affordable with 2.5 USDC", got.Bid)
 	}
 }
 
 func TestExistingOpenOrdersReuseReservedCapacity(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := spotSpec()
 	cfg := config.Config{
 		OrderSize:         2,
 		HalfSpreadBPS:     50,
@@ -173,26 +176,22 @@ func TestExistingOpenOrdersReuseReservedCapacity(t *testing.T) {
 			SizeMultiplier:   1,
 		},
 	}
+	const ref = 1 / 1380.0
+	rung := math.Floor(2 / ref) // 2 USDC of cNGN
 	got, err := BuildQuotes(cfg, spec, state.Snapshot{
 		Market:              "USDCcNGN-SPOT",
-		ExternalAnchorPrice: 1380,
-		InventoryByAsset:    map[string]float64{"USDC": 0},
-		// The bot's own two resting orders are holding the entire balance: Available is 0, but
-		// Total still shows it, because Total is the raw subaccount balance. That capacity is
-		// reusable -- these orders are cancel-replaced every cycle -- so the budget is Total.
-		//
-		// Total: 0 with orders resting, which this fixture used to say, is a state the client
-		// cannot report: it derives Available as Total minus reservations.
+		ExternalAnchorPrice: ref,
+		InventoryByAsset:    map[string]float64{"cNGN": 0},
 		// The bot's own two resting orders hold the whole balance: Available is 0, and the client
 		// reports that capacity as Reusable because these orders are cancel-replaced each cycle.
 		// The budget is Available + Reusable, so the ladder can still be quoted at full size.
 		Positions: map[string]state.AssetPosition{
+			"cNGN": {Total: rung, Reserved: rung, Available: 0, Reusable: rung},
 			"USDC": {Total: 2, Reserved: 2, Available: 0, Reusable: 2},
-			"cNGN": {Total: 2800, Reserved: 2800, Available: 0, Reusable: 2800},
 		},
 		OpenOrders: []exchange.Order{
-			{ID: "bid-1", Side: exchange.SideBuy, Price: 1373.1, Size: 2},
-			{ID: "ask-1", Side: exchange.SideSell, Price: 1386.9, Size: 2},
+			{ID: "bid-1", Side: exchange.SideBuy, Price: ref * 0.995, Size: rung},
+			{ID: "ask-1", Side: exchange.SideSell, Price: ref * 1.005, Size: rung},
 		},
 	})
 	if err != nil {
@@ -201,23 +200,20 @@ func TestExistingOpenOrdersReuseReservedCapacity(t *testing.T) {
 	if got.Bid == nil || got.Ask == nil {
 		t.Fatalf("expected both quotes to remain targetable with reusable reserved capacity, got bid=%v ask=%v", got.Bid, got.Ask)
 	}
-	assertClose(t, got.Bid.Size, 2)
-	assertClose(t, got.Ask.Size, 2)
+	assertClose(t, got.Ask.Size, rung)
+	// 2 USDC buys slightly fewer cNGN at a bid above the reference... and slightly more below it;
+	// either way at least the rung the reserved USDC funded, rounded to whole cNGN.
+	if got.Bid.Size < rung-3 || got.Bid.Size > rung+3 {
+		t.Fatalf("bid size %v, want ~%v", got.Bid.Size, rung)
+	}
 }
 
 func TestQuoteSuppressionReasons(t *testing.T) {
-	spec := exchange.MarketSpec{
-		Symbol:       "USDCcNGN-SPOT",
-		BaseAsset:    "USDC",
-		QuoteAsset:   "cNGN",
-		AssetAddress: "0xe4b6e05b9910ab08a947a20faecc4524bf8a7f7e",
-		QuoteAddress: "0x1917960763bf3a0dfa10a05f0a112e828c1a934f",
-		TickSize:     0.01,
-		SizeStep:     0.1,
-		MinSize:      0.1,
-	}
+	spec := spotSpec()
+	spec.AssetAddress = "0x9d806fd040a719d27a8e5e77dc5ae0ed1e089493"
+	spec.QuoteAddress = "0x364058aff6f36e01505fb2cc870f8b6bd4835e84"
 	cfg := config.Config{
-		SubaccountID:      "6",
+		SubaccountID:      "26",
 		OrderSize:         5,
 		HalfSpreadBPS:     20,
 		MaxLongInventory:  100,
@@ -227,15 +223,16 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 			SizeMultiplier:   0.1,
 		},
 	}
+	const ref = 1 / 1353.0884
 
 	t.Run("no base inventory suppresses ask", func(t *testing.T) {
 		got, err := BuildQuotes(cfg, spec, state.Snapshot{
 			Market:              "USDCcNGN-SPOT",
-			ExternalAnchorPrice: 1353.0884,
-			InventoryByAsset:    map[string]float64{"USDC": 0},
+			ExternalAnchorPrice: ref,
+			InventoryByAsset:    map[string]float64{"cNGN": 0},
 			Positions: map[string]state.AssetPosition{
-				"USDC": {Total: 0, Available: 0},
-				"cNGN": {Total: 1000, Available: 1000},
+				"cNGN": {Total: 0, Available: 0},
+				"USDC": {Total: 1000, Available: 1000},
 			},
 		})
 		if err != nil {
@@ -247,19 +244,19 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 		if got.AskSuppression == nil || got.AskSuppression.Reason != "missing_spot_asset_inventory" {
 			t.Fatalf("ask suppression = %#v", got.AskSuppression)
 		}
-		if got.AskSuppression.SpotAssetAddress != spec.AssetAddress {
-			t.Fatalf("spot asset address = %q want %q", got.AskSuppression.SpotAssetAddress, spec.AssetAddress)
+		if got.AskSuppression.SpotAssetAddress != spec.AssetAddress || got.AskSuppression.BaseAsset != "cNGN" {
+			t.Fatalf("suppression names %q/%q, want the cNGN escrow", got.AskSuppression.SpotAssetAddress, got.AskSuppression.BaseAsset)
 		}
 	})
 
 	t.Run("reserved base suppresses ask with capacity reason", func(t *testing.T) {
 		got, err := BuildQuotes(cfg, spec, state.Snapshot{
 			Market:              "USDCcNGN-SPOT",
-			ExternalAnchorPrice: 1353.0884,
-			InventoryByAsset:    map[string]float64{"USDC": 365.57},
+			ExternalAnchorPrice: ref,
+			InventoryByAsset:    map[string]float64{"cNGN": 36557},
 			Positions: map[string]state.AssetPosition{
-				"USDC": {Total: 365.57, Reserved: 365.57, Available: 0},
-				"cNGN": {Total: 1000, Available: 1000},
+				"cNGN": {Total: 36557, Reserved: 36557, Available: 0},
+				"USDC": {Total: 1000, Available: 1000},
 			},
 		})
 		if err != nil {
@@ -271,19 +268,20 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 		if got.AskSuppression == nil || got.AskSuppression.Reason != "insufficient_base_capacity" {
 			t.Fatalf("ask suppression = %#v", got.AskSuppression)
 		}
-		if got.AskSuppression.TotalCapacity != 365.57 || got.AskSuppression.ReservedCapacity != 365.57 {
+		if got.AskSuppression.TotalCapacity != 36557 || got.AskSuppression.ReservedCapacity != 36557 {
 			t.Fatalf("ask capacity = total %v reserved %v", got.AskSuppression.TotalCapacity, got.AskSuppression.ReservedCapacity)
 		}
 	})
 
 	t.Run("insufficient quote capacity suppresses bid", func(t *testing.T) {
+		// 0.0005 USDC buys under one cNGN: the bid cannot be placed at all.
 		got, err := BuildQuotes(cfg, spec, state.Snapshot{
 			Market:              "USDCcNGN-SPOT",
-			ExternalAnchorPrice: 1353.0884,
-			InventoryByAsset:    map[string]float64{"USDC": 1},
+			ExternalAnchorPrice: ref,
+			InventoryByAsset:    map[string]float64{"cNGN": 1000},
 			Positions: map[string]state.AssetPosition{
-				"USDC": {Total: 1, Available: 1},
-				"cNGN": {Total: 100, Available: 100},
+				"cNGN": {Total: 1000, Available: 1000},
+				"USDC": {Total: 0.0005, Available: 0.0005},
 			},
 		})
 		if err != nil {
@@ -295,19 +293,19 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 		if got.BidSuppression == nil || got.BidSuppression.Reason != "insufficient_quote_capacity" {
 			t.Fatalf("bid suppression = %#v", got.BidSuppression)
 		}
-		if got.BidSuppression.AvailableCapacity != 100 {
-			t.Fatalf("available capacity = %v want 100", got.BidSuppression.AvailableCapacity)
+		if got.BidSuppression.AvailableCapacity != 0.0005 {
+			t.Fatalf("available capacity = %v want 0.0005", got.BidSuppression.AvailableCapacity)
 		}
 	})
 
 	t.Run("valid anchor and balances produce both sides", func(t *testing.T) {
 		got, err := BuildQuotes(cfg, spec, state.Snapshot{
 			Market:              "USDCcNGN-SPOT",
-			ExternalAnchorPrice: 1353.0884,
-			InventoryByAsset:    map[string]float64{"USDC": 5},
+			ExternalAnchorPrice: ref,
+			InventoryByAsset:    map[string]float64{"cNGN": 5000},
 			Positions: map[string]state.AssetPosition{
-				"USDC": {Total: 5, Available: 5},
 				"cNGN": {Total: 5000, Available: 5000},
+				"USDC": {Total: 5, Available: 5},
 			},
 		})
 		if err != nil {
@@ -320,7 +318,7 @@ func TestQuoteSuppressionReasons(t *testing.T) {
 }
 
 func TestOperatorModes(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := spotSpec()
 	baseCfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     20,
@@ -329,13 +327,10 @@ func TestOperatorModes(t *testing.T) {
 		MaxShortInventory: -100,
 	}
 	snapshot := state.Snapshot{
-		BestBid:          99,
-		BestAsk:          101,
-		InventoryByAsset: map[string]float64{"USDC": 0},
-		Positions: map[string]state.AssetPosition{
-			"USDC": {Total: 100, Available: 100},
-			"cNGN": {Total: 100000, Available: 100000},
-		},
+		BestBid:          0.000729,
+		BestAsk:          0.000731,
+		InventoryByAsset: map[string]float64{"cNGN": 0},
+		Positions:        fundedPositions(),
 	}
 
 	tests := []struct {
@@ -370,7 +365,7 @@ func TestOperatorModes(t *testing.T) {
 }
 
 func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := spotSpec()
 	cfg := config.Config{
 		OrderSize:                  10,
 		HalfSpreadBPS:              20,
@@ -389,16 +384,13 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 			name: "book beats external",
 			snapshot: state.Snapshot{
 				Market:               "USDCcNGN-SPOT",
-				BestBid:              1490,
-				BestAsk:              1510,
-				ExternalAnchorPrice:  1700,
+				BestBid:              0.000720,
+				BestAsk:              0.000740,
+				ExternalAnchorPrice:  0.000800,
 				LocalReferenceSource: "book",
-				Positions: map[string]state.AssetPosition{
-					"USDC": {Total: 100, Available: 100},
-					"cNGN": {Total: 100000, Available: 100000},
-				},
+				Positions:            fundedPositions(),
 			},
-			wantRef:    1500,
+			wantRef:    0.000730,
 			wantSource: "book",
 		},
 		{
@@ -406,15 +398,12 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 			snapshot: state.Snapshot{
 				Market:                "USDCcNGN-SPOT",
 				LastMarketDataRefresh: freshTradeAt,
-				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt}},
-				ExternalAnchorPrice:   1700,
+				RecentTrades:          []exchange.Trade{{Price: 0.000750, CreatedAt: freshTradeAt}},
+				ExternalAnchorPrice:   0.000800,
 				LocalReferenceSource:  "trade",
-				Positions: map[string]state.AssetPosition{
-					"USDC": {Total: 100, Available: 100},
-					"cNGN": {Total: 100000, Available: 100000},
-				},
+				Positions:             fundedPositions(),
 			},
-			wantRef:    1700,
+			wantRef:    0.000800,
 			wantSource: "external",
 		},
 		{
@@ -423,14 +412,11 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 			snapshot: state.Snapshot{
 				Market:                "USDCcNGN-SPOT",
 				LastMarketDataRefresh: freshTradeAt,
-				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
-				ExternalAnchorPrice:   1700,
-				Positions: map[string]state.AssetPosition{
-					"USDC": {Total: 100, Available: 100},
-					"cNGN": {Total: 100000, Available: 100000},
-				},
+				RecentTrades:          []exchange.Trade{{Price: 0.000750, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
+				ExternalAnchorPrice:   0.000800,
+				Positions:             fundedPositions(),
 			},
-			wantRef:    1700,
+			wantRef:    0.000800,
 			wantSource: "external",
 		},
 		{
@@ -439,13 +425,10 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 			snapshot: state.Snapshot{
 				Market:                "USDCcNGN-SPOT",
 				LastMarketDataRefresh: freshTradeAt,
-				RecentTrades:          []exchange.Trade{{Price: 1550, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
-				Positions: map[string]state.AssetPosition{
-					"USDC": {Total: 100, Available: 100},
-					"cNGN": {Total: 100000, Available: 100000},
-				},
+				RecentTrades:          []exchange.Trade{{Price: 0.000750, CreatedAt: freshTradeAt.Add(-10 * time.Minute)}},
+				Positions:             fundedPositions(),
 			},
-			wantRef:    1550,
+			wantRef:    0.000750,
 			wantSource: "trade",
 		},
 	}
@@ -465,7 +448,7 @@ func TestSpotLocalReferencePreferredOverExternal(t *testing.T) {
 }
 
 func TestExternalBootstrapMultipliersOnlyApplyWhenExternalActive(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := spotSpec()
 	cfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     20,
@@ -476,25 +459,22 @@ func TestExternalBootstrapMultipliersOnlyApplyWhenExternalActive(t *testing.T) {
 			SizeMultiplier:   0.5,
 		},
 	}
-	basePositions := map[string]state.AssetPosition{
-		"USDC": {Total: 100, Available: 100},
-		"cNGN": {Total: 100000, Available: 100000},
-	}
+	const ref = 0.000750
 
 	local, err := BuildQuotes(cfg, spec, state.Snapshot{
 		Market:               "USDCcNGN-SPOT",
-		BestBid:              1499,
-		BestAsk:              1501,
+		BestBid:              ref - 0.000001,
+		BestAsk:              ref + 0.000001,
 		LocalReferenceSource: "book",
-		Positions:            basePositions,
+		Positions:            fundedPositions(),
 	})
 	if err != nil {
 		t.Fatalf("local BuildQuotes() error = %v", err)
 	}
 	external, err := BuildQuotes(cfg, spec, state.Snapshot{
 		Market:              "USDCcNGN-SPOT",
-		ExternalAnchorPrice: 1500,
-		Positions:           basePositions,
+		ExternalAnchorPrice: ref,
+		Positions:           fundedPositions(),
 	})
 	if err != nil {
 		t.Fatalf("external BuildQuotes() error = %v", err)
@@ -505,12 +485,20 @@ func TestExternalBootstrapMultipliersOnlyApplyWhenExternalActive(t *testing.T) {
 	if !(external.Bid.Price < local.Bid.Price && external.Ask.Price > local.Ask.Price) {
 		t.Fatalf("expected wider external spread, local bid/ask=%v/%v external=%v/%v", local.Bid.Price, local.Ask.Price, external.Bid.Price, external.Ask.Price)
 	}
-	assertClose(t, external.Bid.Size, 5)
-	assertClose(t, external.Ask.Size, 5)
+	// Half of 10 USDC, as whole cNGN at the reference.
+	if want := math.Floor(5 / ref); external.Bid.Size != want || external.Ask.Size != want {
+		t.Fatalf("external sizes %v/%v, want %v cNGN", external.Bid.Size, external.Ask.Size, want)
+	}
+}
+
+// The dated futures keep their own orientation and units (cNGN per USDC, contracts); nothing about
+// the cNGN markets' reorientation touches them.
+func futureSpec() exchange.MarketSpec {
+	return exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
 }
 
 func TestNonSpotMarketsUnchangedAndStillPreferConfiguredAnchor(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := futureSpec()
 	cfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     20,
@@ -534,10 +522,12 @@ func TestNonSpotMarketsUnchangedAndStillPreferConfiguredAnchor(t *testing.T) {
 	if got.ReferenceSource != "none" {
 		t.Fatalf("reference source = %q want none for unchanged non-spot anchor path", got.ReferenceSource)
 	}
+	// Contracts, not a USDC conversion.
+	assertClose(t, got.Bid.Size, 10)
 }
 
 func TestCashMarginedFutureQuotesAskWithoutBaseInventory(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := futureSpec()
 	cfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     20,
@@ -575,7 +565,7 @@ func TestCashMarginedFutureQuotesAskWithoutBaseInventory(t *testing.T) {
 // resting order the size ballooned to ~restingNotional/price and grew every cycle (observed live:
 // 0.014 -> 0.126). The fix uses the stable cash Total.
 func TestCashMarginedFutureCapacityDoesNotRunAwayFromRestingOrders(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := futureSpec()
 	cfg := config.Config{OrderSize: 100, HalfSpreadBPS: 20, MaxLongInventory: 1000, MaxShortInventory: -1000}
 	got, err := BuildQuotes(cfg, spec, state.Snapshot{
 		Market:      spec.Symbol,
@@ -604,7 +594,7 @@ func TestCashMarginedFutureCapacityDoesNotRunAwayFromRestingOrders(t *testing.T)
 }
 
 func TestCashMarginedFutureAskGatedByShortInventoryLimit(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-APR30-2026", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1}
+	spec := futureSpec()
 	cfg := config.Config{
 		OrderSize:         10,
 		HalfSpreadBPS:     20,
@@ -634,15 +624,21 @@ func TestCashMarginedFutureAskGatedByShortInventoryLimit(t *testing.T) {
 
 func assertClose(t *testing.T, got, want float64) {
 	t.Helper()
-	if math.Abs(got-want) > 1e-6 {
+	tolerance := 1e-6
+	if want != 0 && math.Abs(want) < 1 {
+		// USDC-per-cNGN prices live around 7e-4; compare to a 1e-9 tick.
+		tolerance = 2e-9
+	}
+	if math.Abs(got-want) > tolerance {
 		t.Fatalf("got %v want %v", got, want)
 	}
 }
 
-// Live on 2026-09-14: the ask was left with 0.000682 USDC, worth under 1 cNGN, which the venue cannot
-// accept as a spot order. Quoting it failed the whole cycle; now only that side is suppressed.
+// Live on 2026-09-14: the bot held 0.000682 USDC, worth under 1 cNGN, which cannot fund a bid for
+// even one whole cNGN. Quoting it failed the whole cycle; now only that side is suppressed and the
+// cNGN-funded ask side keeps quoting.
 func TestSpotSideWorthLessThanOneCNGNIsSuppressedNotQuoted(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.000001, MinSize: 0.000001}
+	spec := spotSpec()
 	cfg := config.Config{
 		OrderSize:          1.2,
 		HalfSpreadBPS:      10,
@@ -654,12 +650,12 @@ func TestSpotSideWorthLessThanOneCNGNIsSuppressedNotQuoted(t *testing.T) {
 	}
 	snapshot := state.Snapshot{
 		Market:           "USDCcNGN-SPOT",
-		BestBid:          1333.97,
-		BestAsk:          1370,
-		InventoryByAsset: map[string]float64{"USDC": 0.000682},
+		BestBid:          1 / 1370.0,
+		BestAsk:          1 / 1333.97,
+		InventoryByAsset: map[string]float64{"cNGN": 8980},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Total: 0.000682, Available: 0.000682},
 			"cNGN": {Total: 8980, Available: 8980},
+			"USDC": {Total: 0.000682, Available: 0.000682},
 		},
 	}
 
@@ -667,29 +663,55 @@ func TestSpotSideWorthLessThanOneCNGNIsSuppressedNotQuoted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildQuotes() error = %v", err)
 	}
-	if got.Ask != nil || len(got.Asks) != 0 {
-		t.Fatalf("asks = %+v, want none: 0.000682 USDC is under 1 cNGN", got.Asks)
+	if got.Bid != nil || len(got.Bids) != 0 {
+		t.Fatalf("bids = %+v, want none: 0.000682 USDC buys under 1 cNGN", got.Bids)
 	}
-	if got.AskSuppression == nil || got.AskSuppression.Reason != "insufficient_base_capacity" {
-		t.Fatalf("ask suppression = %+v, want insufficient_base_capacity", got.AskSuppression)
+	if got.BidSuppression == nil || got.BidSuppression.Reason != "insufficient_quote_capacity" {
+		t.Fatalf("bid suppression = %+v, want insufficient_quote_capacity", got.BidSuppression)
 	}
-	if len(got.Bids) == 0 {
-		t.Fatal("bids suppressed too; the funded side must keep quoting")
+	if len(got.Asks) == 0 {
+		t.Fatal("asks suppressed too; the funded side must keep quoting")
 	}
-	for _, bid := range got.Bids {
-		if bid.Size*bid.Price < 1 {
-			t.Fatalf("bid %+v is worth %.6f cNGN, under the venue's 1 cNGN step", bid, bid.Size*bid.Price)
+	for _, ask := range got.Asks {
+		if ask.Size < 1 || ask.Size != math.Floor(ask.Size) {
+			t.Fatalf("ask %+v is not a whole number of cNGN", ask)
 		}
 	}
 }
 
-func TestMinQuoteSizeOnlyBindsSpot(t *testing.T) {
-	spot := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", SizeStep: 0.000001, MinSize: 0.000001}
-	if got := minQuoteSize(spot, 1351.985); got*1351.985 < 1 || got > 0.00074 {
-		t.Fatalf("spot min size = %v, want the smallest step worth at least 1 cNGN", got)
+func TestMinQuoteSizeIsOneCNGNOnTheCNGNMarkets(t *testing.T) {
+	if got := minQuoteSize(spotSpec()); got != 1 {
+		t.Fatalf("spot min size = %v, want 1 cNGN", got)
+	}
+	if got := minQuoteSize(perpSpec()); got != 1 {
+		t.Fatalf("perp min size = %v, want 1 cNGN", got)
 	}
 	future := exchange.MarketSpec{Symbol: "USDCcNGN-SEP16-2026", SizeStep: 0.1, MinSize: 0.1}
-	if got := minQuoteSize(future, 1351.985); got != 0.1 {
+	if got := minQuoteSize(future); got != 0.1 {
 		t.Fatalf("future min size = %v, want spec min 0.1", got)
+	}
+}
+
+// The operator's USDC sizes and limits are converted at the reference, once, and only on the
+// cNGN markets.
+func TestOperatorUnitsConvertAtTheReference(t *testing.T) {
+	if got := baseSize(spotSpec(), 40, 0.00073); got != 40/0.00073 {
+		t.Fatalf("baseSize = %v, want 40/0.00073", got)
+	}
+	if got := baseSize(futureSpec(), 40, 1370); got != 40 {
+		t.Fatalf("a future's size is contracts, got %v", got)
+	}
+	cfg := config.Config{MaxLongInventory: 6000, MaxShortInventory: -6000}
+	long, short := inventoryLimits(cfg, perpSpec(), 0.00073)
+	if long != 6000/0.00073 || short != -6000/0.00073 {
+		t.Fatalf("perp limits = %v/%v, want +/-6000 USDC in cNGN", long, short)
+	}
+	cfg = config.Config{MaxNetInventory: 800}
+	long, short = inventoryLimits(cfg, spotSpec(), 0.00073)
+	if long != 800/0.00073 || short != -800/0.00073 {
+		t.Fatalf("spot net limits = %v/%v", long, short)
+	}
+	if long, short := inventoryLimits(cfg, spotSpec(), 0); long != 0 || short != 0 {
+		t.Fatalf("no reference, no room: %v/%v", long, short)
 	}
 }

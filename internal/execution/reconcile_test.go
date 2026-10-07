@@ -15,7 +15,7 @@ import (
 )
 
 func TestReconcileStartup(t *testing.T) {
-	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN"}
+	spec := exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Config{
 		CancelStaleOrderThreshold: 5,
@@ -27,10 +27,10 @@ func TestReconcileStartup(t *testing.T) {
 	baseSnapshot := state.Snapshot{
 		Market:           spec.Symbol,
 		ReferencePrice:   100,
-		InventoryByAsset: map[string]float64{"USDC": 0},
+		InventoryByAsset: map[string]float64{"cNGN": 0},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Available: 50, Total: 50},
-			"cNGN": {Available: 10000, Total: 10000},
+			"cNGN": {Available: 50, Total: 50},
+			"USDC": {Available: 10000, Total: 10000},
 		},
 	}
 	quotes := strategy.Result{
@@ -125,10 +125,10 @@ func TestReconcileStartup(t *testing.T) {
 			snapshot: withOrders(state.Snapshot{
 				Market:           spec.Symbol,
 				ReferencePrice:   100,
-				InventoryByAsset: map[string]float64{"USDC": 0},
+				InventoryByAsset: map[string]float64{"cNGN": 0},
 				Positions: map[string]state.AssetPosition{
-					"USDC": {Available: 1, Total: 1},
-					"cNGN": {Available: 10, Total: 10},
+					"cNGN": {Available: 1, Total: 1},
+					"USDC": {Available: 10, Total: 10},
 				},
 			}, []exchange.Order{
 				{ID: "mm:USDCcNGN-SPOT:buy:10", Side: exchange.SideBuy, Price: 99.5, Size: 10, Managed: true},
@@ -137,8 +137,8 @@ func TestReconcileStartup(t *testing.T) {
 			quotes:       quotes,
 			wantCanceled: []string{"mm:USDCcNGN-SPOT:buy:10", "mm:USDCcNGN-SPOT:sell:11"},
 			wantRejects: map[string]string{
-				"mm:USDCcNGN-SPOT:buy:10":  "risk_halt:available base balance below threshold for USDC",
-				"mm:USDCcNGN-SPOT:sell:11": "risk_halt:available base balance below threshold for USDC",
+				"mm:USDCcNGN-SPOT:buy:10":  "risk_halt:available base balance below threshold for cNGN",
+				"mm:USDCcNGN-SPOT:sell:11": "risk_halt:available base balance below threshold for cNGN",
 			},
 		},
 	}

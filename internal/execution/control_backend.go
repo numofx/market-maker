@@ -94,6 +94,7 @@ func (b *Bot) markRunning() {
 func (b *Bot) publishView() {
 	view := control.BotView{
 		Market:              b.marketSymbol,
+		Units:               control.Units{Price: priceUnit(b.spec), Size: sizeUnit(b.spec), Side: sideMeaning(b.spec), OrderSize: orderSizeUnit(b.spec), Inventory: inventoryUnit(b.spec), MaxNotionalPerSide: notionalUnit(b.spec)},
 		OperatorMode:        string(b.cfg.OperatorMode),
 		DryRun:              b.cfg.DryRun,
 		Initialized:         b.initialized,
@@ -145,6 +146,34 @@ func (b *Bot) publishView() {
 	b.viewMu.Lock()
 	b.view = view
 	b.viewMu.Unlock()
+}
+
+func sideMeaning(spec exchange.MarketSpec) string {
+	if spec.CNGNDenominated() {
+		return "buy = buy cNGN (perp: long cNGN)"
+	}
+	return "engine side"
+}
+
+func orderSizeUnit(spec exchange.MarketSpec) string {
+	if spec.CNGNDenominated() {
+		return "USDC per rung, placed as whole cNGN at the quote price"
+	}
+	return "contracts"
+}
+
+func inventoryUnit(spec exchange.MarketSpec) string {
+	if spec.CNGNDenominated() {
+		return "USDC at the reference price (positions are reported in cNGN)"
+	}
+	return "contracts"
+}
+
+func notionalUnit(spec exchange.MarketSpec) string {
+	if spec.CNGNDenominated() {
+		return "cNGN"
+	}
+	return "quote notional"
 }
 
 func levelsView(ladder []strategy.Quote, best *strategy.Quote) []control.Level {

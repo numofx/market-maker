@@ -92,7 +92,7 @@ type Snapshot struct {
 	Perp *PerpSnapshot
 }
 
-// PerpSnapshot is one cycle's view of the perp, from /v1/markets.
+// PerpSnapshot is one cycle's view of the perp, from /v1/markets. Prices are USDC per cNGN.
 type PerpSnapshot struct {
 	// Reference is other traders' two-sided book mid clamped to IndexPrice +/- the basis band, or
 	// the index when the book is not two-sided. ReferenceSource says which ("book", "book_clamped",
@@ -102,7 +102,9 @@ type PerpSnapshot struct {
 	IndexPrice      float64
 	MarkPrice       float64
 	TradingEnabled  bool
-	// SideRoomUSD is how much more either side can open before the OI cap.
+	// SideRoomNGN is how much more either side can open before the OI cap, in cNGN; SideRoomUSD is
+	// the same room valued at the index.
+	SideRoomNGN float64
 	SideRoomUSD float64
 	MaxLeverage float64
 }

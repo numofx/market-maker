@@ -63,11 +63,14 @@ func (s *stubOracleFetcher) Fetch(context.Context) ExternalAnchorQuote {
 	return s.quote
 }
 
+// The oracle fetcher reports USDC per cNGN; the dated future it anchors is priced in cNGN per
+// USDC, so the source inverts once and applies the carry to that.
 func TestOracleCarryAnchorSource(t *testing.T) {
-	t.Run("returns carry-adjusted price", func(t *testing.T) {
+	const oracle = 1 / 1373.55
+	t.Run("returns carry-adjusted price in the future's cNGN per USDC", func(t *testing.T) {
 		expiry := time.Now().Add(56 * 24 * time.Hour).Unix()
 		source := &OracleCarryAnchorSource{
-			fetcher:    &stubOracleFetcher{quote: ExternalAnchorQuote{Price: 1373.55, Present: true, FetchedAt: time.Now()}},
+			fetcher:    &stubOracleFetcher{quote: ExternalAnchorQuote{Price: oracle, Present: true, FetchedAt: time.Now()}},
 			rateAPR:    0.08,
 			expiryUnix: expiry,
 			maxAge:     time.Hour,
@@ -76,14 +79,14 @@ func TestOracleCarryAnchorSource(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if price <= 1373.55 {
-			t.Fatalf("price = %v, want above spot (carry applied)", price)
+		if price <= 1373.55 || price > 1400 {
+			t.Fatalf("price = %v, want ~1390 cNGN per USDC (spot 1373.55 with carry)", price)
 		}
 	})
 
 	t.Run("rejects stale oracle data", func(t *testing.T) {
 		source := &OracleCarryAnchorSource{
-			fetcher: &stubOracleFetcher{quote: ExternalAnchorQuote{Price: 1373.55, Present: true, FetchedAt: time.Now().Add(-2 * time.Hour)}},
+			fetcher: &stubOracleFetcher{quote: ExternalAnchorQuote{Price: oracle, Present: true, FetchedAt: time.Now().Add(-2 * time.Hour)}},
 			maxAge:  time.Hour,
 		}
 		if _, err := source.GetAnchorPrice(context.Background(), "USDCcNGN-SEP16-2026"); err == nil {
@@ -99,7 +102,7 @@ func TestOracleCarryAnchorSource(t *testing.T) {
 	})
 
 	t.Run("throttles repeat fetches", func(t *testing.T) {
-		fetcher := &stubOracleFetcher{quote: ExternalAnchorQuote{Price: 1373.55, Present: true, FetchedAt: time.Now()}}
+		fetcher := &stubOracleFetcher{quote: ExternalAnchorQuote{Price: oracle, Present: true, FetchedAt: time.Now()}}
 		source := &OracleCarryAnchorSource{fetcher: fetcher, maxAge: time.Hour, refreshInterval: time.Minute}
 		for i := 0; i < 5; i++ {
 			if _, err := source.GetAnchorPrice(context.Background(), "x"); err != nil {

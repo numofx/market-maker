@@ -122,15 +122,28 @@ type Config struct {
 	MarketSymbol         string
 	PollInterval         time.Duration
 	QuoteRefreshInterval time.Duration
-	OrderSize            float64
-	HalfSpreadBPS        float64
-	InventorySkewBPS     float64
-	MaxLongInventory     float64
-	MaxShortInventory    float64
-	MinBaseBalance       float64
-	MinQuoteBalance      float64
-	MaxNotionalPerSide   float64
-	MaxNetInventory      float64
+	// Units on the cNGN markets (spot and the perp), where the bot prices in USDC per cNGN and
+	// sizes in whole cNGN:
+	//
+	//   - OrderSize is USDC per rung, placed as that many USDC worth of cNGN at the quote price.
+	//   - MaxLongInventory / MaxShortInventory / MaxNetInventory are USDC: the cNGN held (spot) or
+	//     the signed cNGN position (perp, long cNGN positive) valued at the reference price.
+	//   - MaxNotionalPerSide is a cNGN amount: the most cNGN one side may rest, and the largest
+	//     single order. (It has always been the cNGN amount of the order; the name predates it.)
+	//   - MinBaseBalance is cNGN and MinQuoteBalance is USDC -- the engine's base and quote.
+	//   - AdoptSizeTolerance is cNGN; the venue's one-cNGN quantum floors it anyway.
+	//
+	// A dated future keeps its own units: contracts for sizes and inventory, quote notional for
+	// MaxNotionalPerSide.
+	OrderSize          float64
+	HalfSpreadBPS      float64
+	InventorySkewBPS   float64
+	MaxLongInventory   float64
+	MaxShortInventory  float64
+	MinBaseBalance     float64
+	MinQuoteBalance    float64
+	MaxNotionalPerSide float64
+	MaxNetInventory    float64
 	// PerpMaxLeverage caps the bot's own perp exposure at this multiple of its cash, below the
 	// SRM's 3x: the bot's gross position after a fill may not exceed cash x this. It is the MM's
 	// own risk limit, separate from what the venue would let a trader open.
@@ -141,18 +154,21 @@ type Config struct {
 	// PerpQuoteWhileClosed lets the bot rest quotes while the perp is not yet enabled. The launch
 	// needs it: the enable gate requires a two-sided book before it opens the market, and the matcher
 	// skips a closed market, so nothing can fill until the vault opens it.
-	PerpQuoteWhileClosed         bool
-	MaxQuoteAge                  time.Duration
-	MaxAnchorDeviationBPS        float64
-	StaleMarketDataTimeout       time.Duration
-	StaleBalanceTimeout          time.Duration
-	StaleAnchorTimeout           time.Duration
-	MinQuoteLifetime             time.Duration
-	MinReplaceMoveBPS            float64
-	MaxCancelsPerMinute          int
-	CancelStaleOrderThreshold    float64
-	AdoptSizeTolerance           float64
-	OperatorMode                 OperatorMode
+	PerpQuoteWhileClosed      bool
+	MaxQuoteAge               time.Duration
+	MaxAnchorDeviationBPS     float64
+	StaleMarketDataTimeout    time.Duration
+	StaleBalanceTimeout       time.Duration
+	StaleAnchorTimeout        time.Duration
+	MinQuoteLifetime          time.Duration
+	MinReplaceMoveBPS         float64
+	MaxCancelsPerMinute       int
+	CancelStaleOrderThreshold float64
+	AdoptSizeTolerance        float64
+	OperatorMode              OperatorMode
+	// AnchorSourceType, AnchorURL and AnchorFixedPrice feed the generic anchor, which only a dated
+	// future consumes (spot prices off its book and the rate picker, the perp off its index). The
+	// futures are priced in cNGN per USDC, so an anchor price for one is cNGN per USDC.
 	AnchorSourceType             string
 	AnchorURL                    string
 	AnchorFixedPrice             float64

@@ -86,15 +86,15 @@ func TestCancelAllWithResultsReportsEachOrderAndOnlyTouchesTheRequestedSide(t *t
 func killHarness(t *testing.T, store *state.Store) (*Bot, *integrationClient, *control.Controller) {
 	t.Helper()
 	client := &integrationClient{
-		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN", TickSize: 0.01, SizeStep: 0.1, MinSize: 0.1},
-		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 99}}, Asks: []exchange.BookLevel{{Price: 101}}},
+		spec: exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC", TickSize: 0.0001, SizeStep: 1, MinSize: 1},
+		book: exchange.Book{Bids: []exchange.BookLevel{{Price: 0.99}}, Asks: []exchange.BookLevel{{Price: 1.01}}},
 		balances: []exchange.Balance{
-			{Asset: "USDC", Total: 50, Available: 50},
-			{Asset: "cNGN", Total: 10000, Available: 10000},
+			{Asset: "cNGN", Total: 50, Available: 50},
+			{Asset: "USDC", Total: 10000, Available: 10000},
 		},
 		mockClient: mockClient{openOrders: []exchange.Order{
-			{ID: "mm:USDCcNGN-SPOT:buy:10", Side: exchange.SideBuy, Price: 99.9, Size: 10, Managed: true, Nonce: "10"},
-			{ID: "mm:USDCcNGN-SPOT:sell:11", Side: exchange.SideSell, Price: 100.1, Size: 10, Managed: true, Nonce: "11"},
+			{ID: "mm:USDCcNGN-SPOT:buy:10", Side: exchange.SideBuy, Price: 0.999, Size: 10, Managed: true, Nonce: "10"},
+			{ID: "mm:USDCcNGN-SPOT:sell:11", Side: exchange.SideSell, Price: 1.001, Size: 10, Managed: true, Nonce: "11"},
 		}},
 	}
 	cfg := config.Config{

@@ -1,3 +1,9 @@
+// fair-anchor serves a carry-adjusted fair value for a dated USDC/cNGN future from a spot price.
+//
+// Orientation: spot is resolved in the engine's USDC per cNGN (what USDCcNGN-SPOT's book, trades
+// and the cNGN markets' public contract use); a dated future is priced in cNGN per USDC, so the
+// fair value it serves is cNGN per USDC. /price?market=<spot> returns USDC per cNGN. Each response
+// names its unit.
 package main
 
 import (
@@ -13,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/numofx/market-maker/internal/exchange"
 )
 
 type config struct {
@@ -40,17 +48,27 @@ type bookResponse struct {
 }
 
 type bookLevel struct {
-	LimitPrice   string        `json:"limit_price"`
-	SpotContract *spotContract `json:"spot_contract"`
+	Side          string        `json:"side"`
+	LimitPrice    string        `json:"limit_price"`
+	DesiredAmount string        `json:"desired_amount"`
+	SpotContract  *spotContract `json:"spot_contract"`
 }
 
 type spotContract struct {
+	Spec     string        `json:"spec"`
 	UIIntent *spotUIIntent `json:"ui_intent"`
 }
 
 type spotUIIntent struct {
+	Side  string `json:"side"`
 	Price string `json:"price"`
+	Size  string `json:"size"`
 }
+
+const (
+	unitUSDCPerCNGN = "USDC per cNGN"
+	unitCNGNPerUSDC = "cNGN per USDC"
+)
 
 type tradesResponse struct {
 	Trades []trade `json:"trades"`
@@ -62,8 +80,12 @@ type trade struct {
 }
 
 type anchorResponse struct {
-	Price       float64 `json:"price"`
-	Spot        float64 `json:"spot"`
+	Price float64 `json:"price"`
+	// PriceUnit is the unit of Price and Fair: cNGN per USDC for a future, USDC per cNGN for spot.
+	PriceUnit string  `json:"price_unit"`
+	Spot      float64 `json:"spot"`
+	// SpotUnit is always USDC per cNGN.
+	SpotUnit    string  `json:"spot_unit"`
 	Fair        float64 `json:"fair"`
 	Source      string  `json:"source"`
 	Market      string  `json:"market"`
@@ -132,7 +154,9 @@ func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,
 		"spot":             spot,
+		"spot_unit":        unitUSDCPerCNGN,
 		"fair":             fair,
+		"fair_unit":        unitCNGNPerUSDC,
 		"source":           source,
 		"market":           h.cfg.FuturesSymbol,
 		"expiry":           h.cfg.Expiry.UTC().Format(time.RFC3339),
@@ -163,11 +187,13 @@ func (h *handler) price(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The spot anchor is the resolved spot price itself — no carry adjustment.
+	// The spot anchor is the resolved spot price itself — no carry adjustment, USDC per cNGN.
 	if market == h.cfg.SpotSymbol {
 		writeJSON(w, http.StatusOK, anchorResponse{
 			Price:       spot,
+			PriceUnit:   unitUSDCPerCNGN,
 			Spot:        spot,
+			SpotUnit:    unitUSDCPerCNGN,
 			Fair:        spot,
 			Source:      source,
 			Market:      market,
@@ -184,7 +210,9 @@ func (h *handler) price(w http.ResponseWriter, r *http.Request) {
 
 	resp := anchorResponse{
 		Price:       fair,
+		PriceUnit:   unitCNGNPerUSDC,
 		Spot:        spot,
+		SpotUnit:    unitUSDCPerCNGN,
 		Fair:        fair,
 		Source:      source,
 		Market:      market,
@@ -198,12 +226,19 @@ func (h *handler) price(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// computeFair is the future's fair value in cNGN per USDC from a spot in USDC per cNGN: the
+// future's own orientation, with the carry (the naira's rate over the dollar's) raising the naira
+// price of a dollar toward expiry. FAIR_ANCHOR_CARRY_ABS is cNGN per USDC.
 func (h *handler) computeFair(spot float64) (float64, float64) {
 	tYears := time.Until(h.cfg.Expiry).Seconds() / (365.0 * 24.0 * 3600.0)
 	if tYears < 0 {
 		tYears = 0
 	}
-	return tYears, spot*math.Exp(h.cfg.RateAPR*tYears) + h.cfg.CarryAbsolute + spot*(h.cfg.CarryBPS/10000.0)
+	if !(spot > 0) {
+		return tYears, 0
+	}
+	cngnPerUSDC := 1 / spot
+	return tYears, cngnPerUSDC*math.Exp(h.cfg.RateAPR*tYears) + h.cfg.CarryAbsolute + cngnPerUSDC*(h.cfg.CarryBPS/10000.0)
 }
 
 func (h *handler) resolveSpot(ctx context.Context, allowOwnBook bool) (float64, string, bool, error) {
@@ -218,10 +253,10 @@ func (h *handler) resolveSpot(ctx context.Context, allowOwnBook bool) (float64, 
 	return 0, "", false, err
 }
 
-// fetchSpot resolves the external spot price. allowOwnBook gates the fallback to our
-// own spot book/trades: it is safe when anchoring the futures market, but for the
-// spot market itself it would be circular — the MM would anchor to its own resting
-// quotes, self-confirming any price and defeating the staleness/deviation guards —
+// fetchSpot resolves the external spot price in USDC per cNGN. allowOwnBook gates the
+// fallback to our own spot book/trades: it is safe when anchoring the futures market,
+// but for the spot market itself it would be circular — the MM would anchor to its own
+// resting quotes, self-confirming any price and defeating the staleness/deviation guards —
 // so spot-anchor callers must pass false and fail instead.
 func (h *handler) fetchSpot(ctx context.Context, allowOwnBook bool) (float64, string, error) {
 	var strailsErr error
@@ -257,6 +292,7 @@ func (h *handler) fetchSpot(ctx context.Context, allowOwnBook bool) (float64, st
 	if len(trades) == 0 {
 		return 0, "", fmt.Errorf("spot source unavailable: empty spot book and no trades")
 	}
+	// A trade's price is the engine's, USDC per cNGN, under either presentation.
 	spotPrice, err := strconv.ParseFloat(strings.TrimSpace(trades[0].Price), 64)
 	if err != nil || spotPrice <= 0 {
 		return 0, "", fmt.Errorf("invalid spot trade price: %q", trades[0].Price)
@@ -279,17 +315,18 @@ type strailsBookResponse struct {
 	} `json:"data"`
 }
 
-// Plausibility bounds for cNGN per USDC; anything outside indicates an inverted or
-// scaled quote and must not anchor our quotes. Mirrors the trading-app guard.
+// Plausibility bounds for StablesRail's cNGN-per-USDC quotes; anything outside indicates an
+// inverted or scaled quote and must not anchor our quotes. Mirrors the trading-app guard.
 const (
 	strailsMinPlausiblePrice = 100
 	strailsMaxPlausiblePrice = 100000
 )
 
 // fetchStrailsMid anchors the spot market to StablesRail's live FX orderbook mid.
-// StablesRail is an LP quote board, so sides can cross or empty out; every failure
-// mode returns an error so callers fall back (and the MM suppresses quotes) instead
-// of anchoring to a broken price.
+// StablesRail quotes cNGN per USDC; the mid is checked for plausibility in that unit and
+// returned in USDC per cNGN. StablesRail is an LP quote board, so sides can cross or empty
+// out; every failure mode returns an error so callers fall back (and the MM suppresses
+// quotes) instead of anchoring to a broken price.
 func (h *handler) fetchStrailsMid(ctx context.Context) (float64, error) {
 	u := strings.TrimRight(h.cfg.StrailsAPIURL, "/") + "/fx/orderbook?pair=" + url.QueryEscape(h.cfg.StrailsPair) + "&limit=10"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -324,7 +361,7 @@ func (h *handler) fetchStrailsMid(ctx context.Context) (float64, error) {
 	if bestBid >= bestAsk {
 		return 0, fmt.Errorf("strails book is crossed: bid %v ask %v", bestBid, bestAsk)
 	}
-	return (bestBid + bestAsk) / 2.0, nil
+	return 1 / ((bestBid + bestAsk) / 2.0), nil
 }
 
 // bestStrailsPrice scans a quote-board side because StablesRail does not guarantee
@@ -360,14 +397,19 @@ func topBookPrice(levels []bookLevel) (float64, bool) {
 	return 0, false
 }
 
+// parsePresentedBookPrice is a book level's price in USDC per cNGN. limit_price is the engine's
+// under either presentation and is preferred; a row carrying only a ui_intent is decoded through
+// its own spot_contract.spec, so an inverted (usdc_cngn_*) row is inverted and an engine
+// (cngn_usdc_*) row is taken as is.
 func parsePresentedBookPrice(level bookLevel) (float64, bool) {
-	if level.SpotContract != nil && level.SpotContract.UIIntent != nil {
-		if p, err := strconv.ParseFloat(strings.TrimSpace(level.SpotContract.UIIntent.Price), 64); err == nil && p > 0 {
-			return p, true
-		}
-	}
 	if p, err := strconv.ParseFloat(strings.TrimSpace(level.LimitPrice), 64); err == nil && p > 0 {
 		return p, true
+	}
+	if level.SpotContract != nil && level.SpotContract.UIIntent != nil {
+		intent := level.SpotContract.UIIntent
+		if _, price, _, err := exchange.EngineOrderFromUIIntent(level.SpotContract.Spec, intent.Side, intent.Price, intent.Size); err == nil && price > 0 {
+			return price, true
+		}
 	}
 	return 0, false
 }

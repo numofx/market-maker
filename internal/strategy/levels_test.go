@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"math"
 	"testing"
 
 	"github.com/numofx/market-maker/internal/config"
@@ -8,19 +9,23 @@ import (
 	"github.com/numofx/market-maker/internal/state"
 )
 
+// spotSpec is USDCcNGN-SPOT as the client loads it: cNGN the base, USDC the quote, priced in USDC
+// per cNGN, sized in whole cNGN. The tick is coarsened from the venue's 1e-18 so expected prices
+// can be written down.
 func spotSpec() exchange.MarketSpec {
 	return exchange.MarketSpec{
 		Symbol:     "USDCcNGN-SPOT",
-		BaseAsset:  "USDC",
-		QuoteAsset: "cNGN",
-		TickSize:   0.000000000000000001,
-		SizeStep:   0.000001,
-		MinSize:    0.000001,
+		BaseAsset:  "cNGN",
+		QuoteAsset: "USDC",
+		TickSize:   0.000000001,
+		SizeStep:   1,
+		MinSize:    1,
 	}
 }
 
-// A funded snapshot with a local mid so the reference resolves without an anchor.
-func spotSnapshot(bid, ask, usdc, cngn float64) state.Snapshot {
+// A funded snapshot with a local mid so the reference resolves without an anchor. cngn is the
+// cNGN held (the inventory), usdc the USDC held.
+func spotSnapshot(bid, ask, cngn, usdc float64) state.Snapshot {
 	return state.Snapshot{
 		Market:               "USDCcNGN-SPOT",
 		BestBid:              bid,
@@ -28,13 +33,15 @@ func spotSnapshot(bid, ask, usdc, cngn float64) state.Snapshot {
 		LocalReferencePrice:  (bid + ask) / 2,
 		LocalReferenceSource: "book",
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Total: usdc, Available: usdc},
 			"cNGN": {Total: cngn, Available: cngn},
+			"USDC": {Total: usdc, Available: usdc},
 		},
-		InventoryByAsset: map[string]float64{"USDC": 0, "cNGN": cngn},
+		InventoryByAsset: map[string]float64{"cNGN": cngn, "USDC": usdc},
 	}
 }
 
+// baseCfg: 5 USDC a rung, +/- 1000 USDC of inventory. The operator's units are USDC; the ladder
+// is placed in cNGN at the reference.
 func baseCfg() config.Config {
 	return config.Config{
 		HalfSpreadBPS:      10,
@@ -47,10 +54,22 @@ func baseCfg() config.Config {
 	}
 }
 
+// The production market: ~0.000730 / 0.000734 USDC per cNGN, a bot holding 50 cNGN (36 USDC at
+// the mid, inside the inventory bound) and 1,000 USDC.
+const (
+	liveBid = 0.000730
+	liveAsk = 0.000734
+	liveMid = (liveBid + liveAsk) / 2
+)
+
+func liveSnapshot() state.Snapshot { return spotSnapshot(liveBid, liveAsk, 50_000, 1_000) }
+
+// cngnFor is a USDC size in whole cNGN at a price.
+func cngnFor(usdc, price float64) float64 { return math.Floor(usdc / price) }
+
 func TestBuildQuotes_SingleLevelUnchanged(t *testing.T) {
 	cfg := baseCfg()
-	snap := spotSnapshot(1370, 1374, 1000, 1_000_000)
-	res, err := BuildQuotes(cfg, spotSpec(), snap)
+	res, err := BuildQuotes(cfg, spotSpec(), liveSnapshot())
 	if err != nil {
 		t.Fatalf("BuildQuotes: %v", err)
 	}
@@ -66,15 +85,31 @@ func TestBuildQuotes_SingleLevelUnchanged(t *testing.T) {
 	}
 }
 
+// 5 USDC a rung at ~0.000732 is ~6,830 cNGN, a whole number of them.
+func TestBuildQuotes_SizesAreWholeCNGNWorthTheConfiguredUSDC(t *testing.T) {
+	res, err := BuildQuotes(baseCfg(), spotSpec(), liveSnapshot())
+	if err != nil {
+		t.Fatalf("BuildQuotes: %v", err)
+	}
+	want := cngnFor(5, liveMid)
+	for _, q := range []*Quote{res.Bid, res.Ask} {
+		if q == nil || q.Size != want || q.Size != math.Floor(q.Size) {
+			t.Fatalf("quote %+v, want %v whole cNGN (5 USDC at %v)", q, want, liveMid)
+		}
+	}
+	if res.Bid.Price >= liveMid || res.Ask.Price <= liveMid {
+		t.Fatalf("quotes %v / %v do not straddle the mid %v", res.Bid.Price, res.Ask.Price, liveMid)
+	}
+}
+
 func TestBuildQuotes_LadderStepsOutwardWithBoundedSize(t *testing.T) {
 	cfg := baseCfg()
 	cfg.QuoteLevels = 4
 	cfg.LevelSpreadStepBPS = 20
 	cfg.OrderSize = 3
 	cfg.MaxNotionalPerSide = 0 // capacity-only limit
-	// 1000 USDC and 1e6 cNGN — plenty for a few 3-USDC levels per side.
-	snap := spotSnapshot(1370, 1374, 1000, 1_000_000)
-	res, err := BuildQuotes(cfg, spotSpec(), snap)
+	// 50,000 cNGN and 1,000 USDC: plenty for a few 3-USDC levels per side.
+	res, err := BuildQuotes(cfg, spotSpec(), liveSnapshot())
 	if err != nil {
 		t.Fatalf("BuildQuotes: %v", err)
 	}
@@ -96,36 +131,38 @@ func TestBuildQuotes_LadderStepsOutwardWithBoundedSize(t *testing.T) {
 	}
 }
 
-func TestBuildQuotes_LadderRespectsNotionalCap(t *testing.T) {
+// MM_MAX_NOTIONAL_PER_SIDE is a cNGN amount on the cNGN markets (what production's 450000 has
+// always meant): the side's whole ladder, and any one rung, stays under it.
+func TestBuildQuotes_LadderRespectsNotionalCapInCNGN(t *testing.T) {
 	cfg := baseCfg()
 	cfg.QuoteLevels = 5
 	cfg.LevelSpreadStepBPS = 15
-	cfg.OrderSize = 4
-	cfg.MaxNotionalPerSide = 20 // ~ cap total bid notional; at ~1370, max ~0.0146 USDC/... capacity-bound
-	snap := spotSnapshot(1370, 1374, 1000, 1_000_000)
-	res, err := BuildQuotes(cfg, spotSpec(), snap)
+	cfg.OrderSize = 4 // ~5,460 cNGN a rung
+	cfg.MaxNotionalPerSide = 12_000
+	res, err := BuildQuotes(cfg, spotSpec(), liveSnapshot())
 	if err != nil {
 		t.Fatalf("BuildQuotes: %v", err)
 	}
-	// Sum of bid sizes must not exceed the per-side notional budget / price.
 	var totalBid float64
 	for _, q := range res.Bids {
 		totalBid += q.Size
 	}
-	maxBid := cfg.MaxNotionalPerSide / res.Bids[0].Price
-	if totalBid > maxBid+1e-9 {
-		t.Fatalf("total bid size %v exceeds notional budget %v", totalBid, maxBid)
+	if totalBid > cfg.MaxNotionalPerSide+1e-9 || len(res.Bids) == 0 {
+		t.Fatalf("total bid size %v cNGN exceeds the per-side cap %v", totalBid, cfg.MaxNotionalPerSide)
+	}
+	if len(res.Bids) >= 5 {
+		t.Fatalf("%d bid levels; a 12,000 cNGN budget cannot fund five ~5,460 cNGN rungs", len(res.Bids))
 	}
 }
 
+// MM_MAX_NET_INVENTORY is USDC: cumulative bids stop where the cNGN held would be worth more.
 func TestBuildQuotes_LadderRespectsInventoryLimit(t *testing.T) {
 	cfg := baseCfg()
 	cfg.QuoteLevels = 6
 	cfg.LevelSpreadStepBPS = 10
 	cfg.OrderSize = 5
-	cfg.MaxNetInventory = 12 // caps cumulative long build-up
-	snap := spotSnapshot(1370, 1374, 10_000, 1_000_000)
-	res, err := BuildQuotes(cfg, spotSpec(), snap)
+	cfg.MaxNetInventory = 48 // 36.6 USDC held already; room for ~2 rungs of 5
+	res, err := BuildQuotes(cfg, spotSpec(), liveSnapshot())
 	if err != nil {
 		t.Fatalf("BuildQuotes: %v", err)
 	}
@@ -133,7 +170,15 @@ func TestBuildQuotes_LadderRespectsInventoryLimit(t *testing.T) {
 	for _, q := range res.Bids {
 		totalBid += q.Size
 	}
-	if totalBid > cfg.MaxNetInventory+1e-9 {
-		t.Fatalf("cumulative bid size %v exceeds net inventory cap %v", totalBid, cfg.MaxNetInventory)
+	held := 50_000.0
+	if (held+totalBid)*liveMid > cfg.MaxNetInventory+1e-9 {
+		t.Fatalf("held + bids = %v cNGN = %.2f USDC, over the %v USDC cap", held+totalBid, (held+totalBid)*liveMid, cfg.MaxNetInventory)
+	}
+	// Two full 5 USDC rungs and a partial third fill the 11.4 USDC of headroom; never all six.
+	if len(res.Bids) == 0 || len(res.Bids) >= 6 {
+		t.Fatalf("%d bid levels, want the ladder truncated by an 11.4 USDC headroom", len(res.Bids))
+	}
+	if len(res.Asks) == 0 {
+		t.Fatal("the ask side is not bounded by the long limit")
 	}
 }

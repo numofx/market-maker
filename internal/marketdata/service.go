@@ -112,8 +112,9 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 	return snapshot, nil
 }
 
-// loadPerp prices the perp off its index. The venue publishes the index (the rate-picker sources'
-// TWAP) and a mark that is the book mid clamped to index +/- 200bps; the bot follows other traders'
+// loadPerp prices the perp off its index, in USDC per cNGN (the exchange client has already read it
+// through the venue's presentation). The venue publishes the index (the rate-picker sources' TWAP)
+// and a mark that is the book mid clamped to index +/- 200bps; the bot follows other traders'
 // two-sided mid inside a tighter band, and the index otherwise. The index is also the snapshot's
 // anchor, so the stale-anchor guard halts the bot when /v1/markets stops refreshing it.
 func (l *Loader) loadPerp(ctx context.Context, snapshot state.Snapshot) (state.Snapshot, error) {
@@ -121,21 +122,22 @@ func (l *Loader) loadPerp(ctx context.Context, snapshot state.Snapshot) (state.S
 	if err != nil {
 		return state.Snapshot{}, &LoadError{Stage: "perp_state", Err: fmt.Errorf("get market: %w", err)}
 	}
-	if spec.Perp == nil || spec.Perp.IndexPriceUI <= 0 {
+	if spec.Perp == nil || spec.Perp.IndexPrice <= 0 {
 		return state.Snapshot{}, &LoadError{Stage: "perp_state", Err: fmt.Errorf("%s has no index in /v1/markets (feeds stale?)", spec.Symbol)}
 	}
 	perp := spec.Perp
-	reference, source := PerpReference(snapshot.BestBid, snapshot.BestAsk, perp.IndexPriceUI, l.perpMaxBasisBPS)
+	reference, source := PerpReference(snapshot.BestBid, snapshot.BestAsk, perp.IndexPrice, l.perpMaxBasisBPS)
 	snapshot.Perp = &state.PerpSnapshot{
 		Reference:       reference,
 		ReferenceSource: source,
-		IndexPrice:      perp.IndexPriceUI,
-		MarkPrice:       perp.MarkPriceUI,
+		IndexPrice:      perp.IndexPrice,
+		MarkPrice:       perp.MarkPrice,
 		TradingEnabled:  perp.TradingEnabled,
+		SideRoomNGN:     perp.SideRoomNGN(),
 		SideRoomUSD:     perp.SideRoomUSD(),
 		MaxLeverage:     perp.MaxLeverage,
 	}
-	snapshot.AnchorPrice = perp.IndexPriceUI
+	snapshot.AnchorPrice = perp.IndexPrice
 	snapshot.AnchorSource = "perp_index"
 	snapshot.LastAnchorRefresh = perp.FetchedAt
 	return snapshot, nil

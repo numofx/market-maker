@@ -207,7 +207,9 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) fetchRatePicker(ctx context.Context) 
 	if err != nil {
 		return ExternalAnchorQuote{}, err
 	}
-	attrs := []any{"market", "USDCcNGN-SPOT", "provider", used.Provider, "price", used.Price}
+	// The sources quote NGN per USDT; the bot prices in USDC per cNGN. Both are logged.
+	usdcPerCNGN := 1 / used.Price
+	attrs := []any{"market", "USDCcNGN-SPOT", "provider", used.Provider, "ngn_per_usdt", used.Price, "usdc_per_cngn", usdcPerCNGN}
 	for _, result := range all {
 		if result.Err != nil {
 			attrs = append(attrs, result.Provider, "error: "+result.Err.Error())
@@ -217,7 +219,7 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) fetchRatePicker(ctx context.Context) 
 	}
 	slog.Info("rate picker quote", attrs...)
 	return ExternalAnchorQuote{
-		Price:            used.Price,
+		Price:            usdcPerCNGN,
 		Present:          true,
 		FetchedAt:        time.Now().UTC(),
 		RefreshAttempted: true,

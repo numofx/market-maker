@@ -160,13 +160,17 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 		AnchorPrice:          snapshot.AnchorPrice,
 	}
 	if ref <= 0 {
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "no_anchor", 0, 0, 0, 0, 0, 0, 0, false)
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "no_anchor", 0, 0, 0, 0, 0, 0, 0, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "no_anchor", 0, 0, 0, 0, 0, 0, 0, 0, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "no_anchor", 0, 0, 0, 0, 0, 0, 0, 0, false)
 		return result, nil
 	}
 
+	// Inventory is the base asset in the engine's units: cNGN held on spot, the signed cNGN
+	// position on the perp (long cNGN positive), contracts on a future. The operator's limits are
+	// USDC on the cNGN markets, so they are converted to cNGN at the market reference here, once.
 	inventory := snapshot.Inventory(spec.BaseAsset)
-	skewBPS := inventorySkew(inventory, cfg.MaxLongInventory, cfg.MaxShortInventory, cfg.InventorySkewBPS)
+	maxLong, maxShort := inventoryLimits(cfg, spec, ref)
+	skewBPS := inventorySkew(inventory, maxLong, maxShort, cfg.InventorySkewBPS)
 	halfSpreadBPS := cfg.HalfSpreadBPS
 	orderSize := cfg.OrderSize
 	if snapshot.Market == "USDCcNGN-SPOT" && refSource == "external" {
@@ -175,6 +179,8 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	}
 	halfSpreadBPS += ov.SpreadAddBPS
 	orderSize *= ov.SizeMult
+	// MM_ORDER_SIZE is USDC per rung on the cNGN markets; a rung is placed as whole cNGN.
+	orderSize = baseSize(spec, orderSize, ref)
 	halfSpread := halfSpreadBPS / 10000.0
 	skew := skewBPS / 10000.0
 	pricingRef := ref * (1 + ov.MidShiftBPS/10000.0)
@@ -226,39 +232,49 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 		quoteAvailable = quotePosition.Available + quotePosition.Reusable
 	}
 
+	// Capacity in base units: a bid can buy quoteAvailable / price of the base, an ask can sell
+	// what is held. The same arithmetic in every orientation -- the quote is USDC and the price is
+	// USDC per cNGN, so the quotient is cNGN.
 	maxBidSize := quoteAvailable / bidPrice
 	maxAskSize := baseAvailable
 	if cashMarginedFuture {
 		maxAskSize = quoteAvailable / askPrice
 	}
 	if spec.IsPerp() && snapshot.Perp != nil {
-		// Sizes are USD here, and so is the perp's cash: capacity is a leverage bound, not a price
-		// conversion.
-		maxBidSize, maxAskSize = perpCapacity(cfg, *snapshot.Perp, quotePosition.Total, inventory)
+		// The perp's cash is USDC and the position is cNGN: capacity is a leverage bound in USDC,
+		// converted to cNGN at the reference.
+		maxBidSize, maxAskSize = perpCapacity(cfg, *snapshot.Perp, quotePosition.Total, inventory, ref)
 	}
 	if cfg.MaxNotionalPerSide > 0 {
-		maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide/bidPrice)
-		maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide/askPrice)
+		// On the cNGN markets MM_MAX_NOTIONAL_PER_SIDE is a cNGN amount, so it caps the base size
+		// directly; on a future it is quote notional and divides by the price.
+		if spec.CNGNDenominated() {
+			maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide)
+			maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide)
+		} else {
+			maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide/bidPrice)
+			maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide/askPrice)
+		}
 	}
 	bidSize := roundDown(minFloat(orderSize, maxBidSize), spec.SizeStep)
 	askSize := roundDown(minFloat(orderSize, maxAskSize), spec.SizeStep)
 
-	bidMinSize := minQuoteSize(spec, bidPrice)
-	askMinSize := minQuoteSize(spec, askPrice)
-	if bidSize >= bidMinSize && inventory+bidSize <= effectiveMaxLong(cfg) {
+	bidMinSize := minQuoteSize(spec)
+	askMinSize := minQuoteSize(spec)
+	if bidSize >= bidMinSize && inventory+bidSize <= maxLong {
 		result.Bid = &Quote{Side: exchange.SideBuy, Price: bidPrice, Size: bidSize}
-		result.Bids = buildLevels(cfg, spec, exchange.SideBuy, pricingRef, halfSpread, skew, orderSize, maxBidSize, inventory, effectiveMaxLong(cfg), askPrice)
+		result.Bids = buildLevels(cfg, spec, exchange.SideBuy, pricingRef, halfSpread, skew, orderSize, maxBidSize, inventory, maxLong, askPrice)
 	} else {
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, bidMinSize, maxBidSize, quoteAvailable, inventory, effectiveMaxLong(cfg)), bidMinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, bidSuppressionReason(orderSize, bidSize, bidMinSize, maxBidSize, quoteAvailable, inventory, maxLong), bidMinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, maxLong, false)
 	}
-	if askSize >= askMinSize && inventory-askSize >= effectiveMaxShort(cfg) {
+	if askSize >= askMinSize && inventory-askSize >= maxShort {
 		result.Ask = &Quote{Side: exchange.SideSell, Price: askPrice, Size: askSize}
-		result.Asks = buildLevels(cfg, spec, exchange.SideSell, pricingRef, halfSpread, skew, orderSize, maxAskSize, inventory, effectiveMaxShort(cfg), bidPrice)
+		result.Asks = buildLevels(cfg, spec, exchange.SideSell, pricingRef, halfSpread, skew, orderSize, maxAskSize, inventory, maxShort, bidPrice)
 	} else if cashMarginedFuture {
 		// Short backed by cash: report cash/quote capacity, not base-asset inventory.
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, quoteAvailable, inventory, effectiveMaxShort(cfg)), askMinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, futureAskSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, quoteAvailable, inventory, maxShort), askMinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, maxShort, false)
 	} else {
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, effectiveMaxShort(cfg)), askMinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, askSuppressionReason(orderSize, askSize, askMinSize, maxAskSize, baseAvailable, basePosition.Total, inventory, maxShort), askMinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, maxShort, false)
 	}
 
 	if spec.IsPerp() && (snapshot.Perp == nil || (!snapshot.Perp.TradingEnabled && !cfg.PerpQuoteWhileClosed)) {
@@ -266,8 +282,8 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 		// rest. MM_PERP_QUOTE_WHILE_CLOSED rests them anyway, for the launch: the enable gate needs a
 		// two-sided book before it will open the market.
 		result.Bid, result.Ask, result.Bids, result.Asks = nil, nil, nil, nil
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "perp_trading_disabled", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "perp_trading_disabled", spec.MinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "perp_trading_disabled", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, maxLong, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "perp_trading_disabled", spec.MinSize*askPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, askSize, askPrice, maxShort, false)
 		result.SkewBPS = skewBPS
 		return result, nil
 	}
@@ -278,20 +294,20 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 		result.Ask = nil
 		result.Bids = nil
 		result.Asks = nil
-		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
-		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
+		result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, "operator_halted", spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, maxLong, false)
+		result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, "operator_halted", spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, maxShort, false)
 	default:
 		// bid-only/ask-only and a side pulled through the control API are the same suppression; only
 		// the reason differs, so a log line says which of the two turned the side off.
 		if cfg.OperatorMode == config.ModeBidOnly || ov.AskDisabled {
 			result.Ask = nil
 			result.Asks = nil
-			result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, sideOffReason(cfg.OperatorMode == config.ModeBidOnly), spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, false)
+			result.AskSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideSell, sideOffReason(cfg.OperatorMode == config.ModeBidOnly), spec.MinSize, basePosition.Total, basePosition.Reserved, baseAvailable, orderSize, askSize, askPrice, maxShort, false)
 		}
 		if cfg.OperatorMode == config.ModeAskOnly || ov.BidDisabled {
 			result.Bid = nil
 			result.Bids = nil
-			result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, sideOffReason(cfg.OperatorMode == config.ModeAskOnly), spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, false)
+			result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, sideOffReason(cfg.OperatorMode == config.ModeAskOnly), spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, maxLong, false)
 		}
 	}
 	result.SkewBPS = skewBPS
@@ -327,34 +343,65 @@ func isCashMarginedFuture(spec exchange.MarketSpec) bool {
 	return spec.Symbol != "" && !spec.IsSpot()
 }
 
-// perpCapacity is the most each side may quote, in USDC, on the perp:
+// perpCapacity is the most each side may quote, in cNGN, on the perp:
 //
 //   - the bot's own leverage cap: its gross position after a fill stays within cash x
-//     min(MM_PERP_MAX_LEVERAGE, the SRM's max leverage). A bid may first close a short and then open
-//     up to that bound long, and an ask the reverse, so the limit is the bound minus the position
-//     on the side being added to;
+//     min(MM_PERP_MAX_LEVERAGE, the SRM's max leverage), a USDC bound converted to cNGN at the
+//     reference price. A bid may first close a short and then open up to that bound long, and an
+//     ask the reverse, so the limit is the bound minus the position on the side being added to;
 //   - the OI cap: what opens a NEW position uses room under the cap, what closes one does not.
 //     Not while the market is closed and MM_PERP_QUOTE_WHILE_CLOSED is set: a closed perp has a cap
 //     of 0, so its room is 0 and the clamp would suppress exactly the quotes the flag exists to
 //     rest (seen at launch, 2026-10-01). Those quotes cannot fill -- the matcher skips a closed
 //     market -- and the clamp applies again on the first cycle after the cap opens.
 //
-// inventory is the signed UI position in USDC (long positive), as perpBalances reports it.
-func perpCapacity(cfg config.Config, perp state.PerpSnapshot, cash, inventory float64) (maxBid, maxAsk float64) {
+// inventory is the signed engine position in cNGN (long cNGN positive), as PerpBalances reports it;
+// cash is USDC; price is USDC per cNGN.
+func perpCapacity(cfg config.Config, perp state.PerpSnapshot, cash, inventory, price float64) (maxBid, maxAsk float64) {
+	if !(price > 0) {
+		return 0, 0
+	}
 	leverage := cfg.PerpMaxLeverage
 	if perp.MaxLeverage > 0 && perp.MaxLeverage < leverage {
 		leverage = perp.MaxLeverage
 	}
-	bound := math.Max(0, cash) * leverage
+	bound := math.Max(0, cash) * leverage / price
 	maxBid = math.Max(0, bound-inventory)
 	maxAsk = math.Max(0, bound+inventory)
 	if !perp.TradingEnabled && cfg.PerpQuoteWhileClosed {
 		return maxBid, maxAsk
 	}
-	room := math.Max(0, perp.SideRoomUSD)
+	room := math.Max(0, perp.SideRoomNGN)
 	maxBid = math.Min(maxBid, math.Max(0, -inventory)+room)
 	maxAsk = math.Min(maxAsk, math.Max(0, inventory)+room)
 	return maxBid, maxAsk
+}
+
+// baseSize converts an operator size to the market's base units: on the cNGN markets the operator
+// configures USDC and the venue takes cNGN, so the size is divided by the reference price (USDC
+// per cNGN); a future's size is already in contracts.
+func baseSize(spec exchange.MarketSpec, usd, price float64) float64 {
+	if !spec.CNGNDenominated() {
+		return usd
+	}
+	if !(price > 0) {
+		return 0
+	}
+	return usd / price
+}
+
+// inventoryLimits is the long and short inventory bound in base units. MM_MAX_LONG_INVENTORY,
+// MM_MAX_SHORT_INVENTORY and MM_MAX_NET_INVENTORY are USDC on the cNGN markets (the value of the
+// cNGN held, or of the perp position, at the reference), contracts on a future.
+func inventoryLimits(cfg config.Config, spec exchange.MarketSpec, price float64) (maxLong, maxShort float64) {
+	maxLong, maxShort = effectiveMaxLong(cfg), effectiveMaxShort(cfg)
+	if spec.CNGNDenominated() {
+		if !(price > 0) {
+			return 0, 0
+		}
+		return maxLong / price, maxShort / price
+	}
+	return maxLong, maxShort
 }
 
 // futureAskSuppressionReason mirrors bidSuppressionReason for the short (sell) side of a
@@ -395,7 +442,7 @@ func askSuppressionReason(orderSize, askSize, minSize, maxAskSize, baseAvailable
 	return "ask_quote_suppressed"
 }
 
-func baseSuppression(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot, side exchange.Side, reason string, requiredCapacity, totalCapacity, reservedCapacity, availableCapacity, effectiveOrderSize, candidateSize, price float64, dependencyStale bool) *Suppression {
+func baseSuppression(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot, side exchange.Side, reason string, requiredCapacity, totalCapacity, reservedCapacity, availableCapacity, effectiveOrderSize, candidateSize, price, maxInventory float64, dependencyStale bool) *Suppression {
 	return &Suppression{
 		Side:                 side,
 		Reason:               reason,
@@ -414,7 +461,7 @@ func baseSuppression(cfg config.Config, spec exchange.MarketSpec, snapshot state
 		CandidateSize:        candidateSize,
 		SizeStep:             spec.SizeStep,
 		Inventory:            snapshot.Inventory(spec.BaseAsset),
-		MaxInventory:         maxInventoryForSide(cfg, side),
+		MaxInventory:         maxInventory,
 		SpotAssetAddress:     spec.AssetAddress,
 		QuoteAssetAddress:    spec.QuoteAddress,
 		BaseAsset:            spec.BaseAsset,
@@ -436,13 +483,6 @@ func ComputeReferencePriceSource(snapshot state.Snapshot) string {
 	return source
 }
 
-func maxInventoryForSide(cfg config.Config, side exchange.Side) float64 {
-	if side == exchange.SideBuy {
-		return effectiveMaxLong(cfg)
-	}
-	return effectiveMaxShort(cfg)
-}
-
 // buildLevels expands the single best-level quote into a ladder of up to
 // cfg.QuoteLevels price points stepping outward from the reference by
 // LevelSpreadStepBPS each, with per-level size scaled by LevelSizeMult^level.
@@ -462,7 +502,8 @@ func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side
 	}
 
 	// Remaining size budget (capacity/notional cap) and inventory headroom, both
-	// shared across the whole side's ladder.
+	// shared across the whole side's ladder. Everything here is in base units (cNGN on the cNGN
+	// markets): orderSize and invLimit were converted before the call.
 	remainingBudget := totalBudget
 	var remainingInv float64
 	if side == exchange.SideBuy {
@@ -490,7 +531,7 @@ func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side
 			}
 		}
 		size := roundDown(minFloat(levelSize, minFloat(remainingBudget, remainingInv)), spec.SizeStep)
-		if size < minQuoteSize(spec, price) {
+		if size < minQuoteSize(spec) {
 			break
 		}
 		quotes = append(quotes, Quote{Side: side, Price: price, Size: size})
@@ -501,19 +542,15 @@ func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side
 	return quotes
 }
 
-// minQuoteSize is the smallest size the venue accepts at price. A spot order is submitted as a
-// whole-cNGN engine amount (size x price, floored), so a spot quote worth less than 1 cNGN cannot be
-// placed at all. Quoting one anyway failed the whole cycle -- both sides -- when an ask was left with
-// 0.000682 USDC; below this size a side is suppressed instead, and the other side keeps quoting.
-func minQuoteSize(spec exchange.MarketSpec, price float64) float64 {
-	if !spec.UIInverted() || price <= 0 {
-		return spec.MinSize
+// minQuoteSize is the smallest size the venue accepts. A cNGN-market order is a whole number of
+// cNGN, so a side whose budget is under 1 cNGN cannot be quoted at all. Quoting one anyway failed
+// the whole cycle -- both sides -- when an ask was left with 0.000682 USDC (under 1 cNGN at the
+// time); below this size a side is suppressed instead, and the other side keeps quoting.
+func minQuoteSize(spec exchange.MarketSpec) float64 {
+	if spec.CNGNDenominated() {
+		return math.Max(spec.MinSize, 1)
 	}
-	size := roundUp(1/price, spec.SizeStep)
-	if size*price < 1 && spec.SizeStep > 0 {
-		size += spec.SizeStep
-	}
-	return math.Max(spec.MinSize, size)
+	return spec.MinSize
 }
 
 func effectiveMaxLong(cfg config.Config) float64 {

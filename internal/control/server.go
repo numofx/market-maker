@@ -53,12 +53,12 @@ type Backend interface {
 
 // BotView is published by the bot at the end of every cycle.
 //
-// Units are the bot's own, which for USDCcNGN-SPOT are UI terms throughout: exchange.Order and
-// strategy.Quote are converted by spotUIFromEngine on the way in and spotEngineFromUI on the way out,
-// so a price is cNGN per USDC, a size is USDC, and side "buy" is a bid for USDC (the engine's sell of
-// cNGN). Nothing here is engine-oriented.
+// Units are the engine's, on every market and whichever presentation the venue serves: on the
+// cNGN markets a price is USDC per cNGN, a size is cNGN, and side "buy" is a buy of cNGN (a perp
+// long is long cNGN). Units spells it out per market for the terminal.
 type BotView struct {
 	Market               string
+	Units                Units
 	OperatorMode         string
 	DryRun               bool
 	Initialized          bool
@@ -83,14 +83,25 @@ type BotView struct {
 	LastHaltReason       string
 }
 
-// Level is one target quote: price in cNGN per USDC, size in USDC.
+// Units names the units of every number in the state, so the terminal never has to guess.
+type Units struct {
+	Price              string `json:"price"`
+	Size               string `json:"size"`
+	Side               string `json:"side"`
+	OrderSize          string `json:"order_size"`
+	Inventory          string `json:"inventory"`
+	MaxNotionalPerSide string `json:"max_notional_per_side"`
+}
+
+// Level is one target quote: price in USDC per cNGN, size in cNGN.
 type Level struct {
 	Price float64 `json:"price"`
 	Size  float64 `json:"size"`
 }
 
 // OpenOrder is a resting order as of the last cycle's load (or the last halt's cancel-all).
-// Side is UI side (buy = bid for USDC), price cNGN per USDC, size remaining USDC, expiry unix seconds.
+// Side is the engine side (buy = buy cNGN), price USDC per cNGN, size remaining cNGN, expiry unix
+// seconds.
 type OpenOrder struct {
 	OrderID   string    `json:"order_id"`
 	Side      string    `json:"side"`
@@ -102,13 +113,16 @@ type OpenOrder struct {
 	PostOnly  bool      `json:"post_only"`
 }
 
-// Position is keyed by asset symbol ("USDC", "cNGN") in human units.
+// Position is keyed by asset symbol ("cNGN", "USDC") in human units: cNGN held (or, on the perp,
+// the signed cNGN position) and USDC.
 type Position struct {
 	Total     float64 `json:"total"`
 	Reserved  float64 `json:"reserved"`
 	Available float64 `json:"available"`
 }
 
+// ConfigView is the operator's configuration in the operator's units: OrderSize and
+// MaxNetInventory are USDC on the cNGN markets, MaxNotionalPerSide is cNGN (see Units).
 type ConfigView struct {
 	HalfSpreadBPS              float64 `json:"half_spread_bps"`
 	QuoteLevels                int     `json:"quote_levels"`
@@ -139,6 +153,7 @@ type TargetQuotes struct {
 type StateResponse struct {
 	ServerTime      time.Time           `json:"server_time"`
 	Market          string              `json:"market"`
+	Units           Units               `json:"units"`
 	State           State               `json:"state"`
 	Reason          string              `json:"reason"`
 	ReasonSource    string              `json:"reason_source"`
@@ -311,6 +326,7 @@ func (s *Server) buildState(now time.Time) StateResponse {
 	resp := StateResponse{
 		ServerTime:      now,
 		Market:          view.Market,
+		Units:           view.Units,
 		State:           state,
 		Reason:          reason,
 		ReasonSource:    source,

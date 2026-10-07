@@ -14,43 +14,38 @@ import (
 // It models exactly what happens between cycles -- the placed orders become resting orders, and the
 // client reports their capacity as Reserved and Reusable -- so the budget the next cycle sees is
 // the one production would report.
-// simulateCycle answers the only question that matters: given the ladder a cycle produced, and
-// nothing else changing, does the NEXT cycle want the same thing?
 //
-// The client's reservation arithmetic is deliberately NOT `size * price`. In production it works in
-// engine units (cNGN amount x USDC-per-cNGN) while the old strategy code added capacity back in UI
-// units (USDC size x cNGN-per-USDC) -- two different quantities for one reservation, which is what
-// made the budget drift. reservedFactor models that disagreement: the client reports a reservation
-// that is NOT what `size * price` would give, so any code deriving the budget from OpenOrders
-// arrives at the wrong number and the ladder walks.
-//
-// A simulation that computed Reserved as size*price would be self-consistent and would pass
-// whether or not the bug were present. The first version of this test did exactly that and proved
-// nothing.
+// The client's reservation arithmetic is deliberately NOT `size * price`: reservedFactor models a
+// client that reports a reservation other than what `size * price` would give, so any code
+// deriving the budget from OpenOrders arrives at the wrong number and the ladder walks. A
+// simulation that computed Reserved as size*price would be self-consistent and would pass whether
+// or not the bug were present. The first version of this test did exactly that and proved nothing.
 const reservedFactor = 0.97
 
+// Orientation: the base is cNGN and the quote USDC, a bid reserves USDC (size x price) and an ask
+// reserves cNGN (size).
 func simulateCycle(t *testing.T, cfg config.Config, spec exchange.MarketSpec,
-	baseTotal, quoteTotal float64, resting []exchange.Order) Result {
+	cngnTotal, usdcTotal float64, resting []exchange.Order) Result {
 	t.Helper()
 
-	var baseReserved, quoteReserved float64
+	var cngnReserved, usdcReserved float64
 	for _, o := range resting {
 		switch o.Side {
 		case exchange.SideBuy:
-			quoteReserved += o.Size * o.Price * reservedFactor
+			usdcReserved += o.Size * o.Price * reservedFactor
 		case exchange.SideSell:
-			baseReserved += o.Size * reservedFactor
+			cngnReserved += o.Size * reservedFactor
 		}
 	}
 	got, err := BuildQuotes(cfg, spec, state.Snapshot{
 		Market:              "USDCcNGN-SPOT",
-		ExternalAnchorPrice: 1330,
-		InventoryByAsset:    map[string]float64{"USDC": 0},
+		ExternalAnchorPrice: 1 / 1330.0,
+		InventoryByAsset:    map[string]float64{"cNGN": cngnTotal},
 		Positions: map[string]state.AssetPosition{
-			"USDC": {Total: baseTotal, Reserved: baseReserved, Reusable: baseReserved,
-				Available: maxF(0, baseTotal-baseReserved)},
-			"cNGN": {Total: quoteTotal, Reserved: quoteReserved, Reusable: quoteReserved,
-				Available: maxF(0, quoteTotal-quoteReserved)},
+			"cNGN": {Total: cngnTotal, Reserved: cngnReserved, Reusable: cngnReserved,
+				Available: maxF(0, cngnTotal-cngnReserved)},
+			"USDC": {Total: usdcTotal, Reserved: usdcReserved, Reusable: usdcReserved,
+				Available: maxF(0, usdcTotal-usdcReserved)},
 		},
 		OpenOrders: resting,
 	})
@@ -69,9 +64,8 @@ func maxF(a, b float64) float64 {
 
 func quotesToOrders(r Result) []exchange.Order {
 	var out []exchange.Order
-	for i, q := range r.Bids {
+	for _, q := range r.Bids {
 		out = append(out, exchange.Order{ID: "bid", Side: exchange.SideBuy, Price: q.Price, Size: q.Size})
-		_ = i
 	}
 	for _, q := range r.Asks {
 		out = append(out, exchange.Order{ID: "ask", Side: exchange.SideSell, Price: q.Price, Size: q.Size})
@@ -91,6 +85,13 @@ func stableCfg() config.Config {
 	}
 }
 
+func stableSpec() exchange.MarketSpec {
+	return exchange.MarketSpec{
+		Symbol: "USDCcNGN-SPOT", BaseAsset: "cNGN", QuoteAsset: "USDC",
+		TickSize: 0.000000000000000001, SizeStep: 1, MinSize: 1,
+	}
+}
+
 // The bug this closes. With a flat price and no fills, cycle 2 must want exactly what cycle 1
 // placed -- otherwise the bot replaces its own ladder forever, chasing a target that moves only
 // because it acted on the previous one.
@@ -99,15 +100,12 @@ func stableCfg() config.Config {
 // showed 62 of 71 replacements where current_size was the previous cycle's target_size.
 func TestFlatPriceAndNoFillsGivesTheSameTargetTwice(t *testing.T) {
 	cfg := stableCfg()
-	spec := exchange.MarketSpec{
-		Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN",
-		TickSize: 0.000001, SizeStep: 0.000001, MinSize: 0.000001,
-	}
 	// Capital-constrained on purpose: this only drifted when the budget actually bound the size.
-	const baseTotal, quoteTotal = 3.0, 5000.0
+	// 5,000 cNGN and 3 USDC: the 1.2 USDC rungs (~1,600 cNGN) exhaust both sides within the ladder.
+	const cngnTotal, usdcTotal = 5000.0, 3.0
 
-	first := simulateCycle(t, cfg, spec, baseTotal, quoteTotal, nil)
-	second := simulateCycle(t, cfg, spec, baseTotal, quoteTotal, quotesToOrders(first))
+	first := simulateCycle(t, cfg, stableSpec(), cngnTotal, usdcTotal, nil)
+	second := simulateCycle(t, cfg, stableSpec(), cngnTotal, usdcTotal, quotesToOrders(first))
 
 	if len(first.Bids) == 0 || len(first.Asks) == 0 {
 		t.Fatal("no ladder to compare")
@@ -134,16 +132,12 @@ func TestFlatPriceAndNoFillsGivesTheSameTargetTwice(t *testing.T) {
 // still" actually means.
 func TestTheLadderIsAFixedPointOverTenCycles(t *testing.T) {
 	cfg := stableCfg()
-	spec := exchange.MarketSpec{
-		Symbol: "USDCcNGN-SPOT", BaseAsset: "USDC", QuoteAsset: "cNGN",
-		TickSize: 0.000001, SizeStep: 0.000001, MinSize: 0.000001,
-	}
-	const baseTotal, quoteTotal = 3.0, 5000.0
+	const cngnTotal, usdcTotal = 5000.0, 3.0
 
-	prev := simulateCycle(t, cfg, spec, baseTotal, quoteTotal, nil)
+	prev := simulateCycle(t, cfg, stableSpec(), cngnTotal, usdcTotal, nil)
 	firstBid := prev.Bids[0].Size
 	for cycle := 2; cycle <= 10; cycle++ {
-		next := simulateCycle(t, cfg, spec, baseTotal, quoteTotal, quotesToOrders(prev))
+		next := simulateCycle(t, cfg, stableSpec(), cngnTotal, usdcTotal, quotesToOrders(prev))
 		if len(next.Bids) != len(prev.Bids) {
 			t.Fatalf("cycle %d: ladder depth changed %d -> %d", cycle, len(prev.Bids), len(next.Bids))
 		}

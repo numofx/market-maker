@@ -106,9 +106,13 @@ func (s HTTPAnchorSource) GetAnchorPrice(ctx context.Context, market string) (fl
 }
 
 // OracleCarryAnchorSource anchors a deliverable future to its carry-adjusted fair
-// value: it reads the on-chain cNGN oracle for spot (cNGN per USDC) and applies
-// continuous compounding to the market's expiry — fair = spot * e^(rate * t).
-// For a market without an expiry (spot), t = 0 and the anchor is the oracle spot.
+// value: it reads the on-chain cNGN oracle for spot and applies continuous compounding
+// to the market's expiry — fair = spot * e^(rate * t).
+//
+// The dated futures are the one market family still priced in cNGN per USDC (their engine
+// orientation, unchanged), while the oracle fetcher reports USDC per cNGN like every other
+// price in the bot. The inversion happens in spotPrice, at this boundary and nowhere else.
+// For a market without an expiry, t = 0 and the anchor is the oracle spot.
 type OracleCarryAnchorSource struct {
 	fetcher         USDCCNGNSpotExternalAnchor
 	rateAPR         float64
@@ -149,16 +153,19 @@ func (s *OracleCarryAnchorSource) spotPrice(ctx context.Context) (float64, error
 	if s.maxAge > 0 && !quote.FetchedAt.IsZero() && time.Since(quote.FetchedAt) > s.maxAge {
 		return 0, fmt.Errorf("oracle spot price stale: updated %s ago", time.Since(quote.FetchedAt).Round(time.Second))
 	}
+	// USDC per cNGN from the fetcher; the future it anchors is priced in cNGN per USDC.
+	cngnPerUSDC := 1 / quote.Price
 
 	s.mu.Lock()
-	s.lastPrice = quote.Price
+	s.lastPrice = cngnPerUSDC
 	s.lastFetched = time.Now()
 	s.mu.Unlock()
-	return quote.Price, nil
+	return cngnPerUSDC, nil
 }
 
-// carryFairValue computes spot * e^(rate * yearsToExpiry), clamping expired or
-// missing expiries to t = 0 (fair = spot).
+// carryFairValue computes spot * e^(rate * yearsToExpiry) for a future priced in cNGN per USDC
+// (the carry is the naira's rate over the dollar's, so the naira price of a dollar rises toward
+// expiry), clamping expired or missing expiries to t = 0 (fair = spot).
 func carryFairValue(spot, rateAPR float64, expiryUnix int64, now time.Time) float64 {
 	if expiryUnix <= 0 {
 		return spot
@@ -209,6 +216,9 @@ func NewAnchorSource(cfg config.Config, spec exchange.MarketSpec) AnchorSource {
 	}
 }
 
+// ExternalAnchorQuote is a spot price from outside the venue, in USDC per cNGN. Every provider
+// delivers naira per dollar (the liquid corridor is quoted that way everywhere) and is inverted on
+// ingest, here and nowhere else.
 type ExternalAnchorQuote struct {
 	Price            float64
 	Present          bool
@@ -368,8 +378,9 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) fetchFresh(ctx context.Context) (Exte
 			Err:         err,
 		}
 	}
+	// The 0x quote is configured as a sale of USDC for cNGN, so its price is cNGN per USDC.
 	return ExternalAnchorQuote{
-		Price:            price,
+		Price:            1 / price,
 		Present:          true,
 		FetchedAt:        time.Now().UTC(),
 		RefreshAttempted: true,
@@ -412,14 +423,14 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) fetchCNGNOracleOnChain(ctx context.Co
 	for i := uint8(0); i < decimals; i++ {
 		scale *= 10
 	}
+	// The feed answers USD per NGN, which is already the engine's USDC per cNGN: used as is.
 	usdPerNGN := float64(answer.Int64()) / scale
 	if usdPerNGN <= 0 {
 		return ExternalAnchorQuote{}, fmt.Errorf("oracle usdPerNGN must be positive")
 	}
-	price := 1 / usdPerNGN
 	fetchedAt := time.Unix(updatedAt.Int64(), 0).UTC()
 	return ExternalAnchorQuote{
-		Price:            price,
+		Price:            usdPerNGN,
 		Present:          true,
 		FetchedAt:        fetchedAt,
 		RefreshAttempted: true,

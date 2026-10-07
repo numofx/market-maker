@@ -9,6 +9,11 @@
 // 60 s by an index move of more than 20 bps against the bot, the account's realized and unrealized
 // P&L against its starting cash, and its inventory over time.
 //
+// Orientation is the engine's throughout: prices and the index in USDC per cNGN, sizes and the
+// position in cNGN, a long is long cNGN. Fills are read from each trade's engine fields (price,
+// size, aggressor_side), which markets-service serves identically under both of its public
+// contracts; a row without them is decoded from its ui_intent through its own spot_contract.spec.
+//
 // Env: MM_RPC_URL (or -rpc), MM_API_BASE_URL (or -api, default https://api.numofx.com).
 package main
 
@@ -29,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/numofx/market-maker/internal/exchange"
 )
 
 // Base mainnet defaults: the perp stack as deployed 2026-10-01 (numofx/exchange CNGN_PERP_STACK.json).
@@ -49,11 +55,15 @@ const (
 var e18 = new(big.Float).SetFloat64(1e18)
 
 type trade struct {
-	TradeID      int64  `json:"trade_id"`
-	CreatedAt    string `json:"created_at"`
-	MakerOrderID string `json:"maker_order_id"`
-	TakerOrderID string `json:"taker_order_id"`
-	SpotContract *struct {
+	TradeID       int64  `json:"trade_id"`
+	CreatedAt     string `json:"created_at"`
+	MakerOrderID  string `json:"maker_order_id"`
+	TakerOrderID  string `json:"taker_order_id"`
+	Price         string `json:"price"`          // engine: USDC per cNGN
+	Size          string `json:"size"`           // engine: cNGN
+	AggressorSide string `json:"aggressor_side"` // engine side of the taker
+	SpotContract  *struct {
+		Spec     string `json:"spec"`
 		UIIntent struct {
 			Side  string `json:"side"`
 			Price string `json:"price"`
@@ -62,18 +72,23 @@ type trade struct {
 	} `json:"spot_contract"`
 }
 
+const (
+	botBuysCNGN  = "buy cNGN"
+	botSellsCNGN = "sell cNGN"
+)
+
 type fill struct {
 	at      time.Time
 	tradeID int64
-	botSide string // "sell USDC" or "buy USDC"
-	size    float64
-	price   float64 // cNGN per USDC
+	botSide string  // botBuysCNGN or botSellsCNGN
+	size    float64 // cNGN
+	price   float64 // USDC per cNGN
 	role    string
 }
 
 type indexPoint struct {
 	at    time.Time
-	index float64 // cNGN per USDC
+	index float64 // USDC per cNGN
 }
 
 type balancePoint struct {
@@ -182,16 +197,15 @@ func readFills(ctx context.Context, api string, from, to time.Time) ([]fill, err
 			default:
 				continue
 			}
-			if t.SpotContract == nil {
-				continue
+			takerSide, price, size, err := engineFill(t)
+			if err != nil {
+				return nil, fmt.Errorf("trade %d: %w", t.TradeID, err)
 			}
-			takerSide := t.SpotContract.UIIntent.Side // the taker's UI side: buy = bought USDC
-			botSide := "sell USDC"
-			if (takerSide == "sell") == (role == "maker") {
-				botSide = "buy USDC"
+			// The bot is on the taker's side when it took, and opposite it when it made.
+			botSide := botSellsCNGN
+			if (takerSide == exchange.SideBuy) == (role == "taker") {
+				botSide = botBuysCNGN
 			}
-			price, _ := strconv.ParseFloat(t.SpotContract.UIIntent.Price, 64)
-			size, _ := strconv.ParseFloat(t.SpotContract.UIIntent.Size, 64)
 			fills = append(fills, fill{at: at, tradeID: t.TradeID, botSide: botSide, size: size, price: price, role: role})
 		}
 		if done || len(payload.Trades) < 100 {
@@ -202,13 +216,30 @@ func readFills(ctx context.Context, api string, from, to time.Time) ([]fill, err
 	return fills, nil
 }
 
+// engineFill is a trade in engine terms: the taker's side, the price in USDC per cNGN and the
+// size in cNGN. The engine fields are preferred; a row carrying only a ui_intent is decoded
+// through its own spec, so a tape spanning the venue's cutover reads correctly on both sides.
+func engineFill(t trade) (exchange.Side, float64, float64, error) {
+	price, perr := strconv.ParseFloat(strings.TrimSpace(t.Price), 64)
+	size, serr := strconv.ParseFloat(strings.TrimSpace(t.Size), 64)
+	side := exchange.Side(strings.ToLower(strings.TrimSpace(t.AggressorSide)))
+	if perr == nil && serr == nil && price > 0 && size > 0 && (side == exchange.SideBuy || side == exchange.SideSell) {
+		return side, price, size, nil
+	}
+	if t.SpotContract == nil {
+		return "", 0, 0, fmt.Errorf("no engine fields and no spot_contract")
+	}
+	intent := t.SpotContract.UIIntent
+	return exchange.EngineOrderFromUIIntent(t.SpotContract.Spec, intent.Side, intent.Price, intent.Size)
+}
+
 func printFills(fills []fill, indexes []indexPoint) {
 	fmt.Printf("Fills: %d\n", len(fills))
 	if len(fills) == 0 {
 		fmt.Println()
 		return
 	}
-	fmt.Println("  time (UTC)            trade   bot side   size USDC   price      index before  index after   60s adverse move  flag")
+	fmt.Println("  time (UTC)            trade   bot side   size cNGN   price USDC/cNGN  index before  index after   60s adverse move  flag")
 	flagged := 0
 	for _, f := range fills {
 		before, after := indexAround(indexes, f.at)
@@ -222,7 +253,7 @@ func printFills(fills []fill, indexes []indexPoint) {
 		if adverseAt != nil {
 			moveText = fmt.Sprintf("%+.1f bps at +%ds", adverse, int(adverseAt.Sub(f.at).Seconds()))
 		}
-		fmt.Printf("  %s  %-6d  %-9s  %9.3f   %9.2f  %12s  %12s  %-18s %s\n",
+		fmt.Printf("  %s  %-6d  %-9s  %9.0f   %15.9f  %12s  %12s  %-18s %s\n",
 			f.at.UTC().Format("2006-01-02 15:04:05"), f.tradeID, f.botSide, f.size, f.price,
 			fmtIndex(before), fmtIndex(after), moveText, flag)
 	}
@@ -244,8 +275,8 @@ func indexAround(indexes []indexPoint, t time.Time) (before, after *indexPoint) 
 }
 
 // adverseMove is the largest move of the index within adverseWindow after the fill, in bps of the
-// index before the fill, signed so that positive is against the bot: up (USDC dearer in cNGN) after
-// the bot sold USDC, down after it bought.
+// index before the fill, signed so that positive is against the bot: up (cNGN dearer in USDC) after
+// the bot sold cNGN, down after it bought.
 func adverseMove(indexes []indexPoint, f fill, before *indexPoint) (float64, *time.Time) {
 	if before == nil {
 		return 0, nil
@@ -258,7 +289,7 @@ func adverseMove(indexes []indexPoint, f fill, before *indexPoint) (float64, *ti
 			continue
 		}
 		move := (p.index - before.index) / before.index * 1e4
-		if f.botSide == "buy USDC" {
+		if f.botSide == botBuysCNGN {
 			move = -move
 		}
 		if worstAt == nil || move > worst {
@@ -274,7 +305,7 @@ func fmtIndex(p *indexPoint) string {
 	if p == nil {
 		return "—"
 	}
-	return fmt.Sprintf("%.2f", p.index)
+	return fmt.Sprintf("%.9f", p.index)
 }
 
 // --- index history ----------------------------------------------------------------------------
@@ -291,8 +322,8 @@ func readIndexHistory(ctx context.Context, client *ethclient.Client, feed common
 		if spot.Sign() <= 0 {
 			return nil
 		}
-		usdPerNgn, _ := new(big.Float).Quo(new(big.Float).SetInt(spot), e18).Float64()
-		points = append(points, indexPoint{at: time.Unix(stamp, 0), index: 1 / usdPerNgn})
+		usdcPerCNGN, _ := new(big.Float).Quo(new(big.Float).SetInt(spot), e18).Float64()
+		points = append(points, indexPoint{at: time.Unix(stamp, 0), index: usdcPerCNGN})
 		return nil
 	})
 	if err != nil {
@@ -366,7 +397,7 @@ func printInventory(points []balancePoint, from time.Time, index float64) {
 	if shown == 0 {
 		fmt.Println("  (no balance change in the window)")
 	}
-	fmt.Println("  * USD at the index at report time; a positive cNGN position is the bot short USDC, negative is long USDC")
+	fmt.Println("  * USD at the index at report time; a positive cNGN position is long cNGN, negative is short cNGN")
 	fmt.Println()
 }
 
@@ -394,16 +425,16 @@ func printPnL(ctx context.Context, client *ethclient.Client, account int64, star
 	fmt.Printf("  realized (cash − start)  %+12.4f USDC   fees, funding and settled P&L\n", realized)
 	fmt.Printf("  unrealized + unsettled   %+12.4f USDC   PerpAsset.getUnsettledAndUnrealizedCash\n", unrealized)
 	fmt.Printf("  total                    %+12.4f USDC\n", realized+unrealized)
-	fmt.Printf("  position                 %12.0f cNGN contracts = %+.2f USD at index %.2f (%s)\n", position, -position/index, index, describePosition(position))
+	fmt.Printf("  position                 %12.0f cNGN contracts = %+.2f USD at index %.9f USDC/cNGN (%s)\n", position, position*index, index, describePosition(position))
 	return nil
 }
 
 func describePosition(position float64) string {
 	switch {
 	case position > 0:
-		return "short USDC"
+		return "long cNGN"
 	case position < 0:
-		return "long USDC"
+		return "short cNGN"
 	}
 	return "flat"
 }
@@ -487,16 +518,17 @@ func callInt(ctx context.Context, client *ethclient.Client, to common.Address, s
 	return v, nil
 }
 
+// currentIndex is the feed's spot, USDC per cNGN, used as is.
 func currentIndex(ctx context.Context, client *ethclient.Client) (float64, error) {
 	feed := common.HexToAddress(defaultIndexFeed)
-	usdPerNgn, err := callInt(ctx, client, feed, "getSpot()", nil)
+	usdcPerCNGN, err := callInt(ctx, client, feed, "getSpot()", nil)
 	if err != nil {
 		return 0, err
 	}
-	if usdPerNgn <= 0 {
-		return 0, fmt.Errorf("index feed returned %v", usdPerNgn)
+	if usdcPerCNGN <= 0 {
+		return 0, fmt.Errorf("index feed returned %v", usdcPerCNGN)
 	}
-	return 1 / usdPerNgn, nil
+	return usdcPerCNGN, nil
 }
 
 func assetTopic(asset common.Address) common.Hash {
@@ -563,12 +595,12 @@ func fmtPtr(v *float64, layout string) string {
 	return fmt.Sprintf(layout, *v)
 }
 
-// fmtUSD is the position's USD notional at the index: a positive cNGN position is the bot short USDC.
+// fmtUSD is the position's USD value at the index (USDC per cNGN): long cNGN positive.
 func fmtUSD(perp *float64, index float64) string {
 	if perp == nil || index <= 0 {
 		return "—"
 	}
-	return fmt.Sprintf("%+.2f", -*perp/index)
+	return fmt.Sprintf("%+.2f", *perp*index)
 }
 
 func envOr(key, fallback string) string {

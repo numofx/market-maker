@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -86,7 +85,7 @@ func ReconcileStartup(
 			continue
 		}
 		order := orders[0]
-		if reason := adoptionMismatchReason(cfg, order, target); reason != "" {
+		if reason := adoptionMismatchReason(cfg, spec, order, target); reason != "" {
 			result.RejectedReasons[order.ID] = reason
 			continue
 		}
@@ -250,14 +249,19 @@ func startupManagedOrderPrefix(market string) string {
 	return "mm:" + market + ":"
 }
 
-func adoptionMismatchReason(cfg config.Config, order exchange.Order, target *strategy.Quote) string {
+// adoptionMismatchReason applies the same size rule the steady-state cycle uses
+// (sizeMismatchRequiresReplace): the absolute tolerance, the relative dust tolerance and the
+// venue's quantum. A restart that compared sizes against the absolute tolerance alone would cancel
+// every rung on every boot, because a cNGN target is MM_ORDER_SIZE in USDC at the reference and
+// the reference has moved since the rung was placed.
+func adoptionMismatchReason(cfg config.Config, spec exchange.MarketSpec, order exchange.Order, target *strategy.Quote) string {
 	if target == nil {
 		return "strategy_not_quoting_side"
 	}
 	if priceDriftBPS(order.Price, target.Price) >= cfg.CancelStaleOrderThreshold {
 		return "price_too_far_from_target"
 	}
-	if math.Abs(order.Size-target.Size) > cfg.AdoptSizeTolerance {
+	if sizeMismatchRequiresReplace(order.Size, target.Size, cfg, sizeQuantum(spec)) {
 		return "size_too_far_from_target"
 	}
 	return ""

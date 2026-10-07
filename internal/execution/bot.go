@@ -67,17 +67,20 @@ type Bot struct {
 }
 
 type RuntimeSummary struct {
-	Uptime                     time.Duration
-	Halted                     bool
-	LastHaltReason             string
-	HaltCount                  uint64
-	FillsBySide                map[string]uint64
-	PartialFills               uint64
-	CancelCountsByCategory     map[string]uint64
-	OpenBidPresent             bool
-	OpenAskPresent             bool
-	InventoryByAsset           map[string]float64
+	Uptime                 time.Duration
+	Halted                 bool
+	LastHaltReason         string
+	HaltCount              uint64
+	FillsBySide            map[string]uint64
+	PartialFills           uint64
+	CancelCountsByCategory map[string]uint64
+	OpenBidPresent         bool
+	OpenAskPresent         bool
+	InventoryByAsset       map[string]float64
+	// NetInventory is the base asset in the market's units (cNGN on the cNGN markets);
+	// NetInventoryUSD values it at the reference price.
 	NetInventory               float64
+	NetInventoryUSD            float64
 	LiveBidCount               int
 	LiveAskCount               int
 	ExchangeMarketDataAge      time.Duration
@@ -223,7 +226,25 @@ func marketMetadataAttrs(spec exchange.MarketSpec) []any {
 		"size_step", spec.SizeStep,
 		"min_size", spec.MinSize,
 		"order_entry_spec", spec.OrderEntrySpec,
+		"venue_orientation", spec.Orientation,
+		"price_unit", priceUnit(spec),
+		"size_unit", sizeUnit(spec),
 	}
+}
+
+// priceUnit and sizeUnit name the bot's own units on this market for logs and the control API.
+func priceUnit(spec exchange.MarketSpec) string {
+	if spec.CNGNDenominated() {
+		return "USDC per cNGN"
+	}
+	return "quote per contract"
+}
+
+func sizeUnit(spec exchange.MarketSpec) string {
+	if spec.CNGNDenominated() {
+		return "cNGN"
+	}
+	return "contracts"
 }
 
 // syncFeeSchedule re-reads the market's fee schedule and, when the taker fee has RISEN, cancels
@@ -363,7 +384,14 @@ func (b *Bot) RunCycle(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	b.logger.Info("quote decision", "reference_price", quotes.ReferencePrice, "skew_bps", quotes.SkewBPS, "bid", describeQuote(quotes.Bid), "ask", describeQuote(quotes.Ask))
+	b.logger.Info("quote decision",
+		"reference_price", quotes.ReferencePrice, "reference_source", quotes.ReferenceSource,
+		"price_unit", priceUnit(b.spec), "size_unit", sizeUnit(b.spec),
+		"skew_bps", quotes.SkewBPS,
+		"inventory", snapshot.Inventory(b.spec.BaseAsset), "inventory_usd", inventoryUSD(b.spec, snapshot),
+		"bid", describeQuote(quotes.Bid), "ask", describeQuote(quotes.Ask),
+		"bid_levels", len(quotes.Bids), "ask_levels", len(quotes.Asks),
+	)
 	b.logQuoteSuppression(quotes.BidSuppression)
 	b.logQuoteSuppression(quotes.AskSuppression)
 	result, err := b.syncer.Sync(ctx, snapshot, quotes, ids)
@@ -504,6 +532,7 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 	b.metrics.SetInventory(b.spec.BaseAsset, snapshot.Inventory(b.spec.BaseAsset))
 	b.metrics.SetInventory(b.spec.QuoteAsset, snapshot.Inventory(b.spec.QuoteAsset))
 	b.metrics.SetNetInventory(snapshot.Inventory(b.spec.BaseAsset))
+	b.metrics.SetNetInventoryUSD(inventoryUSD(b.spec, *snapshot))
 	b.metrics.SetOperatorMode(string(b.cfg.OperatorMode))
 	b.metrics.SetQuoteAgeSeconds(snapshot.LocalQuoteAge.Seconds())
 	b.metrics.SetExchangeQuoteAgeSeconds(snapshot.ExchangeQuoteAge.Seconds())
@@ -553,6 +582,16 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 	if netInv > b.maxNetInventory {
 		b.maxNetInventory = netInv
 	}
+}
+
+// inventoryUSD values the base inventory in USDC at the snapshot's reference price on the cNGN
+// markets. A future's inventory is contracts, and is reported as is.
+func inventoryUSD(spec exchange.MarketSpec, snapshot state.Snapshot) float64 {
+	inventory := snapshot.Inventory(spec.BaseAsset)
+	if !spec.CNGNDenominated() {
+		return inventory
+	}
+	return inventory * snapshot.ReferencePrice
 }
 
 func (b *Bot) logReferenceSourceTransition(prev state.Snapshot, next state.Snapshot) {
@@ -754,6 +793,7 @@ func (b *Bot) Summary() RuntimeSummary {
 		HaltCount:                  b.haltCount,
 		InventoryByAsset:           cloneInventory(b.snapshot.InventoryByAsset),
 		NetInventory:               b.snapshot.Inventory(b.spec.BaseAsset),
+		NetInventoryUSD:            inventoryUSD(b.spec, b.snapshot),
 		LiveBidCount:               countOrdersBySide(b.snapshot.OpenOrders, exchange.SideBuy),
 		LiveAskCount:               countOrdersBySide(b.snapshot.OpenOrders, exchange.SideSell),
 		LocalQuoteAge:              b.snapshot.LocalQuoteAge,
@@ -810,10 +850,11 @@ func (b *Bot) Summary() RuntimeSummary {
 func (b *Bot) SoakStatusLine() string {
 	s := b.Summary()
 	return fmt.Sprintf(
-		"state=%s halted=%t inv=%0.6f bids=%d asks=%d fills_buy=%d fills_sell=%d partial_fills=%d cancels=%d md_age=%s bal_age=%s anchor_age=%s halt_reason=%q ref=%0.6f local_ref=%0.6f ext_anchor=%0.6f best_bid=%0.6f best_ask=%0.6f",
+		"state=%s halted=%t inv=%0.6f inv_usd=%0.2f bids=%d asks=%d fills_buy=%d fills_sell=%d partial_fills=%d cancels=%d md_age=%s bal_age=%s anchor_age=%s halt_reason=%q ref=%0.9f local_ref=%0.9f ext_anchor=%0.9f best_bid=%0.9f best_ask=%0.9f",
 		s.OperatorMode,
 		s.Halted,
 		s.NetInventory,
+		s.NetInventoryUSD,
 		s.LiveBidCount,
 		s.LiveAskCount,
 		s.FillsBySide[string(exchange.SideBuy)],

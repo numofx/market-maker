@@ -7,18 +7,13 @@ import (
 	"github.com/numofx/market-maker/internal/exchange"
 )
 
-// Fills each side of the perp ladder through the same translation the bot signs with, applies the
-// fill to the on-chain NGN position, reads the position back the way GetBalances does, requotes,
-// and checks direction, sign and lean in both units:
+// Fills each side of the perp ladder, applies the fill to the on-chain cNGN position, reads the
+// position back the way GetBalances does, requotes, and checks direction, sign and lean. The bot's
+// orientation is the engine's: a bid buys cNGN and leaves the position long cNGN (positive), and a
+// long must lean DOWN in USDC per cNGN -- sell cNGN cheaper, bid for it lower.
 //
-//   - displayed: cNGN per USDC, sized in USDC, a UI long is long USDC;
-//   - on chain: USDC per cNGN, sized in cNGN, long NGN positive -- every side and sign flipped.
-//
-// A bot that got any one of the flips wrong would lean INTO its inventory: after being lifted it
-// would quote cheaper and keep selling.
-
-const fillIndex = 1374.0
-
+// A bot that had a sign wrong would lean INTO its inventory: after being lifted it would quote
+// higher and keep buying.
 func TestPerpFillEachSide(t *testing.T) {
 	cfg := baseCfg()
 	cfg.PerpMaxLeverage = 1.5
@@ -28,31 +23,21 @@ func TestPerpFillEachSide(t *testing.T) {
 
 	spec := perpSpec()
 	spec.AssetAddress, spec.SubID, spec.QuoteAddress = "0xperp", "0", "0xcash"
-	spec.Perp = &exchange.PerpState{IndexPriceUI: fillIndex}
+	spec.Perp = &exchange.PerpState{IndexPrice: perpIndex}
 	const cash = 20_000.0
 
-	quote := func(t *testing.T, uiPosition float64) Result {
+	quote := func(t *testing.T, positionNGN float64) Result {
 		t.Helper()
-		perp := livePerp()
-		res, err := BuildQuotes(cfg, spec, perpSnapshot(cash, uiPosition, perp))
+		res, err := BuildQuotes(cfg, spec, perpSnapshot(cash, positionNGN, livePerp()))
 		if err != nil || res.Bid == nil || res.Ask == nil {
-			t.Fatalf("BuildQuotes at position %v: %v (bid %v ask %v)", uiPosition, err, res.Bid, res.Ask)
+			t.Fatalf("BuildQuotes at position %v: %v (bid %v ask %v)", positionNGN, err, res.Bid, res.Ask)
 		}
 		return res
 	}
-	// The engine price of a displayed quote, USDC per cNGN.
-	engine := func(t *testing.T, q *Quote) (exchange.Side, float64, float64) {
+	// What GetBalances reports after the fill moves the cNGN position by delta.
+	positionAfter := func(t *testing.T, delta float64) float64 {
 		t.Helper()
-		side, price, amount, err := exchange.EngineOrderFromUI(spec, q.Side, q.Price, q.Size)
-		if err != nil {
-			t.Fatalf("EngineOrderFromUI: %v", err)
-		}
-		return side, price, amount
-	}
-	// What GetBalances reports after the fill moves the NGN position by engineDelta.
-	positionAfter := func(t *testing.T, engineDelta float64) float64 {
-		t.Helper()
-		balances, err := exchange.PerpBalances(spec, map[string]float64{"0xperp|0": engineDelta, "0xcash|0": cash})
+		balances, err := exchange.PerpBalances(spec, map[string]float64{"0xperp|0": delta, "0xcash|0": cash})
 		if err != nil {
 			t.Fatalf("PerpBalances: %v", err)
 		}
@@ -60,67 +45,52 @@ func TestPerpFillEachSide(t *testing.T) {
 	}
 
 	flat := quote(t, 0)
-	_, flatBidEngine, _ := engine(t, flat.Bid)
-	_, flatAskEngine, _ := engine(t, flat.Ask)
+	if flat.Bid.Side != exchange.SideBuy || flat.Ask.Side != exchange.SideSell {
+		t.Fatalf("sides %s/%s: a bid is an engine buy of cNGN", flat.Bid.Side, flat.Ask.Side)
+	}
+	if want := math.Floor(1_000 / perpIndex); flat.Bid.Size != want {
+		t.Fatalf("rung %v cNGN, want %v ($1,000 at the index)", flat.Bid.Size, want)
+	}
 
-	t.Run("bid filled: the bot is long USDC, short the cNGN perp, and leans to sell", func(t *testing.T) {
-		side, price, amount := engine(t, flat.Bid)
-		// Displayed: a buy of USD. On chain: a SELL of NGN at 1/price.
-		if side != exchange.SideSell {
-			t.Fatalf("a UI bid must reach the engine as a sell of NGN, got %s", side)
+	t.Run("bid filled: the bot is long cNGN and leans down to sell it", func(t *testing.T) {
+		position := positionAfter(t, +flat.Bid.Size)
+		if position <= 0 || position != flat.Bid.Size {
+			t.Fatalf("position %v cNGN after a bid fill, want +%v", position, flat.Bid.Size)
 		}
-		if math.Abs(price-1/flat.Bid.Price) > 1e-15 || math.Abs(amount-flat.Bid.Size*flat.Bid.Price) > 1e-6 {
-			t.Fatalf("engine price/amount %v/%v for UI %v x %v", price, amount, flat.Bid.Price, flat.Bid.Size)
-		}
-		// Selling NGN leaves the engine position negative; the bot reads it as a positive (long) USD position.
-		enginePosition := -amount
-		ui := positionAfter(t, enginePosition)
-		if !(enginePosition < 0 && ui > 0) {
-			t.Fatalf("engine %v NGN / UI %v USD: want engine short, UI long", enginePosition, ui)
-		}
-		if want := amount / fillIndex; math.Abs(ui-want) > 1e-6 {
-			t.Fatalf("UI position %v, want %v (engine NGN at the index)", ui, want)
-		}
-
-		after := quote(t, ui)
-		// Displayed: long USDC, so both quotes move DOWN in cNGN per USDC -- buy less, sell more.
+		after := quote(t, position)
 		if !(after.Bid.Price < flat.Bid.Price && after.Ask.Price < flat.Ask.Price) {
-			t.Fatalf("displayed quotes %v/%v did not lean down from %v/%v", after.Bid.Price, after.Ask.Price, flat.Bid.Price, flat.Ask.Price)
+			t.Fatalf("quotes %v/%v did not lean down from %v/%v", after.Bid.Price, after.Ask.Price, flat.Bid.Price, flat.Ask.Price)
 		}
-		// On chain: short NGN, so both move UP in USDC per cNGN -- the engine bid for NGN (the UI ask)
-		// pays more to buy NGN back, and the engine ask (the UI bid) asks more to sell further.
-		askSide, askEngine, _ := engine(t, after.Ask)
-		_, bidEngine, _ := engine(t, after.Bid)
-		if askSide != exchange.SideBuy {
-			t.Fatalf("a UI ask must reach the engine as a buy of NGN, got %s", askSide)
-		}
-		if !(askEngine > flatAskEngine && bidEngine > flatBidEngine) {
-			t.Fatalf("engine prices %v/%v did not lean up from %v/%v", askEngine, bidEngine, flatAskEngine, flatBidEngine)
+		if after.SkewBPS <= 0 {
+			t.Fatalf("skew %v bps, want positive for a long", after.SkewBPS)
 		}
 	})
 
-	t.Run("ask filled: the bot is short USDC, long the cNGN perp, and leans to buy", func(t *testing.T) {
-		side, price, amount := engine(t, flat.Ask)
-		if side != exchange.SideBuy {
-			t.Fatalf("a UI ask must reach the engine as a buy of NGN, got %s", side)
+	t.Run("ask filled: the bot is short cNGN and leans up to buy it back", func(t *testing.T) {
+		position := positionAfter(t, -flat.Ask.Size)
+		if position >= 0 {
+			t.Fatalf("position %v cNGN after an ask fill, want negative", position)
 		}
-		if math.Abs(price-1/flat.Ask.Price) > 1e-15 {
-			t.Fatalf("engine price %v for UI %v", price, flat.Ask.Price)
-		}
-		enginePosition := amount
-		ui := positionAfter(t, enginePosition)
-		if !(enginePosition > 0 && ui < 0) {
-			t.Fatalf("engine %v NGN / UI %v USD: want engine long, UI short", enginePosition, ui)
-		}
-
-		after := quote(t, ui)
+		after := quote(t, position)
 		if !(after.Bid.Price > flat.Bid.Price && after.Ask.Price > flat.Ask.Price) {
-			t.Fatalf("displayed quotes %v/%v did not lean up from %v/%v", after.Bid.Price, after.Ask.Price, flat.Bid.Price, flat.Ask.Price)
+			t.Fatalf("quotes %v/%v did not lean up from %v/%v", after.Bid.Price, after.Ask.Price, flat.Bid.Price, flat.Ask.Price)
 		}
-		_, askEngine, _ := engine(t, after.Ask)
-		_, bidEngine, _ := engine(t, after.Bid)
-		if !(askEngine < flatAskEngine && bidEngine < flatBidEngine) {
-			t.Fatalf("engine prices %v/%v did not lean down from %v/%v", askEngine, bidEngine, flatAskEngine, flatBidEngine)
+		if after.SkewBPS >= 0 {
+			t.Fatalf("skew %v bps, want negative for a short", after.SkewBPS)
+		}
+	})
+
+	t.Run("the inventory limit is USDC of position at the reference", func(t *testing.T) {
+		// 10,000 USDC long is 13.74M cNGN: at 13.5M the next $1,000 rung would breach it.
+		res, err := BuildQuotes(cfg, spec, perpSnapshot(cash, 13_500_000, livePerp()))
+		if err != nil {
+			t.Fatalf("BuildQuotes: %v", err)
+		}
+		if res.Bid != nil || res.BidSuppression == nil || res.BidSuppression.Reason != "max_long_inventory" {
+			t.Fatalf("bid %+v suppression %+v, want max_long_inventory", res.Bid, res.BidSuppression)
+		}
+		if res.Ask == nil {
+			t.Fatalf("ask suppressed too: %+v", res.AskSuppression)
 		}
 	})
 }

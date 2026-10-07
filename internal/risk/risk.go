@@ -35,7 +35,15 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 		return Decision{Halt: true, Reason: "anchor deviation exceeded"}
 	}
 
+	// Inventory is the base asset in engine units (cNGN on the cNGN markets, long positive).
+	// MM_MAX_LONG/SHORT/NET_INVENTORY are USDC there, so the inventory is valued at the reference
+	// price (USDC per cNGN) before the comparison; a future compares in contracts.
 	inventory := snapshot.Inventory(spec.BaseAsset)
+	unit := "contracts"
+	if spec.CNGNDenominated() {
+		inventory *= snapshot.ReferencePrice
+		unit = "USDC"
+	}
 	maxLong := cfg.MaxLongInventory
 	maxShort := cfg.MaxShortInventory
 	if cfg.MaxNetInventory > 0 {
@@ -47,20 +55,26 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 		}
 	}
 	if inventory > maxLong {
-		return Decision{Halt: true, Reason: fmt.Sprintf("inventory %.6f exceeds max long %.6f", inventory, maxLong)}
+		return Decision{Halt: true, Reason: fmt.Sprintf("inventory %.6f %s exceeds max long %.6f", inventory, unit, maxLong)}
 	}
 	if inventory < maxShort {
-		return Decision{Halt: true, Reason: fmt.Sprintf("inventory %.6f exceeds max short %.6f", inventory, maxShort)}
+		return Decision{Halt: true, Reason: fmt.Sprintf("inventory %.6f %s exceeds max short %.6f", inventory, unit, maxShort)}
 	}
 	if cfg.MaxNotionalPerSide > 0 {
+		// MM_MAX_NOTIONAL_PER_SIDE is a cNGN amount on the cNGN markets (the order's own size) and
+		// quote notional on a future.
 		for _, order := range snapshot.OpenOrders {
 			notional := order.Price * order.Size
+			if spec.CNGNDenominated() {
+				notional = order.Size
+			}
 			if notional > cfg.MaxNotionalPerSide {
 				return Decision{Halt: true, Reason: "open order notional exceeds limit"}
 			}
 		}
 	}
 
+	// MM_MIN_BASE_BALANCE is cNGN and MM_MIN_QUOTE_BALANCE is USDC on the cNGN markets.
 	basePosition := snapshot.Position(spec.BaseAsset)
 	// On the perp the base "balance" is the signed position, not a holding a quote draws on.
 	if !spec.IsPerp() && basePosition.Available < cfg.MinBaseBalance {

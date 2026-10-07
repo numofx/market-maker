@@ -307,7 +307,7 @@ func (s *Syncer) reconcileSide(
 		target := slot.target
 
 		if current != nil {
-			quantum := sizeQuantumUI(s.spec, current.Price)
+			quantum := sizeQuantum(s.spec)
 			// Derived per order, because the correct bound depends on that order's own price.
 			// An error here yields "", which staleTermsReason reads as "cannot say" and leaves
 			// the order alone rather than churning the book on a guess.
@@ -481,15 +481,6 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 	return cancelDecision{}
 }
 
-// sizeQuantumUI is the smallest size difference the venue can actually express, in the same units
-// the quote is denominated in.
-//
-// Spot amounts are whole cNGN, so placing a UI size of 0.359975 USDC at 1331.99 asks for 479.48
-// cNGN and rests 479 -- the venue floors it, and the resting order is smaller than the target by
-// up to one cNGN no matter what anyone does. In UI terms that is 1/price USDC.
-//
-// Futures quantise in contract lots, where the size is already in contracts and the step is
-// MinSize.
 // sizeMismatchAttrs is every input the replace decision actually used, so a size_mismatch cancel
 // can be explained from the log line alone.
 //
@@ -499,10 +490,9 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 // place-order logs said "keep"; production said "replace". The decision inputs were never logged,
 // so the gap could only be guessed at -- twice, wrongly.
 //
-// raw_engine_amount is the value straight from the active_orders row, before
-// orderAmountToFloat and spotUIFromEngine convert it. The book serves the same order through a
-// different projection, and the suspicion is that the two disagree; printing both ends of that
-// conversion is what settles it rather than another inference.
+// raw_engine_amount is the value straight from the active_orders row, before orderAmountToFloat
+// converts it. On the cNGN markets it IS the size (whole cNGN); a disagreement between the two
+// localises a fault to the conversion rather than the decision.
 func sizeMismatchAttrs(current *exchange.Order, target *strategy.Quote, quantum float64, cfg config.Config) []any {
 	relative := math.Max(math.Abs(current.Size), math.Abs(target.Size)) * (sizeDustToleranceBPS / 10000.0)
 	tolerance := math.Max(math.Max(cfg.AdoptSizeTolerance, relative), quantum)
@@ -520,11 +510,10 @@ func sizeMismatchAttrs(current *exchange.Order, target *strategy.Quote, quantum 
 		"target_price", target.Price,
 		"raw_engine_amount", current.RawSize,
 	}
-	// What current.Size would be if it were derived from the raw amount and the order's own price.
-	// A disagreement with current_size localises the fault to the conversion rather than the
-	// decision.
-	if raw, err := strconv.ParseFloat(strings.TrimSpace(current.RawSize), 64); err == nil && current.Price > 0 {
-		attrs = append(attrs, "size_from_raw", raw/current.Price)
+	// The raw amount as a number, for comparison with current_size: equal on the cNGN markets, a
+	// MinSize multiple apart on a future.
+	if raw, err := strconv.ParseFloat(strings.TrimSpace(current.RawSize), 64); err == nil {
+		attrs = append(attrs, "size_from_raw", raw)
 	}
 	return attrs
 }
@@ -542,13 +531,11 @@ func toleranceSource(absolute, relative, quantum float64) string {
 	}
 }
 
-func sizeQuantumUI(spec exchange.MarketSpec, price float64) float64 {
-	if spec.UIInverted() {
-		if price <= 0 {
-			return 0
-		}
-		return 1.0 / price
-	}
+// sizeQuantum is the smallest size difference the venue can actually express, in the units the
+// quote is denominated in: one whole cNGN on the cNGN markets (MinSize 1), a contract lot on a
+// future. A target is always rounded to it before it is placed, so a resting order that differs
+// from its target by under a quantum differs by rounding alone.
+func sizeQuantum(spec exchange.MarketSpec) float64 {
 	return spec.MinSize
 }
 
@@ -556,14 +543,20 @@ func sizeQuantumUI(spec exchange.MarketSpec, price float64) float64 {
 // to be worth cancelling and replacing.
 //
 // The tolerance is floored at one quantum because the venue cannot express anything finer. The
-// dust tolerance is RELATIVE (5 bps of size) while the quantisation error is ABSOLUTE (up to one
-// cNGN), so below roughly 1.5 USDC the error always exceeds the tolerance and the order is
-// replaced by an order that is wrong in exactly the same way -- forever, at the poll interval.
+// dust tolerance is RELATIVE (5 bps of size) while the quantisation error is ABSOLUTE (one cNGN),
+// so a small enough order would otherwise be replaced by an order that is wrong in exactly the
+// same way -- forever, at the poll interval.
 //
-// That is not hypothetical. On 2026-09-10 a 0.359975 USDC level was placed 4,065 times at an
-// unchanged price: target 0.359975, rests 0.359613, diff 0.000362, tolerance 0.000180. It
-// accounted for 92% of 10,368 cancels in 15 hours and repeatedly exhausted the cancel budget.
-// There were no fills to explain it -- the venue's whole trade history was 8 trades.
+// That is not hypothetical. On 2026-09-10, when sizes were still USDC and the venue floored them
+// to whole cNGN, a 0.359975 USDC level was placed 4,065 times at an unchanged price: target
+// 0.359975, rests 0.359613, diff 0.000362, tolerance 0.000180. It accounted for 92% of 10,368
+// cancels in 15 hours and repeatedly exhausted the cancel budget. There were no fills to explain
+// it -- the venue's whole trade history was 8 trades.
+//
+// The relative tolerance also absorbs the other way a cNGN target moves: it is MM_ORDER_SIZE in
+// USDC converted at the reference, so a move of x bps in the price moves the target by ~x bps.
+// Below MM_CANCEL_STALE_ORDER_THRESHOLD_BPS the price drift is not a replace, and the matching
+// size drift must not be one either; the two thresholds default to the same 5 bps.
 func sizeMismatchRequiresReplace(current, target float64, cfg config.Config, quantum float64) bool {
 	diff := math.Abs(current - target)
 	if diff <= 1e-9 {

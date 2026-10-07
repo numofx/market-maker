@@ -14,6 +14,7 @@ type Registry struct {
 	openAskPresent                 float64
 	inventory                      map[string]float64
 	netInventory                   float64
+	netInventoryUSD                float64
 	fillsBySide                    map[string]uint64
 	cancelCategoryTotals           map[string]uint64
 	quoteRefreshes                 uint64
@@ -84,10 +85,20 @@ func (r *Registry) SetInventory(asset string, value float64) {
 	r.inventory[asset] = value
 }
 
+// SetNetInventory is the base-asset inventory in the market's own units: cNGN held on spot, the
+// signed cNGN position on the perp, contracts on a future.
 func (r *Registry) SetNetInventory(value float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.netInventory = value
+}
+
+// SetNetInventoryUSD is the same inventory valued in USDC at the reference price, the unit the
+// operator's MM_MAX_*_INVENTORY limits are in.
+func (r *Registry) SetNetInventoryUSD(value float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.netInventoryUSD = value
 }
 
 func (r *Registry) IncQuoteRefresh() {
@@ -355,6 +366,7 @@ func (r *Registry) render() string {
 	fmt.Fprintf(&b, "mm_bot_open_bid_present %v\n", r.openBidPresent)
 	fmt.Fprintf(&b, "mm_bot_open_ask_present %v\n", r.openAskPresent)
 	fmt.Fprintf(&b, "mm_bot_net_inventory %v\n", r.netInventory)
+	fmt.Fprintf(&b, "mm_bot_net_inventory_usd %v\n", r.netInventoryUSD)
 	fmt.Fprintf(&b, "mm_bot_quote_refresh_total %d\n", r.quoteRefreshes)
 	fmt.Fprintf(&b, "mm_bot_order_placements_total %d\n", r.orderPlacements)
 	fmt.Fprintf(&b, "mm_bot_order_cancels_total %d\n", r.cancels)

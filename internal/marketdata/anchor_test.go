@@ -3,6 +3,7 @@ package marketdata
 import (
 	"context"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"strings"
@@ -18,6 +19,23 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+// The 0x quote (sell USDC, buy cNGN) is cNGN per USDC and is inverted on ingest.
+func TestZeroExExternalAnchorIsInvertedToUSDCPerCNGN(t *testing.T) {
+	provider := &ZeroExUSDCCNGNSpotExternalAnchor{
+		cfg: config.USDCCNGNSpotExternalAnchorConfig{
+			Provider: "0x", BaseURL: "https://example.invalid/price", ChainID: 8453,
+			SellToken: "0xsell", BuyToken: "0xbuy", Amount: "1000000", Timeout: time.Second, MaxAge: time.Minute,
+		},
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"price":"1374"}`)), Header: make(http.Header)}, nil
+		})},
+	}
+	quote := provider.Fetch(context.Background())
+	if !quote.Present || math.Abs(quote.Price-1/1374.0) > 1e-15 {
+		t.Fatalf("quote = %+v, want 1/1374 USDC per cNGN", quote)
+	}
 }
 
 func TestZeroExExternalAnchorRejectsWildDeviation(t *testing.T) {
@@ -138,8 +156,9 @@ func TestCNGNOracleExternalAnchorFetchesOnChainPrice(t *testing.T) {
 	if !quote.Present {
 		t.Fatalf("expected present quote, got %#v", quote)
 	}
-	if quote.Price != 1250 {
-		t.Fatalf("price = %v want 1250", quote.Price)
+	// 80,000 at 8 decimals is 0.0008 USD per NGN, used as the engine's USDC per cNGN.
+	if math.Abs(quote.Price-0.0008) > 1e-15 {
+		t.Fatalf("price = %v want 0.0008 USDC per cNGN", quote.Price)
 	}
 	if quote.FetchedAt.Unix() != now.Unix() {
 		t.Fatalf("fetchedAt = %v want unix %d", quote.FetchedAt, now.Unix())

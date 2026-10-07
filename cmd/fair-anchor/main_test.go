@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -50,9 +51,37 @@ func TestFetchStrailsMid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := (1388.77 + 1389.33) / 2.0
+	// StablesRail quotes cNGN per USDC; the anchor serves USDC per cNGN.
+	want := 1 / ((1388.77 + 1389.33) / 2.0)
 	if mid != want {
 		t.Fatalf("mid = %v, want %v", mid, want)
+	}
+}
+
+// A book row is read from its engine limit_price, and a row with only a ui_intent through the
+// row's own spec: an inverted (usdc_cngn) row is inverted, an engine (cngn_usdc) row is not.
+func TestParsePresentedBookPriceIsUSDCPerCNGNUnderBothSpecs(t *testing.T) {
+	engine := bookLevel{LimitPrice: "0.000732186449930284"}
+	if p, ok := parsePresentedBookPrice(engine); !ok || p != 0.000732186449930284 {
+		t.Fatalf("limit_price row = %v/%v", p, ok)
+	}
+	inverted := bookLevel{SpotContract: &spotContract{Spec: "usdc_cngn_spot_v1", UIIntent: &spotUIIntent{Side: "sell", Price: "1365.772339", Size: "19.999673"}}}
+	if p, ok := parsePresentedBookPrice(inverted); !ok || math.Abs(p-1/1365.772339) > 1e-15 {
+		t.Fatalf("inverted ui_intent row = %v/%v, want 1/1365.772339", p, ok)
+	}
+	direct := bookLevel{SpotContract: &spotContract{Spec: "cngn_usdc_spot_v1", UIIntent: &spotUIIntent{Side: "buy", Price: "0.000728", Size: "68700"}}}
+	if p, ok := parsePresentedBookPrice(direct); !ok || p != 0.000728 {
+		t.Fatalf("engine ui_intent row = %v/%v, want 0.000728", p, ok)
+	}
+}
+
+// A future's fair value is cNGN per USDC from a USDC-per-cNGN spot: 1/0.000728 = 1373.6 with
+// the carry on top.
+func TestComputeFairIsCNGNPerUSDC(t *testing.T) {
+	h := &handler{cfg: config{Expiry: time.Now().Add(365 * 24 * time.Hour), RateAPR: 0.08}}
+	_, fair := h.computeFair(0.000728)
+	if fair < 1373.6*1.08 || fair > 1373.7*1.09 {
+		t.Fatalf("fair = %v, want ~1373.6 x e^0.08", fair)
 	}
 }
 
