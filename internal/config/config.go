@@ -10,10 +10,14 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/numofx/market-maker/internal/marketnames"
 )
 
 const (
-	defaultMarket               = "USDCcNGN-SPOT"
+	// The pre-rename spot name: the one identifier every markets-service, before and after the
+	// rename, accepts. The bot works under whichever name the venue resolves it to.
+	defaultMarket               = marketnames.SpotLegacy
 	defaultPollIntervalMS       = 2000
 	defaultQuoteRefreshMS       = 5000
 	defaultOrderSize            = 100
@@ -393,8 +397,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("MM_ANCHOR_URL is required when MM_ANCHOR_SOURCE_TYPE=http")
 	}
 	if cfg.USDCCNGNSpotExternalAnchor.Enabled {
-		if cfg.MarketSymbol != "USDCcNGN-SPOT" {
-			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED is only supported for MM_MARKET_SYMBOL=USDCcNGN-SPOT")
+		// By any name the venue accepts for the spot market; startup checks it again against
+		// what the venue actually resolved the market to.
+		if !marketnames.IsSpot(cfg.MarketSymbol) {
+			return Config{}, fmt.Errorf("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED is only supported for the cNGN spot market (MM_MARKET_SYMBOL=%s or %s), got %q", marketnames.SpotCanonical, marketnames.SpotLegacy, cfg.MarketSymbol)
 		}
 		switch cfg.USDCCNGNSpotExternalAnchor.Provider {
 		case "0x", "cngn-price-oracle", "cngn-rate-picker":

@@ -10,9 +10,15 @@ This bot keeps one market non-empty with one resting bid and one resting ask. It
 
 It supports one market per process. The intended symbols are:
 
-- `USDCcNGN-SPOT` (displayed by the venue as `cNGN-USDC`)
-- `USDCcNGN-PERP` (displayed as `cNGN-PERP`)
+- the cNGN spot market: listed as `cNGN-USDC` (was `USDCcNGN-SPOT`)
+- the cNGN perp: listed as `cNGN-PERP` (was `USDCcNGN-PERP`)
 - the dated `USDCcNGN-*-2026` futures (legacy; see Orientation)
+
+`MM_MARKET_SYMBOL` may name the spot or the perp under either spelling. The bot resolves it against
+`/v1/markets` (the listed `market` or any of its `aliases`, falling back to its own table of the two
+spellings when the venue lists none) and uses the venue's canonical name from then on: in order ids,
+logs and every comparison. A ladder tagged under the old name is still recognised as the bot's. An
+unknown symbol refuses to start, naming what the venue lists.
 
 ## What The Bot Does
 
@@ -298,7 +304,7 @@ Anchor freshness is tracked independently from exchange market-data freshness. `
 It is enabled only with:
 
 - `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED=true`
-- `MM_MARKET_SYMBOL=USDCcNGN-SPOT`
+- `MM_MARKET_SYMBOL=USDCcNGN-SPOT` or `cNGN-USDC`
 
 The bot then uses the configured external anchor as an indicative mark when and only when the local spot market has no usable local reference.
 

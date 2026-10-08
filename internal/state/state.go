@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/numofx/market-maker/internal/exchange"
+	"github.com/numofx/market-maker/internal/marketnames"
 )
 
 // ReferenceTradeMaxAge bounds how old the most recent trade may be to still stand in for a live
@@ -35,13 +36,24 @@ func FreshTradePrice(snapshot Snapshot) (float64, bool) {
 	return trade.Price, true
 }
 
-// ReferenceTradePrice is the trade price a local reference may stand on. On USDCcNGN-SPOT the venue's
-// own book is the price, so its last trade stands however old it is: the oracle no longer gates spot
-// (see marketdata.Loader.Load), and an old print was only ever dangerous because an oracle guard
-// compared against it. Other markets keep the ReferenceTradeMaxAge cutoff, since their anchor still
-// feeds the deviation guard.
+// IsSpotMarket reports whether the snapshot's market is the venue's cNGN spot market: the traded
+// market resolves to the same name as the spot reference market. Resolved names, never literals, so
+// the venue renaming the market changes nothing here. With no resolved spot reference (a snapshot
+// built without the loader) the bot's own knowledge of the spot market's names decides.
+func (s Snapshot) IsSpotMarket() bool {
+	if s.SpotMarket != "" {
+		return s.Market == s.SpotMarket
+	}
+	return marketnames.IsSpot(s.Market)
+}
+
+// ReferenceTradePrice is the trade price a local reference may stand on. On the cNGN spot market
+// the venue's own book is the price, so its last trade stands however old it is: the oracle no
+// longer gates spot (see marketdata.Loader.Load), and an old print was only ever dangerous because
+// an oracle guard compared against it. Other markets keep the ReferenceTradeMaxAge cutoff, since
+// their anchor still feeds the deviation guard.
 func ReferenceTradePrice(snapshot Snapshot) (float64, bool) {
-	if snapshot.Market != "USDCcNGN-SPOT" {
+	if !snapshot.IsSpotMarket() {
 		return FreshTradePrice(snapshot)
 	}
 	if len(snapshot.RecentTrades) == 0 || snapshot.RecentTrades[0].Price <= 0 {
@@ -61,7 +73,12 @@ type AssetPosition struct {
 }
 
 type Snapshot struct {
+	// Market is the traded market's canonical name, as the venue lists it.
 	Market string
+	// SpotMarket is the venue's cNGN spot market as listed: the spot reference market, resolved
+	// from the listing by the loader. Empty when the loader could not name it (then IsSpotMarket
+	// falls back to the names the bot knows).
+	SpotMarket string
 	// BestBid and BestAsk are other participants' best prices: the bot's own resting orders are
 	// excluded, since the reference must not be priced off the bot's own quotes.
 	BestBid                        float64

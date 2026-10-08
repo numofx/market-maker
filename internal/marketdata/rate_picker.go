@@ -209,7 +209,7 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) fetchRatePicker(ctx context.Context) 
 	}
 	// The sources quote NGN per USDT; the bot prices in USDC per cNGN. Both are logged.
 	usdcPerCNGN := 1 / used.Price
-	attrs := []any{"market", "USDCcNGN-SPOT", "provider", used.Provider, "ngn_per_usdt", used.Price, "usdc_per_cngn", usdcPerCNGN}
+	attrs := []any{"market", s.market, "provider", used.Provider, "ngn_per_usdt", used.Price, "usdc_per_cngn", usdcPerCNGN}
 	for _, result := range all {
 		if result.Err != nil {
 			attrs = append(attrs, result.Provider, "error: "+result.Err.Error())

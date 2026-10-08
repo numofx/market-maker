@@ -238,7 +238,9 @@ func (NoopUSDCCNGNSpotExternalAnchor) Fetch(context.Context) ExternalAnchorQuote
 }
 
 type ZeroExUSDCCNGNSpotExternalAnchor struct {
-	cfg           config.USDCCNGNSpotExternalAnchorConfig
+	cfg config.USDCCNGNSpotExternalAnchorConfig
+	// market is the spot market's canonical name as the venue lists it, for the logs.
+	market        string
 	client        *http.Client
 	mu            sync.Mutex
 	last          ExternalAnchorQuote
@@ -251,12 +253,15 @@ type ZeroExUSDCCNGNSpotExternalAnchor struct {
 // the anchor is polled every quote cycle; cached values are served in between.
 const oracleRefreshThrottle = 15 * time.Second
 
-func NewUSDCCNGNSpotExternalAnchor(cfg config.Config) USDCCNGNSpotExternalAnchor {
-	if !cfg.USDCCNGNSpotExternalAnchor.Enabled || cfg.MarketSymbol != "USDCcNGN-SPOT" {
+// NewUSDCCNGNSpotExternalAnchor serves the external anchor for the cNGN spot market, and nothing
+// for any other: the market is what the venue resolved it to, not what MM_MARKET_SYMBOL says.
+func NewUSDCCNGNSpotExternalAnchor(cfg config.Config, spec exchange.MarketSpec) USDCCNGNSpotExternalAnchor {
+	if !cfg.USDCCNGNSpotExternalAnchor.Enabled || !spec.IsSpot() {
 		return NoopUSDCCNGNSpotExternalAnchor{}
 	}
 	return &ZeroExUSDCCNGNSpotExternalAnchor{
 		cfg:    cfg.USDCCNGNSpotExternalAnchor,
+		market: spec.Symbol,
 		client: &http.Client{Timeout: cfg.USDCCNGNSpotExternalAnchor.Timeout},
 	}
 }
@@ -302,7 +307,7 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) Fetch(ctx context.Context) ExternalAn
 	if s.last.Present && s.cfg.MaxDeviationBPS > 0 && time.Since(s.last.FetchedAt) <= s.cfg.MaxAge {
 		deviation := absBPS(quote.Price, s.last.Price)
 		if deviation > s.cfg.MaxDeviationBPS {
-			slog.Warn("external anchor rejected", "provider", s.cfg.Provider, "market", "USDCcNGN-SPOT", "reason", "deviation_guard", "candidate_price", quote.Price, "last_price", s.last.Price, "deviation_bps", deviation)
+			slog.Warn("external anchor rejected", "provider", s.cfg.Provider, "market", s.market, "reason", "deviation_guard", "candidate_price", quote.Price, "last_price", s.last.Price, "deviation_bps", deviation)
 			// Throttle the re-check like any refresh rather than re-reading upstream every cycle.
 			s.lastFetchWall = time.Now()
 			cached := s.last
@@ -532,10 +537,10 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) cachedIfFresh() ExternalAnchorQuote {
 func (s *ZeroExUSDCCNGNSpotExternalAnchor) logFailure(err error) {
 	var fetchErr *ExternalAnchorFetchError
 	if errors.As(err, &fetchErr) {
-		slog.Warn("external anchor refresh failed", "provider", s.cfg.Provider, "market", "USDCcNGN-SPOT", "status_code", fetchErr.StatusCode, "body", fetchErr.BodyPreview, "error", fetchErr.Err)
+		slog.Warn("external anchor refresh failed", "provider", s.cfg.Provider, "market", s.market, "status_code", fetchErr.StatusCode, "body", fetchErr.BodyPreview, "error", fetchErr.Err)
 		return
 	}
-	slog.Warn("external anchor refresh failed", "provider", s.cfg.Provider, "market", "USDCcNGN-SPOT", "error", err)
+	slog.Warn("external anchor refresh failed", "provider", s.cfg.Provider, "market", s.market, "error", err)
 }
 
 type ExternalAnchorFetchError struct {

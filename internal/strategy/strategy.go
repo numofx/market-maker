@@ -68,7 +68,7 @@ func ComputeReferencePrice(snapshot state.Snapshot) (float64, string) {
 		// The loader already chose: other traders' mid inside the basis band, else the index.
 		return snapshot.Perp.Reference, snapshot.Perp.ReferenceSource
 	}
-	if snapshot.Market == "USDCcNGN-SPOT" {
+	if snapshot.IsSpotMarket() {
 		// Other participants' two-sided book first; then the external fallback price; the venue's own last
 		// trade only when neither exists. A thin venue's last print can be hours old and far from the market
 		// (1327 against ~1371 on 2026-09-14), while the fallback is a live cross-venue rate.
@@ -173,7 +173,7 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	skewBPS := inventorySkew(inventory, maxLong, maxShort, cfg.InventorySkewBPS)
 	halfSpreadBPS := cfg.HalfSpreadBPS
 	orderSize := cfg.OrderSize
-	if snapshot.Market == "USDCcNGN-SPOT" && refSource == "external" {
+	if snapshot.IsSpotMarket() && refSource == "external" {
 		halfSpreadBPS *= cfg.USDCCNGNSpotExternalAnchor.SpreadMultiplier
 		orderSize *= cfg.USDCCNGNSpotExternalAnchor.SizeMultiplier
 	}
