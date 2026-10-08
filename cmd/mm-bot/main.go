@@ -85,7 +85,22 @@ func main() {
 
 	spec, err := client.GetMarket(ctx, cfg.MarketSymbol)
 	if err != nil {
-		logger.Error("resolve market", "error", err, "market", cfg.MarketSymbol)
+		logger.Error("resolve market", "error", err, "configured_market", cfg.MarketSymbol)
+		os.Exit(1)
+	}
+	// From here on the market is spec.Symbol, the venue's canonical name, whatever the operator
+	// configured; MM_MARKET_SYMBOL may be the pre-rename alias.
+	spotMarket, spotListed := client.SpotMarket()
+	logger.Info("market resolved", "configured_market", cfg.MarketSymbol, "market", spec.Symbol, "aliases", spec.Aliases, "kind", spec.Kind, "spot_reference_market", spotMarket)
+	if spec.IsSpot() && (!spotListed || spotMarket != spec.Symbol) {
+		// The spot-only pricing (the external anchor bootstrap, the standing last trade) keys on
+		// the spot reference market resolving to the traded one. Refuse rather than quote with it
+		// silently off.
+		logger.Error("spot reference market did not resolve to the traded market", "market", spec.Symbol, "spot_reference_market", spotMarket, "spot_listed", spotListed)
+		os.Exit(1)
+	}
+	if cfg.USDCCNGNSpotExternalAnchor.Enabled && !spec.IsSpot() {
+		logger.Error("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED needs the cNGN spot market; the venue resolved the configured market to something else", "configured_market", cfg.MarketSymbol, "market", spec.Symbol, "kind", spec.Kind)
 		os.Exit(1)
 	}
 

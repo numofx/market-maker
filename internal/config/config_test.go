@@ -113,3 +113,27 @@ func TestSignerBackendValidation(t *testing.T) {
 		}
 	})
 }
+
+// The external anchor is a spot-market feature; the operator may name spot under either spelling.
+func TestExternalAnchorAcceptsEitherSpellingOfSpotOnly(t *testing.T) {
+	cases := map[string]bool{
+		"USDCcNGN-SPOT": true,
+		"cNGN-USDC":     true,
+		"USDCcNGN-PERP": false,
+		"cNGN-PERP":     false,
+		"usdccngn-spot": false,
+	}
+	for market, ok := range cases {
+		setRequiredEnv(t)
+		t.Setenv("MM_MARKET_SYMBOL", market)
+		t.Setenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED", "true")
+		t.Setenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_PROVIDER", "cngn-rate-picker")
+		_, err := Load()
+		if ok && err != nil {
+			t.Errorf("MM_MARKET_SYMBOL=%s: %v", market, err)
+		}
+		if !ok && (err == nil || !strings.Contains(err.Error(), "only supported for the cNGN spot market")) {
+			t.Errorf("MM_MARKET_SYMBOL=%s: err = %v, want the spot-only refusal", market, err)
+		}
+	}
+}

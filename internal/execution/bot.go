@@ -101,7 +101,7 @@ func NewBot(cfg config.Config, client exchange.Client, spec exchange.MarketSpec,
 		cfg:          cfg,
 		client:       client,
 		spec:         spec,
-		loader:       marketdata.NewLoaderWithSpotExternal(client, spec, marketdata.NewAnchorSource(cfg, spec), marketdata.NewUSDCCNGNSpotExternalAnchor(cfg), cfg.USDCCNGNSpotExternalAnchor.BootstrapOnly).WithPerpBasis(cfg.PerpMaxBasisBPS),
+		loader:       marketdata.NewLoaderWithSpotExternal(client, spec, marketdata.NewAnchorSource(cfg, spec), marketdata.NewUSDCCNGNSpotExternalAnchor(cfg, spec), cfg.USDCCNGNSpotExternalAnchor.BootstrapOnly).WithPerpBasis(cfg.PerpMaxBasisBPS),
 		syncer:       NewSyncer(client, spec, cfg, m, logger),
 		metrics:      m,
 		logger:       logger,
@@ -599,7 +599,7 @@ func (b *Bot) logReferenceSourceTransition(prev state.Snapshot, next state.Snaps
 		return
 	}
 	b.logger.Info("reference source changed", "market", b.spec.Symbol, "from", prev.ReferenceSource, "to", next.ReferenceSource)
-	if b.spec.Symbol != "USDCcNGN-SPOT" {
+	if !b.spec.IsSpot() {
 		return
 	}
 	if next.ReferenceSource == "external" {

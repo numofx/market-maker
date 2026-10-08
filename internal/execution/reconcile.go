@@ -141,14 +141,16 @@ func startupRejectReason(cfg config.Config, spec exchange.MarketSpec, order exch
 	if !order.Managed {
 		return "ambiguous_ownership"
 	}
-	if !strings.HasPrefix(order.ID, startupManagedOrderPrefix(spec.Symbol)) {
+	// The tag may carry the market's canonical name or any alias the venue accepts for it: a
+	// ladder placed before the venue renamed the market is still this bot's after it.
+	if !spec.IsManagedOrderID(order.ID) {
 		return "malformed_metadata"
 	}
 	parts := strings.Split(order.ID, ":")
 	if len(parts) != 4 {
 		return "malformed_metadata"
 	}
-	if parts[1] != spec.Symbol {
+	if !spec.HasName(parts[1]) {
 		return "wrong_market"
 	}
 	if order.Side != exchange.SideBuy && order.Side != exchange.SideSell {
@@ -243,10 +245,6 @@ func expiryBeyondConfig(cfg config.Config, order *exchange.Order, now time.Time)
 		return false
 	}
 	return order.Expiry > now.Unix()+cfg.OrderExpirySeconds+signedExpirySlackSeconds
-}
-
-func startupManagedOrderPrefix(market string) string {
-	return "mm:" + market + ":"
 }
 
 // adoptionMismatchReason applies the same size rule the steady-state cycle uses

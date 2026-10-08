@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,8 @@ import (
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/numofx/market-maker/internal/marketnames"
 )
 
 type Side string
@@ -120,11 +123,13 @@ type Order struct {
 type MarketKind string
 
 const (
-	// MarketKindSpot is USDCcNGN-SPOT: priced in USDC per cNGN, sized in whole cNGN, a buy is a buy
-	// of cNGN; each side of a quote is backed by the token it delivers.
+	// MarketKindSpot is the cNGN spot market (cNGN-USDC, once USDCcNGN-SPOT): priced in USDC per
+	// cNGN, sized in whole cNGN, a buy is a buy of cNGN; each side of a quote is backed by the token
+	// it delivers.
 	MarketKindSpot MarketKind = "spot"
-	// MarketKindPerp is USDCcNGN-PERP: priced and sized like spot (the engine holds the position in
-	// cNGN, long positive), but both sides are backed by cash margin.
+	// MarketKindPerp is the cNGN perp (cNGN-PERP, once USDCcNGN-PERP): priced and sized like spot
+	// (the engine holds the position in cNGN, long positive), but both sides are backed by cash
+	// margin.
 	MarketKindPerp MarketKind = "perp"
 	// MarketKindFuture is a dated, cash-margined future sized in 0.001 contract lots and priced in
 	// its own engine units; nothing about the cNGN orientation applies to it.
@@ -136,9 +141,9 @@ const (
 // as a fallback for a markets-service that omits it.
 func marketKind(symbol, contractType, orderEntrySpec string) MarketKind {
 	switch {
-	case orderEntrySpec == SpecCNGNUSDCSpot || orderEntrySpec == SpecUSDCCNGNSpot || symbol == "USDCcNGN-SPOT" || contractType == "spot":
+	case orderEntrySpec == SpecCNGNUSDCSpot || orderEntrySpec == SpecUSDCCNGNSpot || marketnames.IsSpot(symbol) || contractType == "spot":
 		return MarketKindSpot
-	case orderEntrySpec == SpecCNGNUSDCPerp || orderEntrySpec == SpecUSDCCNGNPerp || contractType == "perpetual":
+	case orderEntrySpec == SpecCNGNUSDCPerp || orderEntrySpec == SpecUSDCCNGNPerp || marketnames.IsPerp(symbol) || contractType == "perpetual":
 		return MarketKindPerp
 	default:
 		return MarketKindFuture
@@ -189,8 +194,15 @@ type MarketSpec struct {
 	// tools that read presented rows.
 	Orientation Orientation
 	// Perp is set for a perp market with a readable `perp` object; nil otherwise.
-	Perp   *PerpState
+	Perp *PerpState
+	// Symbol is the market's canonical identifier: the `market` /v1/markets lists it under. It is
+	// what every order id, log line and comparison downstream uses, whatever the operator wrote in
+	// MM_MARKET_SYMBOL.
 	Symbol string
+	// Aliases are the other identifiers the venue accepts for this market: its `aliases` from
+	// /v1/markets, or, for a listing without them, the bot's own fallback table (marketnames). An
+	// order id tagged with any of them is this bot's.
+	Aliases []string
 	// BaseAsset and QuoteAsset are the engine's: cNGN and USDC on the cNGN markets, whatever order
 	// the venue listed them in.
 	BaseAsset      string
@@ -213,6 +225,34 @@ type MarketSpec struct {
 	// ExpiryTimestamp is the market's expiry (unix seconds) from /v1/markets;
 	// zero for spot / perpetual markets.
 	ExpiryTimestamp int64
+}
+
+// Names is every identifier this market answers to: the canonical symbol first, then its aliases.
+func (s MarketSpec) Names() []string {
+	return append([]string{s.Symbol}, s.Aliases...)
+}
+
+// HasName reports whether name identifies this market, canonically or by alias. Exact match only,
+// like the venue.
+func (s MarketSpec) HasName(name string) bool {
+	for _, known := range s.Names() {
+		if name == known {
+			return true
+		}
+	}
+	return false
+}
+
+// IsManagedOrderID reports whether an order id was minted by this bot for this market: the
+// "mm:<market>:" tag, under the market's canonical name or any of its aliases, so a ladder placed
+// before the venue renamed the market is still recognised as this bot's after it.
+func (s MarketSpec) IsManagedOrderID(orderID string) bool {
+	for _, name := range s.Names() {
+		if strings.HasPrefix(orderID, managedOrderPrefix(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // CNGNDenominated reports whether this is one of the cNGN markets: priced in USDC per cNGN and
@@ -321,8 +361,11 @@ type HTTPClient struct {
 	// reverted TM_FeeTooHigh until the process was restarted by hand.
 	//
 	// Guarded because refreshes now happen on the quoting path while other calls read it.
-	marketsMu    sync.RWMutex
+	marketsMu sync.RWMutex
+	// markets is keyed by canonical symbol; marketNames maps every identifier the venue accepts
+	// (canonical and alias) to that key. Both are replaced wholesale by loadMarkets.
 	markets      map[string]MarketSpec
+	marketNames  map[string]string
 	marketsAt    time.Time
 	marketsStale bool
 	refreshEvery time.Duration
@@ -454,7 +497,7 @@ func (c *HTTPClient) Close() {
 // surfaces on the next quote cycle.
 func (c *HTTPClient) GetMarket(ctx context.Context, market string) (MarketSpec, error) {
 	c.marketsMu.RLock()
-	spec, ok := c.markets[market]
+	spec, ok := c.markets[c.canonicalNameLocked(market)]
 	fresh := time.Since(c.marketsAt) < c.refreshEvery
 	c.marketsMu.RUnlock()
 
@@ -483,11 +526,54 @@ func (c *HTTPClient) GetMarket(ctx context.Context, market string) (MarketSpec, 
 
 	c.marketsMu.RLock()
 	defer c.marketsMu.RUnlock()
-	spec, ok = c.markets[market]
+	spec, ok = c.markets[c.canonicalNameLocked(market)]
 	if !ok {
-		return MarketSpec{}, fmt.Errorf("unknown market %s", market)
+		return MarketSpec{}, fmt.Errorf("unknown market %q: the venue lists %v", market, c.listedNamesLocked())
 	}
 	return spec, nil
+}
+
+// canonicalNameLocked maps any identifier the venue accepts for a market to the key markets is
+// held under. An unknown name maps to itself, so the lookup that follows fails as before. Callers
+// hold marketsMu.
+func (c *HTTPClient) canonicalNameLocked(name string) string {
+	if canonical, ok := c.marketNames[name]; ok {
+		return canonical
+	}
+	return name
+}
+
+// listedNamesLocked is every identifier the venue accepts, canonical and alias, sorted, for the
+// error that refuses an unknown one. Callers hold marketsMu.
+func (c *HTTPClient) listedNamesLocked() []string {
+	names := make([]string, 0, len(c.marketNames))
+	for name := range c.marketNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// lookupMarket resolves a market by any identifier the venue accepts, from the schedule in hand.
+func (c *HTTPClient) lookupMarket(name string) (MarketSpec, bool) {
+	c.marketsMu.RLock()
+	defer c.marketsMu.RUnlock()
+	spec, ok := c.markets[c.canonicalNameLocked(name)]
+	return spec, ok
+}
+
+// SpotMarket is the canonical name of the venue's cNGN spot market as listed, if it is listed: the
+// spot reference market the strategy's spot-only pricing keys on. It is resolved from the listing's
+// own statement of what each market is, never from a name.
+func (c *HTTPClient) SpotMarket() (string, bool) {
+	c.marketsMu.RLock()
+	defer c.marketsMu.RUnlock()
+	for symbol, spec := range c.markets {
+		if spec.IsSpot() {
+			return symbol, true
+		}
+	}
+	return "", false
 }
 
 // MarketsStale reports whether the last refresh attempt failed, so the schedule in hand is older
@@ -825,7 +911,7 @@ order by created_at asc
 			Nonce:      nonce,
 			Owner:      owner,
 			CreatedAt:  createdAt,
-			Managed:    strings.HasPrefix(orderID, managedOrderPrefix(market)),
+			Managed:    spec.IsManagedOrderID(orderID),
 			Subaccount: subaccountID,
 			PostOnly:   postOnly,
 			WorstFee:   worstFee,
@@ -1115,16 +1201,19 @@ where order_id = $1 and owner_address = $2
 
 func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	var resp []struct {
-		Market           string `json:"market"`
-		BaseAssetSymbol  string `json:"base_asset_symbol"`
-		QuoteAssetSymbol string `json:"quote_asset_symbol"`
-		AssetAddress     string `json:"asset_address"`
-		SubID            string `json:"sub_id"`
-		TickSize         string `json:"tick_size"`
-		OrderEntrySpec   string `json:"order_entry_spec"`
-		TakerFeeBps      int    `json:"taker_fee_bps"`
-		ExpiryTimestamp  int64  `json:"expiry_timestamp"`
-		ContractType     string `json:"contract_type"`
+		Market string `json:"market"`
+		// Aliases are the other identifiers the venue accepts for the market (its pre-rename
+		// names). A listing that omits the field entirely is served from the fallback table.
+		Aliases          []string `json:"aliases"`
+		BaseAssetSymbol  string   `json:"base_asset_symbol"`
+		QuoteAssetSymbol string   `json:"quote_asset_symbol"`
+		AssetAddress     string   `json:"asset_address"`
+		SubID            string   `json:"sub_id"`
+		TickSize         string   `json:"tick_size"`
+		OrderEntrySpec   string   `json:"order_entry_spec"`
+		TakerFeeBps      int      `json:"taker_fee_bps"`
+		ExpiryTimestamp  int64    `json:"expiry_timestamp"`
+		ContractType     string   `json:"contract_type"`
 		Perp             *struct {
 			MarkPrice      string `json:"mark_price"`
 			IndexPrice     string `json:"index_price"`
@@ -1146,11 +1235,19 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	// Built into a fresh map and swapped in at the end, so a failure part-way through leaves the
 	// previous schedule intact rather than a half-updated one.
 	next := make(map[string]MarketSpec, len(resp))
+	names := make(map[string]string, 2*len(resp))
 	for _, item := range resp {
 		tickSize, _ := strconv.ParseFloat(item.TickSize, 64)
 		kind := marketKind(item.Market, item.ContractType, item.OrderEntrySpec)
+		aliases := item.Aliases
+		if aliases == nil {
+			// The venue said nothing about aliases (an old markets-service, or a new one that
+			// does not publish them yet): the bot's own table covers both spellings.
+			aliases = marketnames.FallbackAliases(item.Market)
+		}
 		spec := MarketSpec{
 			Symbol:          item.Market,
+			Aliases:         aliasesOf(item.Market, aliases),
 			BaseAsset:       item.BaseAssetSymbol,
 			QuoteAsset:      item.QuoteAssetSymbol,
 			AssetAddress:    strings.ToLower(item.AssetAddress),
@@ -1202,6 +1299,9 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			spec.MinSize = 0.001
 		}
 		next[item.Market] = spec
+		for _, name := range spec.Names() {
+			names[name] = item.Market
+		}
 	}
 	if len(next) == 0 {
 		// Do NOT clear the cache here. An empty response is far more likely to be a bad deploy or
@@ -1213,6 +1313,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	c.marketsMu.Lock()
 	previous := c.markets
 	c.markets = next
+	c.marketNames = names
 	c.marketsAt = time.Now()
 	c.marketsStale = false
 	c.marketsMu.Unlock()
@@ -1220,7 +1321,15 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	// A fee change is the reason this refresh exists, so say so once when it happens rather than
 	// leaving it to be inferred from reverts.
 	for symbol, spec := range next {
+		// The previous schedule may hold this market under another of its names: the venue
+		// renaming a market mid-run is not a fee change.
 		was, existed := previous[symbol]
+		for _, alias := range spec.Aliases {
+			if existed {
+				break
+			}
+			was, existed = previous[alias]
+		}
 		if existed && was.TakerFeeBps != spec.TakerFeeBps {
 			slog.Info(
 				"taker_fee_schedule_changed",
@@ -1245,15 +1354,16 @@ func (c *HTTPClient) marketsSnapshot() map[string]MarketSpec {
 }
 
 func (c *HTTPClient) marketForBalances() (MarketSpec, error) {
-	markets := c.marketsSnapshot()
 	if c.cfg.MarketSymbol != "" {
-		spec, ok := markets[c.cfg.MarketSymbol]
+		// By any identifier the venue accepts: the operator may still configure the market under
+		// its pre-rename name.
+		spec, ok := c.lookupMarket(c.cfg.MarketSymbol)
 		if !ok {
 			return MarketSpec{}, fmt.Errorf("configured market %s not loaded", c.cfg.MarketSymbol)
 		}
 		return spec, nil
 	}
-	for _, spec := range markets {
+	for _, spec := range c.marketsSnapshot() {
 		if spec.AssetAddress != "" && spec.QuoteAddress != "" {
 			return spec, nil
 		}
@@ -2036,6 +2146,28 @@ func defaultString(value, fallback string) string {
 
 func managedOrderPrefix(market string) string {
 	return "mm:" + market + ":"
+}
+
+// aliasesOf is the listed aliases less the canonical name itself and any repeats, in order.
+func aliasesOf(canonical string, listed []string) []string {
+	var out []string
+	for _, name := range listed {
+		name = strings.TrimSpace(name)
+		if name == "" || name == canonical {
+			continue
+		}
+		duplicate := false
+		for _, seen := range out {
+			if seen == name {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func ethereumCallMsg(to common.Address, data []byte) ethereum.CallMsg {

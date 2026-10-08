@@ -35,6 +35,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/numofx/market-maker/internal/exchange"
+
+	"github.com/numofx/market-maker/internal/marketnames"
 )
 
 // Base mainnet defaults: the perp stack as deployed 2026-10-01 (numofx/exchange CNGN_PERP_STACK.json).
@@ -46,7 +48,6 @@ const (
 	defaultPerp        = "0xC74EfC8B4808803dBCF439E76Fde076d56625b8E"
 	defaultCash        = "0xA74E49b4Ed7cb176bc02ef4D8a1A3240C9aD4272"
 	defaultIndexFeed   = "0xFaC420d160C7c219A72DC676971670980bAC20a5"
-	botOrderPrefix     = "mm:USDCcNGN-PERP:"
 	adverseWindow      = 60 * time.Second
 	adverseMoveBPS     = 20.0
 	logChunk           = 5000
@@ -120,7 +121,7 @@ func main() {
 		fatalf("rpc: %v", err)
 	}
 
-	fmt.Printf("USDCcNGN-PERP market maker #%d, %s to %s\n\n", *account, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	fmt.Printf("cNGN-PERP market maker #%d, %s to %s\n\n", *account, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
 
 	fromBlock, err := blockAtOrAfter(ctx, client, from.Add(-2*time.Hour)) // index history before the first fill
 	if err != nil {
@@ -190,9 +191,9 @@ func readFills(ctx context.Context, api string, from, to time.Time) ([]fill, err
 			}
 			role := ""
 			switch {
-			case strings.HasPrefix(t.MakerOrderID, botOrderPrefix):
+			case isBotOrderID(t.MakerOrderID):
 				role = "maker"
-			case strings.HasPrefix(t.TakerOrderID, botOrderPrefix):
+			case isBotOrderID(t.TakerOrderID):
 				role = "taker"
 			default:
 				continue
@@ -613,4 +614,15 @@ func envOr(key, fallback string) string {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "perp-fill-report: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// isBotOrderID recognises the perp market maker's own orders under either name the venue has listed
+// the perp under: the bot tags an order with the market name it resolved at the time.
+func isBotOrderID(orderID string) bool {
+	for _, name := range []string{marketnames.PerpCanonical, marketnames.PerpLegacy} {
+		if strings.HasPrefix(orderID, "mm:"+name+":") {
+			return true
+		}
+	}
+	return false
 }

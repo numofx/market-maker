@@ -10,8 +10,11 @@ import (
 )
 
 type Loader struct {
-	client                    exchange.Client
-	spec                      exchange.MarketSpec
+	client exchange.Client
+	spec   exchange.MarketSpec
+	// spotMarket is the venue's cNGN spot market as listed (the spot reference market), carried
+	// on every snapshot so the strategy keys its spot-only pricing on resolved names.
+	spotMarket                string
 	anchor                    AnchorSource
 	spotExternal              USDCCNGNSpotExternalAnchor
 	spotExternalBootstrapOnly bool
@@ -28,8 +31,30 @@ func NewLoader(client exchange.Client, spec exchange.MarketSpec, anchor AnchorSo
 	if anchor == nil {
 		anchor = NoopAnchorSource{}
 	}
-	return &Loader{client: client, spec: spec, anchor: anchor, spotExternal: NoopUSDCCNGNSpotExternalAnchor{}}
+	return &Loader{client: client, spec: spec, spotMarket: ResolveSpotMarket(client, spec), anchor: anchor, spotExternal: NoopUSDCCNGNSpotExternalAnchor{}}
 }
+
+// SpotMarketResolver is the exchange client that can name the venue's spot market from its listing.
+type SpotMarketResolver interface {
+	SpotMarket() (string, bool)
+}
+
+// ResolveSpotMarket names the spot reference market: the traded market itself when the venue says
+// it is spot, else the spot market the venue lists, else nothing.
+func ResolveSpotMarket(client exchange.Client, spec exchange.MarketSpec) string {
+	if spec.IsSpot() {
+		return spec.Symbol
+	}
+	if resolver, ok := client.(SpotMarketResolver); ok {
+		if name, ok := resolver.SpotMarket(); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// SpotMarket is the spot reference market this loader stamps on every snapshot.
+func (l *Loader) SpotMarket() string { return l.spotMarket }
 
 func NewLoaderWithSpotExternal(client exchange.Client, spec exchange.MarketSpec, anchor AnchorSource, spotExternal USDCCNGNSpotExternalAnchor, bootstrapOnly bool) *Loader {
 	loader := NewLoader(client, spec, anchor)
@@ -61,6 +86,7 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 
 	snapshot := state.Snapshot{
 		Market:                l.spec.Symbol,
+		SpotMarket:            l.spotMarket,
 		InventoryByAsset:      make(map[string]float64, len(balances)),
 		Positions:             make(map[string]state.AssetPosition, len(balances)),
 		OpenOrders:            openOrders,
