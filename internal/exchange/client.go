@@ -1321,7 +1321,15 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 	// A fee change is the reason this refresh exists, so say so once when it happens rather than
 	// leaving it to be inferred from reverts.
 	for symbol, spec := range next {
+		// The previous schedule may hold this market under another of its names: the venue
+		// renaming a market mid-run is not a fee change.
 		was, existed := previous[symbol]
+		for _, alias := range spec.Aliases {
+			if existed {
+				break
+			}
+			was, existed = previous[alias]
+		}
 		if existed && was.TakerFeeBps != spec.TakerFeeBps {
 			slog.Info(
 				"taker_fee_schedule_changed",
