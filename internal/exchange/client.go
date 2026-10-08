@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/numofx/market-maker/internal/logging"
 	"github.com/numofx/market-maker/internal/marketnames"
 )
 
@@ -281,9 +282,11 @@ type AssetCodeCheck struct {
 	EnvVar       string
 	Role         string
 	Address      string
-	RPCLabel     string
-	HasCode      bool
-	CodeBytes    int
+	// RPCLabel is the RPC endpoint's scheme and host, for the log line; never the full URL,
+	// whose path carries the provider key.
+	RPCLabel  string
+	HasCode   bool
+	CodeBytes int
 }
 
 type Client interface {
@@ -592,14 +595,14 @@ func (c *HTTPClient) ValidateMarketAssets(ctx context.Context, spec MarketSpec) 
 			EnvVar:       assetAddressEnvVar(spec),
 			Role:         "base_asset",
 			Address:      spec.AssetAddress,
-			RPCLabel:     c.cfg.RPCURL,
+			RPCLabel:     logging.HostOnly(c.cfg.RPCURL),
 		},
 		{
 			MarketSymbol: spec.Symbol,
 			EnvVar:       "TRADE_MODULE_QUOTE_ASSET",
 			Role:         "quote_asset",
 			Address:      spec.QuoteAddress,
-			RPCLabel:     c.cfg.RPCURL,
+			RPCLabel:     logging.HostOnly(c.cfg.RPCURL),
 		},
 	}
 	for i := range checks {
@@ -1524,7 +1527,7 @@ func (c *HTTPClient) logRPCCallFailure(ctx context.Context, address common.Addre
 
 func (c *HTTPClient) rawRPCProbe(ctx context.Context, to common.Address, data []byte) (int, string, error) {
 	if !strings.HasPrefix(c.cfg.RPCURL, "http://") && !strings.HasPrefix(c.cfg.RPCURL, "https://") {
-		return 0, "", fmt.Errorf("rpc url %q is not http(s)", c.cfg.RPCURL)
+		return 0, "", fmt.Errorf("rpc url %q is not http(s)", logging.HostOnly(c.cfg.RPCURL))
 	}
 	payload := map[string]any{
 		"jsonrpc": "2.0",

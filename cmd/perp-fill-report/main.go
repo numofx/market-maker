@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/numofx/market-maker/internal/exchange"
 
+	"github.com/numofx/market-maker/internal/logging"
 	"github.com/numofx/market-maker/internal/marketnames"
 )
 
@@ -107,6 +108,7 @@ func main() {
 	account := flag.Int64("account", defaultAccount, "the market maker's subaccount id")
 	startCash := flag.Float64("start-cash", defaultStartCash, "cash the account started with, USDC")
 	flag.Parse()
+	rpcEndpoint = *rpcURL
 	if *rpcURL == "" {
 		fatalf("MM_RPC_URL or -rpc is required")
 	}
@@ -611,8 +613,16 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// rpcEndpoint is the RPC URL as given, so fatalf can strip the provider key from any error that
+// embeds it (net/http puts the full request URL in every transport error).
+var rpcEndpoint string
+
 func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "perp-fill-report: "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	if rpcEndpoint != "" {
+		msg = strings.ReplaceAll(msg, rpcEndpoint, logging.HostOnly(rpcEndpoint))
+	}
+	fmt.Fprintln(os.Stderr, "perp-fill-report: "+msg)
 	os.Exit(1)
 }
 
