@@ -16,6 +16,7 @@ import (
 	"github.com/numofx/market-maker/internal/config"
 	"github.com/numofx/market-maker/internal/exchange"
 	"github.com/numofx/market-maker/internal/execution"
+	"github.com/numofx/market-maker/internal/logging"
 	"github.com/numofx/market-maker/internal/metrics"
 	"github.com/numofx/market-maker/internal/state"
 )
@@ -86,7 +87,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	logger := slog.New(logging.NewRedactingHandler(
+		slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}),
+		cfg.RPCURL, cfg.DatabaseURL, cfg.AnchorURL,
+		cfg.USDCCNGNSpotExternalAnchor.RPCURL, cfg.USDCCNGNSpotExternalAnchor.BaseURL,
+	))
 	slog.SetDefault(logger)
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
