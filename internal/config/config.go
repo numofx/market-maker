@@ -148,6 +148,12 @@ type Config struct {
 	MinQuoteBalance    float64
 	MaxNotionalPerSide float64
 	MaxNetInventory    float64
+	// InventorySkewFullAt is the inventory, in the same units as the inventory limits, at which the
+	// skew reaches InventorySkewBPS. Zero leans against the larger inventory limit, as before. On the
+	// perp it is what lets the skew move funding: PerpAsset only pays a premium once the book's
+	// impact prices cross the index, so the lean has to reach that far at an inventory the bot
+	// actually carries, not only at the hard limit.
+	InventorySkewFullAt float64
 	// PerpMaxLeverage caps the bot's own perp exposure at this multiple of its cash, below the
 	// SRM's 3x: the bot's gross position after a fill may not exceed cash x this. It is the MM's
 	// own risk limit, separate from what the venue would let a trader open.
@@ -247,6 +253,7 @@ func Load() (Config, error) {
 		MaxShortInventory:            envFloat("MM_MAX_SHORT_INVENTORY", defaultMaxShortInventory),
 		MaxNotionalPerSide:           envFloat("MM_MAX_NOTIONAL_PER_SIDE", 0),
 		MaxNetInventory:              envFloat("MM_MAX_NET_INVENTORY", 0),
+		InventorySkewFullAt:          envFloat("MM_INVENTORY_SKEW_FULL_AT", 0),
 		PerpMaxLeverage:              envFloat("MM_PERP_MAX_LEVERAGE", defaultPerpMaxLeverage),
 		PerpMaxBasisBPS:              envFloat("MM_PERP_MAX_BASIS_BPS", defaultPerpMaxBasisBPS),
 		PerpQuoteWhileClosed:         envBool("MM_PERP_QUOTE_WHILE_CLOSED", false),
@@ -352,6 +359,9 @@ func Load() (Config, error) {
 	}
 	if cfg.MaxShortInventory > cfg.MaxLongInventory {
 		return Config{}, fmt.Errorf("MM_MAX_SHORT_INVENTORY must be <= MM_MAX_LONG_INVENTORY")
+	}
+	if cfg.InventorySkewFullAt < 0 {
+		return Config{}, fmt.Errorf("MM_INVENTORY_SKEW_FULL_AT must be >= 0")
 	}
 	if cfg.CancelStaleOrderThreshold < 0 {
 		return Config{}, fmt.Errorf("MM_CANCEL_STALE_ORDER_THRESHOLD_BPS must be >= 0")
