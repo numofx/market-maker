@@ -94,3 +94,41 @@ func TestPerpFillEachSide(t *testing.T) {
 		}
 	})
 }
+
+// MM_INVENTORY_SKEW_FULL_AT sets where the lean saturates, in USDC of position, independent of the
+// hard limits; unset, the lean still saturates at the larger limit.
+func TestInventorySkewFullAt(t *testing.T) {
+	cfg := baseCfg()
+	cfg.PerpMaxLeverage = 1.5
+	cfg.OrderSize = 100
+	cfg.InventorySkewBPS = 60
+	cfg.MaxLongInventory, cfg.MaxShortInventory = 6_000, -6_000
+
+	spec := perpSpec()
+	spec.Perp = &exchange.PerpState{IndexPrice: perpIndex}
+	skewAt := func(t *testing.T, fullAt, positionUSD float64) float64 {
+		t.Helper()
+		cfg.InventorySkewFullAt = fullAt
+		res, err := BuildQuotes(cfg, spec, perpSnapshot(20_000, positionUSD/perpIndex, livePerp()))
+		if err != nil {
+			t.Fatalf("BuildQuotes: %v", err)
+		}
+		return res.SkewBPS
+	}
+
+	for _, tt := range []struct {
+		name                   string
+		fullAt, position, want float64
+	}{
+		{"half way to full", 2_000, 1_000, 30},
+		{"short leans the other way", 2_000, -1_000, -30},
+		{"held at the maximum past full", 2_000, 5_000, 60},
+		{"unset falls back to the larger limit", 0, 3_000, 30},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := skewAt(t, tt.fullAt, tt.position); math.Abs(got-tt.want) > 1e-6 {
+				t.Fatalf("skew %v bps, want %v", got, tt.want)
+			}
+		})
+	}
+}

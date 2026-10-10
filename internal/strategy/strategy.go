@@ -170,7 +170,7 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	// USDC on the cNGN markets, so they are converted to cNGN at the market reference here, once.
 	inventory := snapshot.Inventory(spec.BaseAsset)
 	maxLong, maxShort := inventoryLimits(cfg, spec, ref)
-	skewBPS := inventorySkew(inventory, maxLong, maxShort, cfg.InventorySkewBPS)
+	skewBPS := inventorySkew(inventory, skewFullAt(cfg, spec, ref, maxLong, maxShort), cfg.InventorySkewBPS)
 	halfSpreadBPS := cfg.HalfSpreadBPS
 	orderSize := cfg.OrderSize
 	if snapshot.IsSpotMarket() && refSource == "external" {
@@ -570,15 +570,21 @@ func effectiveMaxShort(cfg config.Config) float64 {
 	return cfg.MaxShortInventory
 }
 
-func inventorySkew(inventory, maxLong, maxShort, maxSkewBPS float64) float64 {
-	if maxSkewBPS == 0 {
+// skewFullAt is the inventory, in base units, at which the skew reaches MM_INVENTORY_SKEW_BPS:
+// MM_INVENTORY_SKEW_FULL_AT (USDC on the cNGN markets) when set, else the larger inventory limit.
+func skewFullAt(cfg config.Config, spec exchange.MarketSpec, price, maxLong, maxShort float64) float64 {
+	if cfg.InventorySkewFullAt > 0 {
+		return baseSize(spec, cfg.InventorySkewFullAt, price)
+	}
+	return math.Max(math.Abs(maxLong), math.Abs(maxShort))
+}
+
+// inventorySkew leans linearly with inventory, reaching maxSkewBPS at fullAt and holding there.
+func inventorySkew(inventory, fullAt, maxSkewBPS float64) float64 {
+	if maxSkewBPS == 0 || !(fullAt > 0) {
 		return 0
 	}
-	limit := math.Max(math.Abs(maxLong), math.Abs(maxShort))
-	if limit == 0 {
-		return 0
-	}
-	ratio := inventory / limit
+	ratio := inventory / fullAt
 	if ratio > 1 {
 		ratio = 1
 	}

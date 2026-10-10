@@ -85,6 +85,7 @@ The operator's configuration keeps the units it had, and the bot converts at the
 | --- | --- | --- |
 | `MM_ORDER_SIZE` | USDC per rung | placed as that many USDC worth of cNGN at the reference, whole cNGN; `40` is ~54,900 cNGN at 0.000728 |
 | `MM_MAX_LONG_INVENTORY`, `MM_MAX_SHORT_INVENTORY`, `MM_MAX_NET_INVENTORY` | USDC | the cNGN held (spot) or the signed cNGN position (perp, long cNGN positive) valued at the reference. On spot this now bounds the **cNGN** leg: the old bot's inventory was the USDC held |
+| `MM_INVENTORY_SKEW_FULL_AT` | USDC | the position at which the lean reaches `MM_INVENTORY_SKEW_BPS`, linear below it and held above; unset, it is the larger inventory limit. On the perp the lean is what moves funding: PerpAsset only pays a premium once the book's impact prices cross the index, so it has to get there at an inventory the bot actually carries |
 | `MM_MAX_NOTIONAL_PER_SIDE` | cNGN | the most cNGN one side may rest, and the largest single rung; it has always been the cNGN amount of the order (production's `450000`), only the name predates it |
 | `MM_MIN_BASE_BALANCE` / `MM_MIN_QUOTE_BALANCE` | cNGN / USDC | base and quote are the engine's now; they were USDC / cNGN |
 | `MM_ADOPT_SIZE_TOLERANCE` | cNGN | the one-cNGN quantum floors it |
@@ -143,6 +144,7 @@ internal/metrics
 - `MM_ORDER_SIZE`
 - `MM_HALF_SPREAD_BPS`
 - `MM_INVENTORY_SKEW_BPS`
+- `MM_INVENTORY_SKEW_FULL_AT`
 - `MM_MAX_LONG_INVENTORY`
 - `MM_MAX_SHORT_INVENTORY`
 - `MM_MAX_NOTIONAL_PER_SIDE`
