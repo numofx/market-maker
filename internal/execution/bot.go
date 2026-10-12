@@ -42,6 +42,9 @@ type Bot struct {
 	lastReconciliation ReconciliationResult
 	startedAt          time.Time
 	currentHalted      bool
+	// marginHolds are the sides the venue cancelled for insufficient margin, and since when; each is
+	// off the book until the account's IM headroom covers one order (margin_hold.go).
+	marginHolds        map[exchange.Side]time.Time
 	haltCount          uint64
 	maxQuoteAge        time.Duration
 	maxAnchorDeviation float64
@@ -321,12 +324,15 @@ func (b *Bot) RunCycle(ctx context.Context) (err error) {
 	}
 	// Drained here, not inside observeFills, so the set covers exactly the interval between the
 	// two snapshots being compared -- every cancel this bot issued since the last observation.
-	b.observeFills(b.snapshot, snapshot, b.syncer.TakeCancelled())
+	// Orders the venue cancelled are not fills either, and one cancelled for insufficient margin holds
+	// its side until the account can carry it.
+	b.observeFills(b.snapshot, snapshot, b.noteVenueCancels(ctx, b.snapshot, snapshot, b.syncer.TakeCancelled()))
 	quotes, err := strategy.BuildQuotesWithOverrides(b.cfg, b.spec, snapshot, b.strategyOverrides())
 	if err != nil {
 		b.metrics.IncErrors()
 		return err
 	}
+	b.applyMarginHolds(ctx, &quotes)
 	b.lastQuotes = quotes
 	b.applyDerivedState(&snapshot, quotes)
 	b.logReferenceSourceTransition(b.snapshot, snapshot)
