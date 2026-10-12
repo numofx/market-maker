@@ -44,7 +44,13 @@ type Bot struct {
 	currentHalted      bool
 	// marginHolds are the sides the venue cancelled for insufficient margin, and since when; each is
 	// off the book until the account's IM headroom covers one order (margin_hold.go).
-	marginHolds        map[exchange.Side]time.Time
+	marginHolds map[exchange.Side]time.Time
+	// observed is the snapshot fills were last observed against, advanced on every load. Not b.snapshot:
+	// a cycle that fails after cancelling returns before saving that, and comparing against it next
+	// cycle -- with that cycle's cancels already drained -- counted every one of them as a fill (4,382
+	// against 11 real on the perp, 2026-10-01..05).
+	observed           state.Snapshot
+	observedOK         bool
 	haltCount          uint64
 	maxQuoteAge        time.Duration
 	maxAnchorDeviation float64
@@ -127,6 +133,9 @@ func (b *Bot) Initialize(ctx context.Context) (err error) {
 	}()
 	b.metrics.SetOperatorMode(string(b.cfg.OperatorMode))
 	b.logger.Info("selected market metadata", marketMetadataAttrs(b.spec)...)
+	if b.spec.IsMarginEngineFuture() {
+		return fmt.Errorf("%s: %w", b.spec.Symbol, exchange.ErrFuturesModelNotRebuilt)
+	}
 	if validator, ok := b.client.(marketAssetValidator); ok {
 		if _, err := validator.ValidateMarketAssets(ctx, b.spec); err != nil {
 			b.metrics.SetReadiness(false, "token_address_has_no_code")
@@ -326,7 +335,12 @@ func (b *Bot) RunCycle(ctx context.Context) (err error) {
 	// two snapshots being compared -- every cancel this bot issued since the last observation.
 	// Orders the venue cancelled are not fills either, and one cancelled for insufficient margin holds
 	// its side until the account can carry it.
-	b.observeFills(b.snapshot, snapshot, b.noteVenueCancels(ctx, b.snapshot, snapshot, b.syncer.TakeCancelled()))
+	base := b.observed
+	if !b.observedOK {
+		base = b.snapshot
+	}
+	b.observeFills(base, snapshot, b.noteVenueCancels(ctx, base, snapshot, b.syncer.TakeCancelled()))
+	b.observed, b.observedOK = snapshot, true
 	quotes, err := strategy.BuildQuotesWithOverrides(b.cfg, b.spec, snapshot, b.strategyOverrides())
 	if err != nil {
 		b.metrics.IncErrors()
