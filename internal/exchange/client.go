@@ -226,6 +226,12 @@ type MarketSpec struct {
 	// ExpiryTimestamp is the market's expiry (unix seconds) from /v1/markets;
 	// zero for spot / perpetual markets.
 	ExpiryTimestamp int64
+	// MarginManager is the manager the venue lists for the market (the MarginEngine for the cNGN
+	// future), lowercased; empty when the listing names none.
+	MarginManager string
+	// ContractSizeUSDC is one contract's notional, from the listing's future block (1,000 for the cNGN
+	// future); zero for a market that reports none.
+	ContractSizeUSDC float64
 }
 
 // Names is every identifier this market answers to: the canonical symbol first, then its aliases.
@@ -1217,7 +1223,12 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		TakerFeeBps      int      `json:"taker_fee_bps"`
 		ExpiryTimestamp  int64    `json:"expiry_timestamp"`
 		ContractType     string   `json:"contract_type"`
-		Perp             *struct {
+		// MarginManager is the market's manager: for the cNGN future, the MarginEngine.
+		MarginManager string `json:"margin_manager_address"`
+		Future        *struct {
+			ContractSizeUSDC string `json:"contract_size_usdc"`
+		} `json:"future"`
+		Perp *struct {
 			MarkPrice      string `json:"mark_price"`
 			IndexPrice     string `json:"index_price"`
 			MarkPriceUI    string `json:"mark_price_ui"`
@@ -1262,6 +1273,10 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			ExpiryTimestamp: item.ExpiryTimestamp,
 			Kind:            kind,
 			Orientation:     OrientationEngine,
+			MarginManager:   strings.ToLower(strings.TrimSpace(item.MarginManager)),
+		}
+		if item.Future != nil {
+			spec.ContractSizeUSDC, _ = strconv.ParseFloat(strings.TrimSpace(item.Future.ContractSizeUSDC), 64)
 		}
 		if spec.CNGNDenominated() {
 			// The one place the venue's presentation is read. Everything on the spec is engine

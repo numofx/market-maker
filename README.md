@@ -463,12 +463,43 @@ Fill accounting uses this hierarchy:
 
 1. open-order state truth
    - if a known live order disappears or its remaining size decreases, the bot records a fill on that order side
+   - except an order the bot cancelled itself, or one the venue cancelled: for an order that disappeared
+     unprompted, the bot reads its `cancel_reason` from `active_orders`, and a cancelled one is not a fill
 2. trade stream truth
    - if new market trades appear and no direct order-state delta is visible, the bot infers maker-side fills from aggressor side
-3. inventory delta fallback
-   - used only as a last-resort diagnostic signal
+
+Disappearances are judged against the snapshot fills were last observed against, advanced on every load,
+not the snapshot a cycle saves on success. A run of failed cycles (a placement refused, say) used to compare
+against the last good snapshot each time, with the early cancels long since drained, and counted each of them
+again every cycle: 4,382 fills recorded against 11 real ones on the perp bot, 2026-10-01 to 10-05.
+
+A balance change on its own is never counted: deposits, withdrawals and transfers move inventory without
+trading.
 
 Partial fills are detected from real remaining-size changes in live open orders when that data is available.
+
+## Insufficient-margin cancels (cNGN future)
+
+markets-service pre-checks each futures fill against the MarginEngine and, after three refusals over a
+minute, cancels the short account's order with `cancel_reason: insufficient_margin`. Requoting at once would
+rest an order the venue cancels again a minute later, round and round. So when one of the bot's orders is
+cancelled for that reason, its side is held:
+
+- the side is off the book (suppression reason `insufficient_margin`) while the other side quotes;
+- every cycle the bot reads its IM surplus on the market's `margin_manager_address`
+  (`getMargin(account, true)`) and the IM a contract adds (`contract_size_usdc` from the listing x the
+  engine's `futureMarginRequirements(...).imReq`);
+- the side is requoted on the first cycle the surplus covers one order: its size x that per-contract IM;
+- if the headroom cannot be read, the hold lasts at most 15 minutes, after which the side is requoted
+  and the venue's own check decides.
+
+A cancel for any other reason holds nothing.
+
+**The bot does not yet quote this future.** Its futures model is the DFXM-era one: notional is contracts x
+price (the future's is contracts x 1,000 USDC), and nothing stops quoting near expiry. Until both are rebuilt,
+`Initialize` refuses a MarginEngine future (one whose listing carries `future.contract_size_usdc`) with
+`ErrFuturesModelNotRebuilt`. It is an enable requirement of the future (numofx/exchange
+`contracts/risk-core/docs/margin-engine-review.md`).
 
 ## Quote Age Sources
 
