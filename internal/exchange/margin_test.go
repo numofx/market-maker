@@ -114,6 +114,10 @@ func TestFutureIMHeadroomDecodesTheEngine(t *testing.T) {
 func TestCancelReasonsReadsTheVenuesActiveOrders(t *testing.T) {
 	url := os.Getenv("MM_TEST_VENUE_DATABASE_URL")
 	if url == "" {
+		// The test that proves the subaccount filter must not pass CI by skipping.
+		if os.Getenv("CI") != "" {
+			t.Fatal("MM_TEST_VENUE_DATABASE_URL is not set under CI (.github/workflows/test.yml migrates a venue database for it)")
+		}
 		t.Skip("MM_TEST_VENUE_DATABASE_URL is not set")
 	}
 	ctx := context.Background()

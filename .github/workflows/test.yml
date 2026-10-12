@@ -1,0 +1,45 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The venue's own Postgres version (numofx/exchange infra/aws/data.tf), migrated with the venue's own
+    # migrations below, so the tests that read active_orders run against the schema the bot reads in
+    # production, not a copy of it.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: venue_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      MM_TEST_VENUE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/venue_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: numofx/exchange
+          path: exchange
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Migrate the venue schema (markets-service migrations, main)
+        working-directory: exchange/services/markets
+        run: go run ./cmd/migrate
+        env:
+          DATABASE_URL: ${{ env.MM_TEST_VENUE_DATABASE_URL }}
+      - run: go vet ./...
+      - run: go build ./...
+      - name: go test (the venue-database tests fail rather than skip under CI)
+        run: go test -count=1 ./...
