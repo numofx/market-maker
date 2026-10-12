@@ -203,6 +203,8 @@ func NewAnchorSource(cfg config.Config, spec exchange.MarketSpec) AnchorSource {
 			baseURL: cfg.AnchorURL,
 			client:  &http.Client{Timeout: 5 * time.Second},
 		}
+	case "future_index_carry":
+		return &FutureIndexCarryAnchorSource{rateAPR: cfg.CarryRateAPR, expiryUnix: spec.ExpiryTimestamp}
 	case "oracle_carry":
 		return &OracleCarryAnchorSource{
 			fetcher:         newCNGNOracleFetcher(cfg.RPCURL, cfg.AnchorOracleMaxAge),
@@ -647,4 +649,35 @@ func absBPS(a, b float64) float64 {
 		diff = -diff
 	}
 	return diff / b * 10000
+}
+
+// FutureIndexCarryAnchorSource prices the MarginEngine future off its own index -- the FutureAsset's
+// indexFeed, the one its fill band is set around -- carried to expiry: index x e^(MM_CARRY_RATE_APR x
+// tau). The loader hands it the index it read for the band this cycle (SetIndex), so the quote and the
+// band are computed from the same number. oracle_carry reads a different oracle, and a quote centred on
+// it can sit outside the band the venue and the chain enforce.
+type FutureIndexCarryAnchorSource struct {
+	mu         sync.Mutex
+	rateAPR    float64
+	expiryUnix int64
+	index      float64
+}
+
+func (s *FutureIndexCarryAnchorSource) Name() string { return "future_index_carry" }
+
+// SetIndex records this cycle's index, cNGN per USDC.
+func (s *FutureIndexCarryAnchorSource) SetIndex(index float64) {
+	s.mu.Lock()
+	s.index = index
+	s.mu.Unlock()
+}
+
+func (s *FutureIndexCarryAnchorSource) GetAnchorPrice(context.Context, string) (float64, error) {
+	s.mu.Lock()
+	index := s.index
+	s.mu.Unlock()
+	if !(index > 0) {
+		return 0, fmt.Errorf("the future's index has not been read this cycle")
+	}
+	return carryFairValue(index, s.rateAPR, s.expiryUnix, time.Now().UTC()), nil
 }

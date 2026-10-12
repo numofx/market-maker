@@ -329,9 +329,12 @@ type ClientConfig struct {
 	// next GetMarket refetches it. Unset falls back to defaultRefreshEvery; there is no way to
 	// switch the refresh off, because "never refresh" is the defect this exists to fix.
 	MarketRefreshSeconds int64
-	OrderExpirySeconds   int64
-	ServiceName          string
-	ProtectedPrefixes    []string
+	// FutureCutoffBeforeFixSeconds caps an order on the MarginEngine future to expire before the quoting
+	// cutoff (MM_FUTURE_CUTOFF_BEFORE_FIX_SECONDS).
+	FutureCutoffBeforeFixSeconds int64
+	OrderExpirySeconds           int64
+	ServiceName                  string
+	ProtectedPrefixes            []string
 	// Signer, when set, is the only key: OwnerPrivateKey/SignerPrivateKey are ignored and the
 	// configured addresses must equal Signer.Address(). See resolveSigner.
 	Signer Signer
@@ -351,15 +354,18 @@ type PlaceOrderRequest struct {
 }
 
 type HTTPClient struct {
-	cfg         ClientConfig
-	httpClient  *http.Client
-	pg          *pgxpool.Pool
-	rpc         *ethclient.Client
-	signer      Signer
-	matching    common.Address
-	tradeModule common.Address
-	subAccounts common.Address
-	quoteAsset  common.Address
+	cfg        ClientConfig
+	httpClient *http.Client
+	pg         *pgxpool.Pool
+	rpc        *ethclient.Client
+	// futureSchedule is the MarginEngine future's fixed schedule, read once by FutureState.
+	futureMu       sync.Mutex
+	futureSchedule *futureSchedule
+	signer         Signer
+	matching       common.Address
+	tradeModule    common.Address
+	subAccounts    common.Address
+	quoteAsset     common.Address
 
 	// markets is the fee schedule and instrument metadata as /v1/markets last reported it.
 	//
@@ -996,6 +1002,9 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		return Order{}, err
 	}
 	expiry := time.Now().UTC().Add(time.Duration(c.cfg.OrderExpirySeconds) * time.Second).Unix()
+	if expiry, err = cappedOrderExpiry(spec, expiry, c.futureOrderExpiryCap(), time.Now().UTC()); err != nil {
+		return Order{}, err
+	}
 	actionJSON := map[string]string{
 		"subaccount_id": c.cfg.SubaccountID,
 		"nonce":         req.Nonce,
@@ -1886,6 +1895,11 @@ const worstFeeHeadroomBps = 5
 func (c *HTTPClient) signedWorstFee(spec MarketSpec, enginePrice float64) (string, error) {
 	if spec.TakerFeeBps <= 0 {
 		return c.cfg.WorstFee, nil
+	}
+	if spec.IsMarginEngineFuture() {
+		// The future's fee is on contracts x contract size (USDC), so a contract's notional is the
+		// contract size, not the price in cNGN: 1,000 USDC at 25+5 bps is a 3e18 bound per contract.
+		enginePrice = spec.ContractSizeUSDC
 	}
 	if !(enginePrice > 0) {
 		return "", fmt.Errorf("cannot bound fee at engine price %v", enginePrice)

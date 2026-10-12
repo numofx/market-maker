@@ -478,28 +478,34 @@ trading.
 
 Partial fills are detected from real remaining-size changes in live open orders when that data is available.
 
-## Insufficient-margin cancels (cNGN future)
+## The cNGN future under the MarginEngine
 
-markets-service pre-checks each futures fill against the MarginEngine and, after three refusals over a
-minute, cancels the short account's order with `cancel_reason: insufficient_margin`. Requoting at once would
-rest an order the venue cancels again a minute later, round and round. So when one of the bot's orders is
-cancelled for that reason, its side is held:
+The future (`USDC-cNGN-<DDMONYY>`, a `FutureAsset` series) is recognised by its listing's `future` block
+(`future.contract_size_usdc`) and quoted on its own model. The DFXM-era dated futures, whose listings carry no
+contract size, keep theirs.
 
-- the side is off the book (suppression reason `insufficient_margin`) while the other side quotes;
-- every cycle the bot reads its IM surplus on the market's `margin_manager_address`
-  (`getMargin(account, true)`) and the IM a contract adds (`contract_size_usdc` from the listing x the
-  engine's `futureMarginRequirements(...).imReq`);
-- the side is requoted on the first cycle the surplus covers one order: its size x that per-contract IM;
-- if the headroom cannot be read, the hold lasts at most 15 minutes, after which the side is requoted
-  and the venue's own check decides.
+- **Priced off its own index.** `MM_ANCHOR_SOURCE_TYPE=future_index_carry` (required: `Initialize` refuses any
+  other anchor on this market) prices it at the FutureAsset's index x e^(`MM_CARRY_RATE_APR` x time to expiry).
+  The index is the one its fill band is set around, read from the chain every cycle; `oracle_carry` reads a
+  different oracle and could centre the quote outside the band.
+- **Sized by IM, not cash.** Each side opens at most `MM_FUTURE_IM_USAGE` (default 0.8) of the account's IM
+  surplus on the engine (`getMargin(account, true)`) over the IM a contract adds (contract size x the engine's
+  `futureMarginRequirements(...).imReq`), plus whatever only closes the current position. After the venue
+  cancels a quote for `insufficient_margin`, that is also why the side is not requoted while the account is
+  short, and is requoted at what it can carry once margin returns.
+- **Notional is contracts x contract size** (1,000 USDC), whatever the price in cNGN: `MM_MAX_NOTIONAL_PER_SIDE`
+  (USDC), the open-order notional check, the inventory value, and the signed `worstFee` (25 + 5 bps of 1,000
+  USDC: 3e18 a contract). Inventory limits are in contracts.
+- **Inside the fill band.** Every level is kept `MM_FUTURE_BAND_BUFFER_BPS` (default 10) inside the band
+  FutureAsset enforces (the index -/+ `markIndexBand(expiry)`): a bid above it moves down to it and an ask below
+  it moves up; a bid below or an ask above is dropped.
+- **Not near expiry.** From `MM_FUTURE_CUTOFF_BEFORE_FIX_SECONDS` (default 3600) before the earlier of the
+  fixing window's start (`expiry - fixingWindow`) and last trade, both sides are off and resting orders are
+  cancelled; no order is ever signed to expire after that cutoff. A settled series is not quoted.
+- **Fails closed.** A cycle that cannot read the future (its margin, index, band or schedule; a stale index
+  reverts `BLF_DataTooOld`) halts the bot and cancels its quotes.
 
-A cancel for any other reason holds nothing.
-
-**The bot does not yet quote this future.** Its futures model is the DFXM-era one: notional is contracts x
-price (the future's is contracts x 1,000 USDC), and nothing stops quoting near expiry. Until both are rebuilt,
-`Initialize` refuses a MarginEngine future (one whose listing carries `future.contract_size_usdc`) with
-`ErrFuturesModelNotRebuilt`. It is an enable requirement of the future (numofx/exchange
-`contracts/risk-core/docs/margin-engine-review.md`).
+The account (`MM_SUBACCOUNT_ID`) must sit under the MarginEngine: the venue refuses an order from any other.
 
 ## Quote Age Sources
 

@@ -65,6 +65,11 @@ func NewLoaderWithSpotExternal(client exchange.Client, spec exchange.MarketSpec,
 	return loader
 }
 
+// futureStateReader is the HTTP client's read of the MarginEngine future (exchange.HTTPClient.FutureState).
+type futureStateReader interface {
+	FutureState(ctx context.Context, spec exchange.MarketSpec) (exchange.FutureState, error)
+}
+
 func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot, error) {
 	book, err := l.client.GetBook(ctx, l.spec.Symbol)
 	if err != nil {
@@ -108,6 +113,21 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 	}
 	if l.spec.IsPerp() {
 		return l.loadPerp(ctx, snapshot)
+	}
+	if l.spec.IsMarginEngineFuture() {
+		// Sizing, the band and the cutoff all come from here: a cycle that cannot read them does not quote.
+		reader, ok := l.client.(futureStateReader)
+		if !ok {
+			return state.Snapshot{}, &LoadError{Stage: "future_state", Err: fmt.Errorf("this client cannot read the MarginEngine future")}
+		}
+		future, err := reader.FutureState(ctx, l.spec)
+		if err != nil {
+			return state.Snapshot{}, &LoadError{Stage: "future_state", Err: fmt.Errorf("read the future: %w", err)}
+		}
+		snapshot.Future = &future
+		if anchor, ok := l.anchor.(*FutureIndexCarryAnchorSource); ok {
+			anchor.SetIndex(future.Index)
+		}
 	}
 	if l.spec.IsSpot() {
 		// The book is spot's source of truth: the reference is its mid, else its last trade, and
