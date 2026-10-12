@@ -119,3 +119,19 @@ func (c *HTTPClient) callMargin(ctx context.Context, to common.Address, method s
 	}
 	return values, nil
 }
+
+// IsMarginEngineFuture reports whether the market is the cNGN future under the MarginEngine: a future
+// whose listing carries its contract size (the venue's `future` block). The DFXM-era dated futures this
+// bot was built for carry none.
+func (s MarketSpec) IsMarginEngineFuture() bool {
+	return s.Kind == MarketKindFuture && s.ContractSizeUSDC > 0
+}
+
+// ErrFuturesModelNotRebuilt refuses to quote the MarginEngine future. The bot's futures model is the
+// DFXM-era one: its notional is contracts x price, where the future's is contracts x contract size (1,000
+// USDC), so MM_MAX_NOTIONAL_PER_SIDE and the per-side budget mean something else entirely; and nothing
+// stops it quoting into expiry, through the fixing window and past last trade. Rebuilding both is a
+// launch requirement of the future (numofx/exchange margin-engine-review.md, enable requirements); until
+// it lands, this is the guard.
+var ErrFuturesModelNotRebuilt = errors.New("the cNGN future under the MarginEngine needs the rebuilt futures model " +
+	"(notional = contracts x contract size, no quoting near expiry) before this bot may quote it")

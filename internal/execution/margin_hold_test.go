@@ -209,3 +209,22 @@ func TestAnyVenueCancelIsNotAFillAndOnlyMarginHolds(t *testing.T) {
 		t.Fatal("a cancel for any other reason holds nothing: the side is requoted")
 	}
 }
+
+// Until the futures model is rebuilt (notional on the contract size, no quoting near expiry), the bot
+// refuses to start on the MarginEngine future at all. A DFXM-era future, with no contract size listed,
+// is unaffected.
+func TestTheBotRefusesTheMarginEngineFutureUntilItsModelIsRebuilt(t *testing.T) {
+	bot, client, _ := marginBot(t)
+	err := bot.Initialize(context.Background())
+	if !errors.Is(err, exchange.ErrFuturesModelNotRebuilt) {
+		t.Fatalf("Initialize on the MarginEngine future: %v", err)
+	}
+	if len(client.placed) != 0 {
+		t.Fatal("nothing may be placed")
+	}
+	legacy := client.spec
+	legacy.ContractSizeUSDC, legacy.MarginManager = 0, ""
+	if legacy.IsMarginEngineFuture() {
+		t.Fatal("a future without a listed contract size is a DFXM-era one")
+	}
+}

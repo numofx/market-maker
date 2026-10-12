@@ -468,6 +468,11 @@ Fill accounting uses this hierarchy:
 2. trade stream truth
    - if new market trades appear and no direct order-state delta is visible, the bot infers maker-side fills from aggressor side
 
+Disappearances are judged against the snapshot fills were last observed against, advanced on every load,
+not the snapshot a cycle saves on success. A run of failed cycles (a placement refused, say) used to compare
+against the last good snapshot each time, with the early cancels long since drained, and counted each of them
+again every cycle: 4,382 fills recorded against 11 real ones on the perp bot, 2026-10-01 to 10-05.
+
 A balance change on its own is never counted: deposits, withdrawals and transfers move inventory without
 trading.
 
@@ -489,6 +494,12 @@ cancelled for that reason, its side is held:
   and the venue's own check decides.
 
 A cancel for any other reason holds nothing.
+
+**The bot does not yet quote this future.** Its futures model is the DFXM-era one: notional is contracts x
+price (the future's is contracts x 1,000 USDC), and nothing stops quoting near expiry. Until both are rebuilt,
+`Initialize` refuses a MarginEngine future (one whose listing carries `future.contract_size_usdc`) with
+`ErrFuturesModelNotRebuilt`. It is an enable requirement of the future (numofx/exchange
+`contracts/risk-core/docs/margin-engine-review.md`).
 
 ## Quote Age Sources
 
