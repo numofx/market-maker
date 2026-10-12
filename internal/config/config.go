@@ -38,6 +38,11 @@ const (
 	// The MM's own perp leverage cap: half the SRM's 3x, so a 20% adverse move leaves it well above
 	// maintenance margin (20%) without the keeper ever being involved.
 	defaultPerpMaxLeverage = 1.5
+
+	// The cNGN future under the MarginEngine (exchange.MarketSpec.IsMarginEngineFuture).
+	defaultFutureIMUsage            = 0.8
+	defaultFutureBandBufferBPS      = 10
+	defaultFutureCutoffBeforeFixSec = 3600
 	// Under markets-service's own 200bps mark clamp, so the bot never quotes around a mid the mark
 	// feed would refuse to follow.
 	defaultPerpMaxBasisBPS = 100
@@ -158,6 +163,14 @@ type Config struct {
 	// SRM's 3x: the bot's gross position after a fill may not exceed cash x this. It is the MM's
 	// own risk limit, separate from what the venue would let a trader open.
 	PerpMaxLeverage float64
+	// FutureIMUsage is the share of the account's IM surplus on the MarginEngine the bot sizes the cNGN
+	// future against, in (0, 1]: the rest is room for the marks and the other side to move before the
+	// engine refuses a fill. FutureBandBufferBPS keeps quotes this far inside the fill band, which moves
+	// with the index between the bot's read and the matcher's. FutureCutoffBeforeFixSeconds is how long
+	// before the earlier of the fixing window and last trade the bot stops quoting the future.
+	FutureIMUsage                float64
+	FutureBandBufferBPS          float64
+	FutureCutoffBeforeFixSeconds int64
 	// PerpMaxBasisBPS is how far from the index the perp reference may sit. Other traders' book mid
 	// is the reference when it is two-sided, clamped to index +/- this; otherwise the index.
 	PerpMaxBasisBPS float64
@@ -255,6 +268,9 @@ func Load() (Config, error) {
 		MaxNetInventory:              envFloat("MM_MAX_NET_INVENTORY", 0),
 		InventorySkewFullAt:          envFloat("MM_INVENTORY_SKEW_FULL_AT", 0),
 		PerpMaxLeverage:              envFloat("MM_PERP_MAX_LEVERAGE", defaultPerpMaxLeverage),
+		FutureIMUsage:                envFloat("MM_FUTURE_IM_USAGE", defaultFutureIMUsage),
+		FutureBandBufferBPS:          envFloat("MM_FUTURE_BAND_BUFFER_BPS", defaultFutureBandBufferBPS),
+		FutureCutoffBeforeFixSeconds: int64(envFloat("MM_FUTURE_CUTOFF_BEFORE_FIX_SECONDS", defaultFutureCutoffBeforeFixSec)),
 		PerpMaxBasisBPS:              envFloat("MM_PERP_MAX_BASIS_BPS", defaultPerpMaxBasisBPS),
 		PerpQuoteWhileClosed:         envBool("MM_PERP_QUOTE_WHILE_CLOSED", false),
 		MaxQuoteAge:                  time.Duration(envInt("MM_MAX_QUOTE_AGE_SECONDS", 0)) * time.Second,
@@ -351,6 +367,15 @@ func Load() (Config, error) {
 	if cfg.OrderSize <= 0 {
 		return Config{}, fmt.Errorf("MM_ORDER_SIZE must be > 0")
 	}
+	if cfg.FutureIMUsage <= 0 || cfg.FutureIMUsage > 1 {
+		return Config{}, fmt.Errorf("MM_FUTURE_IM_USAGE must be > 0 and <= 1, got %v", cfg.FutureIMUsage)
+	}
+	if cfg.FutureBandBufferBPS < 0 || cfg.FutureBandBufferBPS >= 500 {
+		return Config{}, fmt.Errorf("MM_FUTURE_BAND_BUFFER_BPS must be >= 0 and < 500, got %v", cfg.FutureBandBufferBPS)
+	}
+	if cfg.FutureCutoffBeforeFixSeconds < 0 {
+		return Config{}, fmt.Errorf("MM_FUTURE_CUTOFF_BEFORE_FIX_SECONDS must be >= 0, got %d", cfg.FutureCutoffBeforeFixSeconds)
+	}
 	if cfg.PerpMaxLeverage <= 0 || cfg.PerpMaxLeverage > 3 {
 		return Config{}, fmt.Errorf("MM_PERP_MAX_LEVERAGE must be > 0 and <= 3 (the SRM's ceiling), got %v", cfg.PerpMaxLeverage)
 	}
@@ -377,8 +402,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.OperatorMode = mode
-	if cfg.AnchorSourceType != "none" && cfg.AnchorSourceType != "fixed" && cfg.AnchorSourceType != "http" && cfg.AnchorSourceType != "oracle_carry" {
-		return Config{}, fmt.Errorf("MM_ANCHOR_SOURCE_TYPE must be one of none, fixed, http, oracle_carry")
+	if cfg.AnchorSourceType != "none" && cfg.AnchorSourceType != "fixed" && cfg.AnchorSourceType != "http" && cfg.AnchorSourceType != "oracle_carry" && cfg.AnchorSourceType != "future_index_carry" {
+		return Config{}, fmt.Errorf("MM_ANCHOR_SOURCE_TYPE must be one of none, fixed, http, oracle_carry, future_index_carry")
+	}
+	if cfg.AnchorSourceType == "future_index_carry" && cfg.CarryRateAPR < 0 {
+		return Config{}, fmt.Errorf("MM_CARRY_RATE_APR must be >= 0 when MM_ANCHOR_SOURCE_TYPE=future_index_carry")
 	}
 	if cfg.AnchorSourceType == "oracle_carry" {
 		if cfg.CarryRateAPR < 0 {

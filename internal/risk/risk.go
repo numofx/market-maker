@@ -68,6 +68,10 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 			if spec.CNGNDenominated() {
 				notional = order.Size
 			}
+			if spec.IsMarginEngineFuture() {
+				// USDC: contracts x contract size, whatever the price in cNGN
+				notional = order.Size * spec.ContractSizeUSDC
+			}
 			if notional > cfg.MaxNotionalPerSide {
 				return Decision{Halt: true, Reason: "open order notional exceeds limit"}
 			}
@@ -77,7 +81,8 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 	// MM_MIN_BASE_BALANCE is cNGN and MM_MIN_QUOTE_BALANCE is USDC on the cNGN markets.
 	basePosition := snapshot.Position(spec.BaseAsset)
 	// On the perp the base "balance" is the signed position, not a holding a quote draws on.
-	if !spec.IsPerp() && basePosition.Available < cfg.MinBaseBalance {
+	// So it is on the MarginEngine future: a signed position in contracts, margined by the engine.
+	if !spec.IsPerp() && !spec.IsMarginEngineFuture() && basePosition.Available < cfg.MinBaseBalance {
 		return Decision{Halt: true, Reason: fmt.Sprintf("available base balance below threshold for %s", spec.BaseAsset)}
 	}
 	quotePosition := snapshot.Position(spec.QuoteAsset)

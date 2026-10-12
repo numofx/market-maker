@@ -3,6 +3,7 @@ package strategy
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/numofx/market-maker/internal/config"
 	"github.com/numofx/market-maker/internal/exchange"
@@ -198,7 +199,7 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	// SHORT backed by cash margin rather than delivering held base-asset inventory. Its ask is gated
 	// by cash/quote capacity and the short inventory limit, mirroring the bid, NOT by base-asset
 	// availability. Spot still sells held base inventory (baseAvailable).
-	cashMarginedFuture := isCashMarginedFuture(spec)
+	cashMarginedFuture := isCashMarginedFuture(spec) && !spec.IsMarginEngineFuture()
 
 	var baseAvailable, quoteAvailable float64
 	if cashMarginedFuture {
@@ -245,7 +246,15 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 		// converted to cNGN at the reference.
 		maxBidSize, maxAskSize = perpCapacity(cfg, *snapshot.Perp, quotePosition.Total, inventory, ref)
 	}
-	if cfg.MaxNotionalPerSide > 0 {
+	marginEngineFuture := spec.IsMarginEngineFuture()
+	if marginEngineFuture {
+		// Margined by the engine's IM, in contracts; cash is not the budget (future.go).
+		maxBidSize, maxAskSize = marginEngineFutureCapacity(cfg, snapshot.Future, inventory)
+		if limit := marginEngineFutureNotionalCap(cfg, spec); limit > 0 {
+			maxBidSize, maxAskSize = minFloat(maxBidSize, limit), minFloat(maxAskSize, limit)
+		}
+	}
+	if cfg.MaxNotionalPerSide > 0 && !marginEngineFuture {
 		// On the cNGN markets MM_MAX_NOTIONAL_PER_SIDE is a cNGN amount, so it caps the base size
 		// directly; on a future it is quote notional and divides by the price.
 		if spec.CNGNDenominated() {
@@ -309,6 +318,9 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 			result.Bids = nil
 			result.BidSuppression = baseSuppression(cfg, spec, snapshot, exchange.SideBuy, sideOffReason(cfg.OperatorMode == config.ModeAskOnly), spec.MinSize*bidPrice, quotePosition.Total, quotePosition.Reserved, quoteAvailable, orderSize, bidSize, bidPrice, maxLong, false)
 		}
+	}
+	if marginEngineFuture {
+		applyMarginEngineFuture(cfg, spec, snapshot, &result, time.Now().UTC())
 	}
 	result.SkewBPS = skewBPS
 	return result, nil

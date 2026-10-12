@@ -107,6 +107,9 @@ type Snapshot struct {
 	// Perp is set on a perp market: the reference the loader derived and what the venue says about
 	// the market this cycle. Nil on spot and futures.
 	Perp *PerpSnapshot
+	// Future is the MarginEngine future's margin, band and schedule, read from the chain this cycle; nil
+	// on every other market.
+	Future *exchange.FutureState
 }
 
 // PerpSnapshot is one cycle's view of the perp, from /v1/markets. Prices are USDC per cNGN.

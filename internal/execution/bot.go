@@ -42,9 +42,6 @@ type Bot struct {
 	lastReconciliation ReconciliationResult
 	startedAt          time.Time
 	currentHalted      bool
-	// marginHolds are the sides the venue cancelled for insufficient margin, and since when; each is
-	// off the book until the account's IM headroom covers one order (margin_hold.go).
-	marginHolds map[exchange.Side]time.Time
 	// observed is the snapshot fills were last observed against, advanced on every load. Not b.snapshot:
 	// a cycle that fails after cancelling returns before saving that, and comparing against it next
 	// cycle -- with that cycle's cancels already drained -- counted every one of them as a fill (4,382
@@ -133,8 +130,10 @@ func (b *Bot) Initialize(ctx context.Context) (err error) {
 	}()
 	b.metrics.SetOperatorMode(string(b.cfg.OperatorMode))
 	b.logger.Info("selected market metadata", marketMetadataAttrs(b.spec)...)
-	if b.spec.IsMarginEngineFuture() {
-		return fmt.Errorf("%s: %w", b.spec.Symbol, exchange.ErrFuturesModelNotRebuilt)
+	if b.spec.IsMarginEngineFuture() && b.cfg.AnchorSourceType != "future_index_carry" {
+		// The fill band is set around the FutureAsset's own index: a quote anchored anywhere else can sit
+		// outside it, where the venue refuses the order and the chain the fill.
+		return fmt.Errorf("%s is the MarginEngine future: MM_ANCHOR_SOURCE_TYPE must be future_index_carry, not %q", b.spec.Symbol, b.cfg.AnchorSourceType)
 	}
 	if validator, ok := b.client.(marketAssetValidator); ok {
 		if _, err := validator.ValidateMarketAssets(ctx, b.spec); err != nil {
@@ -333,8 +332,7 @@ func (b *Bot) RunCycle(ctx context.Context) (err error) {
 	}
 	// Drained here, not inside observeFills, so the set covers exactly the interval between the
 	// two snapshots being compared -- every cancel this bot issued since the last observation.
-	// Orders the venue cancelled are not fills either, and one cancelled for insufficient margin holds
-	// its side until the account can carry it.
+	// Orders the venue cancelled are not fills either (venue_cancels.go).
 	base := b.observed
 	if !b.observedOK {
 		base = b.snapshot
@@ -346,7 +344,6 @@ func (b *Bot) RunCycle(ctx context.Context) (err error) {
 		b.metrics.IncErrors()
 		return err
 	}
-	b.applyMarginHolds(ctx, &quotes)
 	b.lastQuotes = quotes
 	b.applyDerivedState(&snapshot, quotes)
 	b.logReferenceSourceTransition(b.snapshot, snapshot)
@@ -608,6 +605,10 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 // markets. A future's inventory is contracts, and is reported as is.
 func inventoryUSD(spec exchange.MarketSpec, snapshot state.Snapshot) float64 {
 	inventory := snapshot.Inventory(spec.BaseAsset)
+	if spec.IsMarginEngineFuture() {
+		// a contract is ContractSizeUSDC of notional, whatever its price in cNGN
+		return inventory * spec.ContractSizeUSDC
+	}
 	if !spec.CNGNDenominated() {
 		return inventory
 	}
@@ -664,6 +665,11 @@ func (b *Bot) handleLoadError(ctx context.Context, err error) error {
 			haltReason = "anchor data stale"
 			b.metrics.SetDependencyStale("anchor_data", true)
 		}
+	case "future_state":
+		// No grace: without the band, the margin and the cutoff, a resting quote on the future can fill
+		// at a price the bot no longer stands behind (a stale index, say, that then catches up).
+		haltReason = "future state unreadable"
+		b.metrics.SetDependencyStale("future_state", true)
 	}
 	if haltReason != "" {
 		b.logger.Warn("dependency stale; halting quoting", "reason", haltReason, "error", loadErr.Err)
