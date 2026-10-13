@@ -569,6 +569,19 @@ export MM_MARKET_SYMBOL=USDCcNGN-SPOT
 go run ./cmd/mm-bot
 ```
 
+### Building the image
+
+Production runs on ECS from images in ECR (`numo-exchange/market-maker`), tagged by the 12-character
+commit SHA; the repository is immutable. Build and push from a clean tree with:
+
+```bash
+PROFILE=numo REGION=us-east-1 ./build-and-push.sh
+```
+
+It refuses a dirty tree, builds `linux/amd64` with `GIT_SHA` as the image's revision label, and pushes.
+Nothing deploys until the tag is pinned in numofx/exchange `infra/aws` (`image_market_maker`,
+`image_market_maker_perp`, `image_market_maker_future`) and applied.
+
 ### Futures Fair-Value HTTP Anchor
 
 For futures markets (for example `USDCcNGN-APR30-2026`), run a local anchor service that derives fair value from spot:
