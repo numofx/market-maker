@@ -140,16 +140,45 @@ type FutureState struct {
 	IMSurplus     float64
 	PerContractIM float64
 	// Index is 1e36 / indexFeed.getSpot(), and the band FutureAsset refuses fills outside of is
-	// Index -/+ BandWidth (markIndexBand(expiry)): BandLow to BandHigh.
-	Index     float64
-	BandWidth float64
-	BandLow   float64
-	BandHigh  float64
+	// Index -/+ BandWidth (markIndexBand(expiry)): BandLow to BandHigh. The floats are for pricing;
+	// BandLowRaw and BandHighRaw are the chain's edges exactly (FutureBandEdges), and Admits is its test.
+	Index       float64
+	BandWidth   float64
+	BandLow     float64
+	BandHigh    float64
+	BandLowRaw  *big.Int
+	BandHighRaw *big.Int
 	// LastTradeTime is the series' own; FixingStart is expiry - fixingWindow, when the settlement
 	// fixing begins. Quoting stops before the earlier of the two.
 	LastTradeTime time.Time
 	FixingStart   time.Time
 	Settled       bool
+}
+
+// FutureBandEdges are the last prices FutureAsset admits, 18dp: it refuses a fill when
+// |price - index| x 1e18 > index x width, so the edges are index -/+ floor(index x width / 1e18). Not
+// index x (1 -/+ width): when index x width is not a whole number of wei that is a wei outside.
+func FutureBandEdges(index, width *big.Int) (low, high *big.Int) {
+	maxDiff := new(big.Int).Quo(new(big.Int).Mul(index, width), decimalScale)
+	return new(big.Int).Sub(index, maxDiff), new(big.Int).Add(index, maxDiff)
+}
+
+// WithBand sets the index, the width and both forms of the edges from the chain's raw values.
+func (f FutureState) WithBand(index, width *big.Int) FutureState {
+	f.Index, f.BandWidth = rawBigToFloat(index), rawBigToFloat(width)
+	f.BandLowRaw, f.BandHighRaw = FutureBandEdges(index, width)
+	f.BandLow, f.BandHigh = rawBigToFloat(f.BandLowRaw), rawBigToFloat(f.BandHighRaw)
+	return f
+}
+
+// Admits is FutureAsset's band test on the price as this bot signs it (floatToRaw, the limitPrice in
+// the trade data): BandLowRaw <= price <= BandHighRaw. Without the raw edges nothing is admitted.
+func (f FutureState) Admits(price float64) bool {
+	if f.BandLowRaw == nil || f.BandHighRaw == nil || !(price > 0) {
+		return false
+	}
+	signed, ok := new(big.Int).SetString(floatToRaw(price), 10)
+	return ok && signed.Cmp(f.BandLowRaw) >= 0 && signed.Cmp(f.BandHighRaw) <= 0
 }
 
 // QuotingCutoff is when quoting stops: the earlier of the fixing window's start and last trade, less
@@ -232,14 +261,14 @@ func (c *HTTPClient) FutureState(ctx context.Context, spec MarketSpec) (FutureSt
 
 	// index = 1e36 / spot, in 18dp: FutureAsset._indexPrice
 	index := new(big.Int).Quo(new(big.Int).Mul(decimalScale, new(big.Int).Mul(decimalScale, decimalScale)), new(big.Int).Mul(spot, decimalScale))
+	if width == nil {
+		return FutureState{}, errors.New("markIndexBand returned nothing")
+	}
 	state := FutureState{
 		IMSurplus: surplus, PerContractIM: perContract,
-		Index: rawBigToFloat(index), BandWidth: rawBigToFloat(width),
 		LastTradeTime: schedule.lastTrade, FixingStart: schedule.fixingStart, Settled: contract.Settled,
 	}
-	state.BandLow = state.Index * (1 - state.BandWidth)
-	state.BandHigh = state.Index * (1 + state.BandWidth)
-	return state, nil
+	return state.WithBand(index, width), nil
 }
 
 type futureContract struct {

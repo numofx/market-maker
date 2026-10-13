@@ -212,9 +212,16 @@ func TestFutureStateReadsTheBandAndScheduleAsTheChainHasThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 1e36 / floor(1e18/1400) = 1400.000000000000000280
+	// 1e36 / floor(1e18/1400) = 1400.00000000000000056
 	if math.Abs(got.Index-1400) > 1e-9 || math.Abs(got.BandLow-1260) > 1e-9 || math.Abs(got.BandHigh-1540) > 1e-9 {
 		t.Fatalf("index %v band %v-%v", got.Index, got.BandLow, got.BandHigh)
+	}
+	// and the exact edges, the chain's: index -/+ floor(index x 0.1), from the stub's spot
+	wad := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	index := new(big.Int).Quo(new(big.Int).Mul(wad, wad), new(big.Int).Div(wad, big.NewInt(1400)))
+	maxDiff := new(big.Int).Quo(new(big.Int).Mul(index, big.NewInt(1e17)), big.NewInt(1e18))
+	if got.BandLowRaw == nil || got.BandLowRaw.Cmp(new(big.Int).Sub(index, maxDiff)) != 0 || got.BandHighRaw.Cmp(new(big.Int).Add(index, maxDiff)) != 0 {
+		t.Fatalf("raw band %v-%v", got.BandLowRaw, got.BandHighRaw)
 	}
 	if got.IMSurplus != 2500 || got.PerContractIM != 250 {
 		t.Fatalf("margin %v per contract %v", got.IMSurplus, got.PerContractIM)
@@ -321,5 +328,57 @@ func TestPlacingOnTheEngineFutureSignsTheCapAndTheContractFee(t *testing.T) {
 	req.OrderID, req.Nonce = "mm:USDC-cNGN-31DEC26:b2", "2"
 	if _, err := client.PlaceLimitOrder(context.Background(), req); err == nil || len(posted) != 1 {
 		t.Fatalf("past the cutoff nothing is posted: %v, %d posted", err, len(posted))
+	}
+}
+
+// chainAdmits is FutureAsset's own test, written out: |price - index| x 1e18 <= index x width.
+func chainAdmits(price, index, width *big.Int) bool {
+	diff := new(big.Int).Sub(price, index)
+	diff.Abs(diff)
+	return new(big.Int).Mul(diff, big.NewInt(1e18)).Cmp(new(big.Int).Mul(index, width)) <= 0
+}
+
+// The edges are the last prices the chain admits, for indexes where index x width is not a whole number
+// of wei (the live series' index on 2026-10-13, where index x (1 - width) is a wei outside).
+func TestFutureBandEdgesAreTheChainsLastAdmittedPrices(t *testing.T) {
+	for _, c := range []struct{ index, width string }{
+		{"1365749460529001828479", "100000000000000000"},
+		{"1386044666769033003345", "13000000000000000"},
+		{"7", "500000000000000000"},
+	} {
+		index, _ := new(big.Int).SetString(c.index, 10)
+		width, _ := new(big.Int).SetString(c.width, 10)
+		if new(big.Int).Mod(new(big.Int).Mul(index, width), big.NewInt(1e18)).Sign() == 0 {
+			t.Fatalf("fixture %s x %s divides: it cannot catch the rounding", c.index, c.width)
+		}
+		low, high := FutureBandEdges(index, width)
+		one := big.NewInt(1)
+		if !chainAdmits(low, index, width) || chainAdmits(new(big.Int).Sub(low, one), index, width) {
+			t.Errorf("index %s: low %s is not the lowest admitted price", c.index, low)
+		}
+		if !chainAdmits(high, index, width) || chainAdmits(new(big.Int).Add(high, one), index, width) {
+			t.Errorf("index %s: high %s is not the highest admitted price", c.index, high)
+		}
+	}
+}
+
+// Admits judges the price as it is signed (floatToRaw truncates the float's 18-decimal expansion), not
+// the decimal it stands for: the float nearest 1260.000002 is a little below it, so it signs below an
+// edge of exactly 1260.000002.
+func TestAdmitsJudgesThePriceAsSigned(t *testing.T) {
+	low, _ := new(big.Int).SetString("1260000002000000000000", 10)
+	f := FutureState{BandLowRaw: low, BandHighRaw: new(big.Int).Mul(big.NewInt(1540), big.NewInt(1e18))}
+	signed, _ := new(big.Int).SetString(floatToRaw(1260.000002), 10)
+	if signed.Cmp(low) >= 0 {
+		t.Fatalf("fixture: 1260.000002 signs as %s, not below the edge", signed)
+	}
+	if f.Admits(1260.000002) {
+		t.Fatal("a price signed below the edge must not be admitted")
+	}
+	if !f.Admits(1260.000003) || !f.Admits(1540) || f.Admits(1540.000001) {
+		t.Fatal("inside admitted, outside not")
+	}
+	if (FutureState{}).Admits(1400) {
+		t.Fatal("without the raw edges nothing is admitted")
 	}
 }
