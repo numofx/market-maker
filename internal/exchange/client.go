@@ -954,7 +954,11 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	payloadSide := req.Side
 	payloadDesiredAmount := floatToRaw(req.Size)
 	signedDesiredAmount := marketSizeToRawOrder(spec, req.Size)
-	payloadLimitPrice := normalizePrice(req.Price)
+	// The body's limit_price is always the signed limitPrice rendered back (floatToRaw is what
+	// encodeTradeData signs): the venue requires the signed value to be a whole multiple of limit_price in
+	// ticks, and a float's shortest decimal form is not its 18-decimal expansion. One rendering for every
+	// market, so no branch can send the other (every engine-future order was refused on 2026-10-13 for it).
+	payloadLimitPrice := rawPriceToDecimalString(floatToRaw(req.Price))
 	payload := map[string]any{}
 	if spec.CNGNDenominated() {
 		if !(req.Price > 0) || !(req.Size > 0) {
@@ -970,11 +974,6 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 		}
 		payloadDesiredAmount = strconv.FormatFloat(engineAmount, 'f', -1, 64)
 		signedDesiredAmount = floatToRaw(engineAmount)
-		// The signed action carries the price as an 18-decimal fixed-point raw value
-		// (floatToRaw). Render the SAME quantized value as the body limit_price so it
-		// aligns to the 1e-18 tick and matches the signature exactly — the float's
-		// shortest decimal form can exceed 18 decimals and get rejected.
-		payloadLimitPrice = rawPriceToDecimalString(floatToRaw(enginePrice))
 	} else {
 		// Cash-margined / deliverable FUTURE: the request BODY carries the human-decimal
 		// contract quantity while the SIGNED action carries the on-chain wei amount. Round
@@ -2045,10 +2044,6 @@ func (c *HTTPClient) marketSpecForAsset(assetAddress, subID string) MarketSpec {
 		}
 	}
 	return MarketSpec{}
-}
-
-func normalizePrice(price float64) string {
-	return strconv.FormatFloat(price, 'f', -1, 64)
 }
 
 // rawPriceToDecimalString renders an 18-decimal fixed-point raw value (as produced

@@ -331,6 +331,67 @@ func TestPlacingOnTheEngineFutureSignsTheCapAndTheContractFee(t *testing.T) {
 	}
 }
 
+// The body's limit_price and the signed limitPrice are one price, by the venue's own rule
+// (markets-service checkActionDataInvariants): the signed value is a positive whole multiple of limit_price in
+// ticks. At the live quote of 2026-10-13 (1382.9584138049022) the body used to carry the float's shortest form,
+// which the venue refused with "action_json.data.limitPrice is not aligned with normalized limit_price".
+func TestTheEngineFutureBodyPriceIsTheSignedPrice(t *testing.T) {
+	var posted []map[string]any
+	venue := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"market": "USDC-cNGN-30NOV26", "contract_type": "future", "base_asset_symbol": "USDC", "quote_asset_symbol": "cNGN",
+				"asset_address": "0x00000000000000000000000000000000000000f0", "sub_id": "1796047200", "expiry_timestamp": 1796047200,
+				"tick_size": "0.000000000000000001", "taker_fee_bps": 25,
+				"margin_manager_address": "0x00000000000000000000000000000000000000e9",
+				"future":                 map[string]any{"contract_size_usdc": "1000"},
+			}})
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		posted = append(posted, body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"order": map[string]any{"order_id": body["order_id"], "side": body["side"],
+			"limit_price": body["limit_price"], "desired_amount": body["desired_amount"], "nonce": body["nonce"], "created_at": time.Now().UTC()}})
+	}))
+	defer venue.Close()
+	key, _ := crypto.HexToECDSA(strings.Repeat("11", 32))
+	owner := crypto.PubkeyToAddress(key.PublicKey).Hex()
+	client := &HTTPClient{
+		cfg: ClientConfig{APIBaseURL: venue.URL, OwnerAddress: owner, SignerAddress: owner, SubaccountID: "32", RecipientID: "32",
+			ChainID: 8453, OrderExpirySeconds: 300, WorstFee: "0", FutureCutoffBeforeFixSeconds: 3600},
+		httpClient: &http.Client{Timeout: 5 * time.Second}, markets: make(map[string]MarketSpec), refreshEvery: time.Minute,
+		signer: NewLocalSigner(key), tradeModule: common.HexToAddress("0xa1"), matching: common.HexToAddress("0x9e"),
+	}
+	fixing := time.Now().UTC().Add(48 * time.Hour)
+	client.futureSchedule = &futureSchedule{fixingStart: fixing, lastTrade: fixing.Add(time.Hour)}
+	for i, price := range []float64{1382.9584138049022, 1391.2811324436477, 1400, 1386.044666769033} {
+		req := PlaceOrderRequest{Market: "USDC-cNGN-30NOV26", Side: SideBuy, Price: price, Size: 1, OrderID: fmt.Sprintf("mm:f:b%d", i), Nonce: fmt.Sprint(i + 1)}
+		if _, err := client.PlaceLimitOrder(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		body := posted[len(posted)-1]
+		action, _ := body["action_json"].(map[string]any)
+		data := strings.TrimPrefix(fmt.Sprint(action["data"]), "0x")
+		signed, ok := new(big.Int).SetString(data[128:192], 16) // the third word of the trade data: limitPrice
+		if !ok {
+			t.Fatalf("unreadable trade data %s", data)
+		}
+		ticks, ok := new(big.Rat).SetString(fmt.Sprint(body["limit_price"]))
+		if !ok {
+			t.Fatalf("limit_price %v", body["limit_price"])
+		}
+		ticks.Mul(ticks, new(big.Rat).SetInt(big.NewInt(1e18)))
+		if !ticks.IsInt() || ticks.Num().Sign() <= 0 {
+			t.Fatalf("at %v: limit_price %v is not a whole number of 1e-18 ticks", price, body["limit_price"])
+		}
+		scale, rem := new(big.Int).QuoRem(signed, ticks.Num(), new(big.Int))
+		if rem.Sign() != 0 || scale.Sign() <= 0 {
+			t.Fatalf("at %v: signed limitPrice %s is not a whole multiple of limit_price %v in ticks (%s); the venue refuses it", price, signed, body["limit_price"], ticks.Num())
+		}
+	}
+}
+
 // chainAdmits is FutureAsset's own test, written out: |price - index| x 1e18 <= index x width.
 func chainAdmits(price, index, width *big.Int) bool {
 	diff := new(big.Int).Sub(price, index)
