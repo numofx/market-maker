@@ -2,6 +2,8 @@ package strategy
 
 import (
 	"math"
+	"math/big"
+	"strconv"
 	"testing"
 	"time"
 
@@ -26,8 +28,28 @@ func engineFutureConfig() config.Config {
 // 10,000 USD of IM surplus, 250 a contract (25% of 1,000 USDC), the index at 1,400 with a 10% band,
 // fixing a week out.
 func engineFutureState(now time.Time) *exchange.FutureState {
-	return &exchange.FutureState{IMSurplus: 10_000, PerContractIM: 250, Index: 1400, BandWidth: 0.1, BandLow: 1260, BandHigh: 1540,
-		LastTradeTime: now.Add(7*24*time.Hour + time.Hour), FixingStart: now.Add(7 * 24 * time.Hour)}
+	f := exchange.FutureState{IMSurplus: 10_000, PerContractIM: 250,
+		LastTradeTime: now.Add(7*24*time.Hour + time.Hour), FixingStart: now.Add(7 * 24 * time.Hour)}.WithBand(e18("1400"), e18("0.1"))
+	return &f
+}
+
+// e18 is a decimal as the chain holds it, 18dp.
+func e18(s string) *big.Int {
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		panic(s)
+	}
+	r.Mul(r, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
+	if !r.IsInt() {
+		panic(s)
+	}
+	return new(big.Int).Set(r.Num())
+}
+
+// withBand is a cutoff case's state with the standard band.
+func withBand(f exchange.FutureState) *exchange.FutureState {
+	f = f.WithBand(e18("1400"), e18("0.1"))
+	return &f
 }
 
 func engineFutureSnapshot(future *exchange.FutureState, position float64, ref float64) state.Snapshot {
@@ -94,10 +116,10 @@ func TestTheEngineFutureStopsQuotingAtItsCutoff(t *testing.T) {
 	cfg := engineFutureConfig()
 	now := time.Now().UTC()
 	for name, future := range map[string]*exchange.FutureState{
-		"an hour before fixing":    {IMSurplus: 10_000, PerContractIM: 250, BandLow: 1260, BandHigh: 1540, FixingStart: now.Add(time.Hour), LastTradeTime: now.Add(2 * time.Hour)},
-		"last trade before fixing": {IMSurplus: 10_000, PerContractIM: 250, BandLow: 1260, BandHigh: 1540, FixingStart: now.Add(5 * time.Hour), LastTradeTime: now.Add(30 * time.Minute)},
-		"inside the fixing window": {IMSurplus: 10_000, PerContractIM: 250, BandLow: 1260, BandHigh: 1540, FixingStart: now.Add(-time.Minute), LastTradeTime: now.Add(time.Hour)},
-		"settled":                  {IMSurplus: 10_000, PerContractIM: 250, BandLow: 1260, BandHigh: 1540, FixingStart: now.Add(48 * time.Hour), LastTradeTime: now.Add(48 * time.Hour), Settled: true},
+		"an hour before fixing":    withBand(exchange.FutureState{IMSurplus: 10_000, PerContractIM: 250, FixingStart: now.Add(time.Hour), LastTradeTime: now.Add(2 * time.Hour)}),
+		"last trade before fixing": withBand(exchange.FutureState{IMSurplus: 10_000, PerContractIM: 250, FixingStart: now.Add(5 * time.Hour), LastTradeTime: now.Add(30 * time.Minute)}),
+		"inside the fixing window": withBand(exchange.FutureState{IMSurplus: 10_000, PerContractIM: 250, FixingStart: now.Add(-time.Minute), LastTradeTime: now.Add(time.Hour)}),
+		"settled":                  withBand(exchange.FutureState{IMSurplus: 10_000, PerContractIM: 250, FixingStart: now.Add(48 * time.Hour), LastTradeTime: now.Add(48 * time.Hour), Settled: true}),
 	} {
 		got := build(t, cfg, engineFutureSnapshot(future, 0, 1400))
 		if got.Bid != nil || got.Ask != nil || len(got.Bids)+len(got.Asks) != 0 {
@@ -156,5 +178,39 @@ func TestClampLevelsMergesLevelsClampedToOnePrice(t *testing.T) {
 	got := clampLevels(levels, exchange.SideBuy, 1260, 1538)
 	if len(got) != 2 || got[0].Price != 1538 || got[1].Price != 1500 {
 		t.Fatalf("clamped ladder: %+v", got)
+	}
+}
+
+// With no buffer, a band whose true edge sits 10 wei above a tick (1260.000002, whose float signs a little
+// below it): the float edge rounds onto that tick, which the chain refuses as signed. The clamp steps inward to a tick the chain
+// admits. Checked against FutureAsset's test written out, on the price as signed.
+func TestTheEngineFutureClampsToAPriceTheChainAdmitsAsSigned(t *testing.T) {
+	cfg := engineFutureConfig()
+	cfg.FutureBandBufferBPS = 0
+	// width 0.5: low = index - floor(index / 2) = 1260.00000200000000001
+	index, _ := new(big.Int).SetString("2520000004000000000020", 10)
+	width := e18("0.5")
+	f := (exchange.FutureState{IMSurplus: 10_000, PerContractIM: 250, LastTradeTime: time.Now().Add(8 * 24 * time.Hour),
+		FixingStart: time.Now().Add(7 * 24 * time.Hour)}).WithBand(index, width)
+	if f.BandLowRaw.String() != "1260000002000000000010" {
+		t.Fatalf("fixture low %s", f.BandLowRaw)
+	}
+	admits := func(price float64) bool {
+		signed, _ := new(big.Rat).SetString(strconv.FormatFloat(price, 'f', 18, 64))
+		raw := new(big.Int).Quo(new(big.Int).Mul(signed.Num(), big.NewInt(1e18)), signed.Denom())
+		diff := new(big.Int).Sub(raw, index)
+		diff.Abs(diff)
+		return new(big.Int).Mul(diff, big.NewInt(1e18)).Cmp(new(big.Int).Mul(index, width)) <= 0
+	}
+	// reference far below the band: the ask is clamped up to the band's low edge
+	got := build(t, cfg, engineFutureSnapshot(&f, 0, 1000))
+	if got.Ask == nil {
+		t.Fatalf("an ask below the band clamps to its edge: %+v", got.AskSuppression)
+	}
+	if !admits(got.Ask.Price) {
+		t.Fatalf("the clamped ask %.9f is signed below the band's low edge %s", got.Ask.Price, f.BandLowRaw)
+	}
+	if math.Abs(got.Ask.Price-1260.000003) > 1e-9 {
+		t.Fatalf("one tick in from 1260.000002: %.9f", got.Ask.Price)
 	}
 }

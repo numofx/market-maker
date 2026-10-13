@@ -17,6 +17,10 @@ const (
 	reasonFutureCutoff       = "future_quoting_cutoff"
 	reasonFutureSettled      = "future_settled"
 	reasonOutsideFillBand    = "outside_fill_band"
+
+	// maxBandEdgeSteps bounds the inward search for an admitted edge: the float approximation is off by
+	// far less than a tick, so one step is all a real band needs.
+	maxBandEdgeSteps = 4
 )
 
 // marginEngineFutureCapacity is how many contracts each side may quote. Opening risk is bounded by the
@@ -68,7 +72,17 @@ func applyMarginEngineFuture(cfg config.Config, spec exchange.MarketSpec, snapsh
 	buffer := cfg.FutureBandBufferBPS / 10_000
 	low := roundUp(future.BandLow*(1+buffer), spec.TickSize)
 	high := roundDown(future.BandHigh*(1-buffer), spec.TickSize)
-	if !(low > 0) || high < low {
+	// The float edges and the tick rounding (roundUp/roundDown allow 1e-9 of a tick) approximate the
+	// chain's; the buffer usually covers that, but not at 0 bps. Step each edge inward a tick at a time
+	// until FutureAsset's own test admits it as signed: every level is then clamped to an admitted
+	// price, and every price between two admitted ones is admitted.
+	for i := 0; i < maxBandEdgeSteps && low <= high && !future.Admits(low); i++ {
+		low = stepTick(low, spec.TickSize, 1)
+	}
+	for i := 0; i < maxBandEdgeSteps && low <= high && !future.Admits(high); i++ {
+		high = stepTick(high, spec.TickSize, -1)
+	}
+	if !(low > 0) || high < low || !future.Admits(low) || !future.Admits(high) {
 		off(reasonOutsideFillBand)
 		return
 	}
@@ -111,6 +125,15 @@ func clampLevels(levels []Quote, side exchange.Side, low, high float64) []Quote 
 		out = append(out, level)
 	}
 	return out
+}
+
+// stepTick moves a tick-aligned price exactly one tick, staying on the grid: roundUp(price+tick) can
+// land two ticks on, its float quotient crossing the next boundary.
+func stepTick(price, tick float64, direction int) float64 {
+	if tick <= 0 {
+		return price
+	}
+	return (math.Round(price/tick) + float64(direction)) * tick
 }
 
 func firstLevel(levels []Quote) *Quote {

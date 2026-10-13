@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/big"
 	"path/filepath"
 	"testing"
 	"time"
@@ -54,8 +55,9 @@ func engineFutureBot(t *testing.T) (*Bot, *engineFutureClient, *metrics.Registry
 			balances: []exchange.Balance{{Asset: "USDC", Total: 0, Available: 0}, {Asset: "cNGN", Total: 0, Available: 0}},
 		},
 		reasons: map[string]string{},
-		future: exchange.FutureState{IMSurplus: 1_000_000, PerContractIM: 250, Index: 1400, BandWidth: 0.1, BandLow: 1260, BandHigh: 1540,
-			FixingStart: now.Add(7 * 24 * time.Hour), LastTradeTime: now.Add(7*24*time.Hour + time.Hour)},
+		future: exchange.FutureState{IMSurplus: 1_000_000, PerContractIM: 250,
+			FixingStart: now.Add(7 * 24 * time.Hour), LastTradeTime: now.Add(7*24*time.Hour + time.Hour)}.WithBand(
+			new(big.Int).Mul(big.NewInt(1400), big.NewInt(1e18)), big.NewInt(1e17)),
 	}
 	cfg := config.Config{
 		MarketSymbol: "USDC-cNGN-31DEC26", StateFile: filepath.Join(t.TempDir(), "state.json"),
