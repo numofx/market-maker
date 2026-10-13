@@ -49,6 +49,69 @@ func TestLoadMarketsReadsTheFuturesManagerAndContractSize(t *testing.T) {
 	}
 }
 
+// The engine future is sized in the venue's step, whole contracts: with the listing's amount_step and, as
+// the live venue lists it on 2026-10-13, without it. A resting order the venue reports as desired_amount
+// "1" reads back as 1 contract; with the deliverable futures' 0.001 it read as 0.001, and the bot cancelled
+// and re-placed its ladder every cycle as a size mismatch. Signing is unchanged: 1 contract signs 1e18.
+func TestTheEngineFutureIsSizedInWholeContracts(t *testing.T) {
+	for _, amountStep := range []string{"1", ""} {
+		row := map[string]any{
+			"market": "USDC-cNGN-30NOV26", "contract_type": "future", "base_asset_symbol": "USDC", "quote_asset_symbol": "cNGN",
+			"asset_address": "0x00000000000000000000000000000000000000F0", "sub_id": "1796047200", "expiry_timestamp": 1796047200,
+			"tick_size": "0.000000000000000001", "min_size": "0.001", "taker_fee_bps": 25,
+			"margin_manager_address": "0x00000000000000000000000000000000000000E9",
+			"future":                 map[string]any{"contract_size_usdc": "1000"},
+		}
+		if amountStep != "" {
+			row["amount_step"] = amountStep
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{row})
+		}))
+		client := &HTTPClient{cfg: ClientConfig{APIBaseURL: srv.URL, WorstFee: "0"}, httpClient: &http.Client{Timeout: 5 * time.Second},
+			markets: make(map[string]MarketSpec), refreshEvery: time.Minute}
+		spec, err := client.GetMarket(context.Background(), "USDC-cNGN-30NOV26")
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spec.SizeStep != 1 || spec.MinSize != 1 {
+			t.Fatalf("amount_step %q: size step %v, min size %v, want whole contracts", amountStep, spec.SizeStep, spec.MinSize)
+		}
+		if got := orderAmountToFloat(spec, "1"); got != 1 {
+			t.Fatalf("amount_step %q: a resting desired_amount of 1 reads back as %v contracts", amountStep, got)
+		}
+		body, signed, rounded, err := futureOrderAmounts(spec, 1.5)
+		if err != nil || body != "1" || signed != "1000000000000000000" || rounded != 1 {
+			t.Fatalf("amount_step %q: 1.5 contracts -> body %q signed %q rounded %v %v, want 1 / 1e18 / 1", amountStep, body, signed, rounded, err)
+		}
+	}
+}
+
+// The listing's amount_step wins over every hardcoded step: a venue that says 0.5 is sized in 0.5.
+func TestTheListingsAmountStepIsTheSizeStep(t *testing.T) {
+	row := map[string]any{
+		"market": "USDC-cNGN-30NOV26", "contract_type": "future", "base_asset_symbol": "USDC", "quote_asset_symbol": "cNGN",
+		"asset_address": "0x00000000000000000000000000000000000000F0", "sub_id": "1796047200", "expiry_timestamp": 1796047200,
+		"tick_size": "0.000000000000000001", "amount_step": "0.5", "taker_fee_bps": 25,
+		"margin_manager_address": "0x00000000000000000000000000000000000000E9",
+		"future":                 map[string]any{"contract_size_usdc": "1000"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{row})
+	}))
+	defer srv.Close()
+	client := &HTTPClient{cfg: ClientConfig{APIBaseURL: srv.URL, WorstFee: "0"}, httpClient: &http.Client{Timeout: 5 * time.Second},
+		markets: make(map[string]MarketSpec), refreshEvery: time.Minute}
+	spec, err := client.GetMarket(context.Background(), "USDC-cNGN-30NOV26")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.SizeStep != 0.5 || spec.MinSize != 0.5 || orderAmountToFloat(spec, "3") != 1.5 {
+		t.Fatalf("amount_step 0.5: size step %v, min size %v, 3 steps read as %v", spec.SizeStep, spec.MinSize, orderAmountToFloat(spec, "3"))
+	}
+}
+
 func TestFutureIMHeadroomDecodesTheEngine(t *testing.T) {
 	wad := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	word := func(v *big.Int) string {

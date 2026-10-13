@@ -1227,10 +1227,13 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		AssetAddress     string   `json:"asset_address"`
 		SubID            string   `json:"sub_id"`
 		TickSize         string   `json:"tick_size"`
-		OrderEntrySpec   string   `json:"order_entry_spec"`
-		TakerFeeBps      int      `json:"taker_fee_bps"`
-		ExpiryTimestamp  int64    `json:"expiry_timestamp"`
-		ContractType     string   `json:"contract_type"`
+		// AmountStep is the step the venue takes desired_amount in (markets-service amountAtomicStep),
+		// in the market's units: when the listing says it, it is the size step.
+		AmountStep      string `json:"amount_step"`
+		OrderEntrySpec  string `json:"order_entry_spec"`
+		TakerFeeBps     int    `json:"taker_fee_bps"`
+		ExpiryTimestamp int64  `json:"expiry_timestamp"`
+		ContractType    string `json:"contract_type"`
 		// MarginManager is the market's manager: for the cNGN future, the MarginEngine.
 		MarginManager string `json:"margin_manager_address"`
 		Future        *struct {
@@ -1307,8 +1310,19 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			}
 		}
 		switch {
+		case parsePositiveStep(item.AmountStep) > 0:
+			// The venue's own step. Sizes signed, sent and read back (orderAmountToFloat) are all in it.
+			spec.SizeStep = parsePositiveStep(item.AmountStep)
+			spec.MinSize = spec.SizeStep
 		case spec.CNGNDenominated():
 			// Spot and the perp are sized in whole cNGN: the venue's atomic amount step is 1.
+			spec.SizeStep = 1
+			spec.MinSize = 1
+		case spec.IsMarginEngineFuture():
+			// The MarginEngine future, from a listing without amount_step: whole contracts, the venue's
+			// step on every market. Not the deliverable futures' 0.001 below: read back with it, a resting
+			// 1-contract order is 0.001 contracts, and the bot cancelled and re-placed its whole ladder
+			// every cycle as a size mismatch (2026-10-13).
 			spec.SizeStep = 1
 			spec.MinSize = 1
 		case item.Market == "USDCcNGN-APR30-2026", item.Market == "USDCcNGN-SEP16-2026", item.Market == "USDCcNGN-NOV30-2026", item.Market == "USDCcNGN-MAY31-2027":
@@ -2207,4 +2221,13 @@ func parseFloatOrZero(raw string) float64 {
 		return 0
 	}
 	return value
+}
+
+// parsePositiveStep is a listing's amount_step as a float, or 0 when absent or not a positive number.
+func parsePositiveStep(raw string) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || !(v > 0) {
+		return 0
+	}
+	return v
 }
