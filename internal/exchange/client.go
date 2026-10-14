@@ -232,6 +232,20 @@ type MarketSpec struct {
 	// ContractSizeUSDC is one contract's notional, from the listing's future block (1,000 for the cNGN
 	// future); zero for a market that reports none.
 	ContractSizeUSDC float64
+	// UnitContracts is one unit of the venue's desired_amount in contracts, from the listing's
+	// amount_scale (signed amount per unit; 1e18 is a contract): 0.001 since the venue sized the
+	// engine future in USDC of notional (2026-10-14). Zero when the listing names no scale, and a
+	// unit is then one SizeStep, as before. The bot still sizes, rounds and quotes in contracts.
+	UnitContracts float64
+}
+
+// venueUnitContracts is one unit of the venue's amounts in contracts: UnitContracts where the listing
+// fixes a scale, else the size step.
+func (s MarketSpec) venueUnitContracts() float64 {
+	if s.UnitContracts > 0 {
+		return s.UnitContracts
+	}
+	return s.MinSize
 }
 
 // Names is every identifier this market answers to: the canonical symbol first, then its aliases.
@@ -1229,7 +1243,10 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		TickSize         string   `json:"tick_size"`
 		// AmountStep is the step the venue takes desired_amount in (markets-service amountAtomicStep),
 		// in the market's units: when the listing says it, it is the size step.
-		AmountStep      string `json:"amount_step"`
+		AmountStep string `json:"amount_step"`
+		// AmountScale is the signed on-chain amount of one unit of desired_amount, where the market
+		// fixes one: 1e15 on the engine future, a unit being 1 USDC of notional (0.001 contract).
+		AmountScale     string `json:"amount_scale"`
 		OrderEntrySpec  string `json:"order_entry_spec"`
 		TakerFeeBps     int    `json:"taker_fee_bps"`
 		ExpiryTimestamp int64  `json:"expiry_timestamp"`
@@ -1289,6 +1306,10 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		if item.Future != nil {
 			spec.ContractSizeUSDC, _ = strconv.ParseFloat(strings.TrimSpace(item.Future.ContractSizeUSDC), 64)
 		}
+		// Spot also names a scale since 2026-10-14 (1e18, one whole cNGN), which its path signs already.
+		if scale, ok := new(big.Rat).SetString(strings.TrimSpace(item.AmountScale)); ok && scale.Sign() > 0 && scale.IsInt() && kind == MarketKindFuture {
+			spec.UnitContracts, _ = new(big.Rat).Quo(scale, new(big.Rat).SetInt(decimalScale)).Float64()
+		}
 		if spec.CNGNDenominated() {
 			// The one place the venue's presentation is read. Everything on the spec is engine
 			// terms from here on: cNGN is the base, USDC the quote, prices USDC per cNGN.
@@ -1310,6 +1331,11 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			}
 		}
 		switch {
+		case spec.UnitContracts > 0 && spec.IsMarginEngineFuture():
+			// The engine future sized in USDC of notional: the bot keeps quoting whole contracts, and
+			// writes each order's body in the venue's units (futureOrderAmounts).
+			spec.SizeStep = 1
+			spec.MinSize = 1
 		case parsePositiveStep(item.AmountStep) > 0:
 			// The venue's own step. Sizes signed, sent and read back (orderAmountToFloat) are all in it.
 			spec.SizeStep = parsePositiveStep(item.AmountStep)
@@ -1994,6 +2020,14 @@ func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, sign
 	// rounded contract quantity = atomic * step
 	rounded := new(big.Rat).Mul(new(big.Rat).SetInt(atomic), step)
 	bodyDecimal = normalizeDecimalString(rounded.FloatString(assetDecimals))
+	if spec.UnitContracts > 0 {
+		// The body counts the venue's units: 1 contract is 1,000 at 0.001 contract a unit.
+		units := new(big.Rat).Quo(rounded, ratFromFloat(spec.UnitContracts))
+		if !units.IsInt() {
+			return "", "", 0, fmt.Errorf("order size %v is not a whole number of %v-contract units on %s", size, spec.UnitContracts, spec.Symbol)
+		}
+		bodyDecimal = units.Num().String()
+	}
 	// signed wei = rounded * 10^assetDecimals (exact, since rounded is a multiple of step)
 	weiRat := new(big.Rat).Mul(rounded, new(big.Rat).SetInt(decimalScale))
 	signedWei = new(big.Int).Quo(weiRat.Num(), weiRat.Denom()).String()
@@ -2026,7 +2060,7 @@ func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
 func orderAmountToFloat(spec MarketSpec, raw string) float64 {
 	if usesContractLots(spec) {
 		if n, ok := new(big.Rat).SetString(strings.TrimSpace(raw)); ok {
-			size, _ := new(big.Rat).Mul(n, ratFromFloat(spec.MinSize)).Float64()
+			size, _ := new(big.Rat).Mul(n, ratFromFloat(spec.venueUnitContracts())).Float64()
 			return size
 		}
 	}
