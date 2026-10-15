@@ -506,3 +506,41 @@ func TestAdmitsJudgesThePriceAsSigned(t *testing.T) {
 		t.Fatal("without the raw edges nothing is admitted")
 	}
 }
+
+// Since 2026-10-14 the venue sizes the engine future in USDC of notional: amount_step "1" and
+// amount_scale 1e15, so one unit is 0.001 contract. The bot still quotes whole contracts; its order body
+// counts the venue's units (1 contract is 1000) and a resting order's desired_amount reads back from them,
+// while the signed amount stays 1e18 a contract.
+func TestTheEngineFutureSizedInUSDCKeepsWholeContractQuotes(t *testing.T) {
+	row := map[string]any{
+		"market": "USDC-cNGN-30NOV26", "contract_type": "future", "base_asset_symbol": "USDC", "quote_asset_symbol": "cNGN",
+		"asset_address": "0x00000000000000000000000000000000000000F0", "sub_id": "1796047200", "expiry_timestamp": 1796047200,
+		"tick_size": "0.000000000000000001", "min_size": "1", "amount_step": "1", "amount_scale": "1000000000000000",
+		"taker_fee_bps": 25, "margin_manager_address": "0x00000000000000000000000000000000000000E9",
+		"future": map[string]any{"contract_size_usdc": "1000"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{row})
+	}))
+	defer srv.Close()
+	client := &HTTPClient{cfg: ClientConfig{APIBaseURL: srv.URL, WorstFee: "0"}, httpClient: &http.Client{Timeout: 5 * time.Second},
+		markets: make(map[string]MarketSpec), refreshEvery: time.Minute}
+	spec, err := client.GetMarket(context.Background(), "USDC-cNGN-30NOV26")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.SizeStep != 1 || spec.MinSize != 1 || spec.UnitContracts != 0.001 {
+		t.Fatalf("size step %v, min size %v, unit %v contracts; want 1, 1, 0.001", spec.SizeStep, spec.MinSize, spec.UnitContracts)
+	}
+	body, signed, rounded, err := futureOrderAmounts(spec, 2.7)
+	if err != nil || body != "2000" || signed != "2000000000000000000" || rounded != 2 {
+		t.Fatalf("2.7 contracts -> body %q signed %q rounded %v %v, want 2000 / 2e18 / 2", body, signed, rounded, err)
+	}
+	if got := orderAmountToFloat(spec, "2000"); got != 2 {
+		t.Fatalf("a resting desired_amount of 2000 reads back as %v contracts, want 2", got)
+	}
+	// A partly filled rung: 1,000 of 2,000 units left is 1 contract.
+	if got := orderAmountToFloat(spec, "1000"); got != 1 {
+		t.Fatalf("desired_amount 1000 reads back as %v contracts, want 1", got)
+	}
+}
