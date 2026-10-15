@@ -235,8 +235,18 @@ type MarketSpec struct {
 	// UnitContracts is one unit of the venue's desired_amount in contracts, from the listing's
 	// amount_scale (signed amount per unit; 1e18 is a contract): 0.001 since the venue sized the
 	// engine future in USDC of notional (2026-10-14). Zero when the listing names no scale, and a
-	// unit is then one SizeStep, as before. The bot still sizes, rounds and quotes in contracts.
+	// unit is then one SizeStep, as before. The bot sizes and quotes in contracts, rounded to it.
 	UnitContracts float64
+}
+
+// rawLotContracts is what one unit of a future's raw fill, balance or signed amount is worth in
+// contracts: the size step on the deliverable futures, and one whole contract (1e18 signed) on the
+// engine future, whose size step is its 0.001-contract venue unit rather than a lot.
+func (s MarketSpec) rawLotContracts() float64 {
+	if s.UnitContracts > 0 && s.IsMarginEngineFuture() {
+		return 1
+	}
+	return s.SizeStep
 }
 
 // venueUnitContracts is one unit of the venue's amounts in contracts: UnitContracts where the listing
@@ -1332,10 +1342,11 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		}
 		switch {
 		case spec.UnitContracts > 0 && spec.IsMarginEngineFuture():
-			// The engine future sized in USDC of notional: the bot keeps quoting whole contracts, and
-			// writes each order's body in the venue's units (futureOrderAmounts).
-			spec.SizeStep = 1
-			spec.MinSize = 1
+			// The engine future sized in USDC of notional: the bot quotes contracts rounded to the venue's
+			// unit (0.001 contract, 1 USDC), so a rung can be 116 USDC rather than a whole 1,000, and
+			// writes each order's body in those units (futureOrderAmounts).
+			spec.SizeStep = spec.UnitContracts
+			spec.MinSize = spec.UnitContracts
 		case parsePositiveStep(item.AmountStep) > 0:
 			// The venue's own step. Sizes signed, sent and read back (orderAmountToFloat) are all in it.
 			spec.SizeStep = parsePositiveStep(item.AmountStep)
@@ -2009,11 +2020,11 @@ func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, sign
 	if sizeRat.Sign() < 0 {
 		return "", "", 0, fmt.Errorf("invalid order size %v", size)
 	}
-	// atomic = floor(size / step) using exact integer arithmetic.
-	atomic := new(big.Int).Quo(
-		new(big.Int).Mul(sizeRat.Num(), step.Denom()),
-		new(big.Int).Mul(sizeRat.Denom(), step.Num()),
-	)
+	// atomic = floor(size / step + 1e-9) using exact integer arithmetic. The nudge is the strategy's
+	// own roundDown tolerance: a size it rounded to 116 steps can arrive as 0.11599999999999999.
+	quotient := new(big.Rat).Quo(sizeRat, step)
+	quotient.Add(quotient, big.NewRat(1, 1_000_000_000))
+	atomic := new(big.Int).Quo(quotient.Num(), quotient.Denom())
 	if atomic.Sign() <= 0 {
 		return "", "", 0, fmt.Errorf("order size %v rounds below min size %v for market %s", size, spec.MinSize, spec.Symbol)
 	}
@@ -2046,7 +2057,7 @@ func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
 	}
 	size := rawToFloat(raw)
 	if usesContractLots(spec) {
-		return size * spec.SizeStep
+		return size * spec.rawLotContracts()
 	}
 	return size
 }
@@ -2069,14 +2080,14 @@ func orderAmountToFloat(spec MarketSpec, raw string) float64 {
 
 func marketSizeToRawOrder(spec MarketSpec, size float64) string {
 	if usesContractLots(spec) {
-		return floatToRaw(size / spec.SizeStep)
+		return floatToRaw(size / spec.rawLotContracts())
 	}
 	return floatToRaw(size)
 }
 
 func rawPositionToMarketSize(spec MarketSpec, position float64) float64 {
 	if usesContractLots(spec) {
-		return position * spec.SizeStep
+		return position * spec.rawLotContracts()
 	}
 	return position
 }
