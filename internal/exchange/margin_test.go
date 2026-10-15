@@ -508,10 +508,10 @@ func TestAdmitsJudgesThePriceAsSigned(t *testing.T) {
 }
 
 // Since 2026-10-14 the venue sizes the engine future in USDC of notional: amount_step "1" and
-// amount_scale 1e15, so one unit is 0.001 contract. The bot still quotes whole contracts; its order body
-// counts the venue's units (1 contract is 1000) and a resting order's desired_amount reads back from them,
-// while the signed amount stays 1e18 a contract.
-func TestTheEngineFutureSizedInUSDCKeepsWholeContractQuotes(t *testing.T) {
+// amount_scale 1e15, so one unit is 0.001 contract. The bot quotes contracts rounded to that unit; its
+// order body counts the venue's units (1 contract is 1000) and a resting order's desired_amount reads
+// back from them, while the signed amount stays 1e18 a contract and a raw position or fill 1 a contract.
+func TestTheEngineFutureSizedInUSDCQuotesInVenueUnits(t *testing.T) {
 	row := map[string]any{
 		"market": "USDC-cNGN-30NOV26", "contract_type": "future", "base_asset_symbol": "USDC", "quote_asset_symbol": "cNGN",
 		"asset_address": "0x00000000000000000000000000000000000000F0", "sub_id": "1796047200", "expiry_timestamp": 1796047200,
@@ -529,12 +529,34 @@ func TestTheEngineFutureSizedInUSDCKeepsWholeContractQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.SizeStep != 1 || spec.MinSize != 1 || spec.UnitContracts != 0.001 {
-		t.Fatalf("size step %v, min size %v, unit %v contracts; want 1, 1, 0.001", spec.SizeStep, spec.MinSize, spec.UnitContracts)
+	if spec.SizeStep != 0.001 || spec.MinSize != 0.001 || spec.UnitContracts != 0.001 {
+		t.Fatalf("size step %v, min size %v, unit %v contracts; want 0.001, 0.001, 0.001", spec.SizeStep, spec.MinSize, spec.UnitContracts)
 	}
 	body, signed, rounded, err := futureOrderAmounts(spec, 2.7)
-	if err != nil || body != "2000" || signed != "2000000000000000000" || rounded != 2 {
-		t.Fatalf("2.7 contracts -> body %q signed %q rounded %v %v, want 2000 / 2e18 / 2", body, signed, rounded, err)
+	if err != nil || body != "2700" || signed != "2700000000000000000" || rounded != 2.7 {
+		t.Fatalf("2.7 contracts -> body %q signed %q rounded %v %v, want 2700 / 2.7e18 / 2.7", body, signed, rounded, err)
+	}
+	// A 116 USDC rung, as the strategy's roundDown hands it over (116 steps of 0.001 in float64).
+	body, signed, rounded, err = futureOrderAmounts(spec, 116*0.001)
+	if err != nil || body != "116" || signed != "116000000000000000" || rounded != 0.116 {
+		t.Fatalf("116 x 0.001 contracts -> body %q signed %q rounded %v %v, want 116 / 1.16e17 / 0.116", body, signed, rounded, err)
+	}
+	body, _, rounded, err = futureOrderAmounts(spec, 0.1679)
+	if err != nil || body != "167" || rounded != 0.167 {
+		t.Fatalf("0.1679 contracts -> body %q rounded %v %v, want 167 / 0.167", body, rounded, err)
+	}
+	if _, _, _, err := futureOrderAmounts(spec, 0.0009); err == nil {
+		t.Fatal("under one venue unit must not be signed")
+	}
+	// Positions and fills are still 1e18 a contract, not a 0.001-contract lot.
+	if got := rawPositionToMarketSize(spec, 2.5); got != 2.5 {
+		t.Fatalf("a raw position of 2.5 reads as %v contracts, want 2.5", got)
+	}
+	if got := rawOrderSizeToFloat(spec, "116000000000000000"); got != 0.116 {
+		t.Fatalf("a raw fill of 1.16e17 reads as %v contracts, want 0.116", got)
+	}
+	if got := orderAmountToFloat(spec, "116"); got != 0.116 {
+		t.Fatalf("a resting desired_amount of 116 reads back as %v contracts, want 0.116", got)
 	}
 	if got := orderAmountToFloat(spec, "2000"); got != 2 {
 		t.Fatalf("a resting desired_amount of 2000 reads back as %v contracts, want 2", got)

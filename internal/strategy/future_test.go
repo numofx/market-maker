@@ -214,3 +214,25 @@ func TestTheEngineFutureClampsToAPriceTheChainAdmitsAsSigned(t *testing.T) {
 		t.Fatalf("one tick in from 1260.000002: %.9f", got.Ask.Price)
 	}
 }
+
+// The engine future's ladder in venue units: 0.116 contracts (116 USDC) at the inner rung, 1.2x outward,
+// each rung floored to 0.001 contract, so the sizes grow as the perp's did rather than all being 1.
+func TestTheEngineFutureLadderGrowsInVenueUnits(t *testing.T) {
+	cfg := engineFutureConfig()
+	cfg.OrderSize = 0.116
+	cfg.QuoteLevels = 10
+	cfg.LevelSizeMult = 1.2
+	cfg.LevelSpreadStepBPS = 5
+	cfg.HalfSpreadBPS = 10
+	cfg.MaxNotionalPerSide = 10000
+	got := build(t, cfg, engineFutureSnapshot(engineFutureState(time.Now().UTC()), 0, 1400))
+	if len(got.Bids) != 10 || len(got.Asks) != 10 {
+		t.Fatalf("10 rungs a side: %d bids / %d asks (%+v / %+v)", len(got.Bids), len(got.Asks), got.BidSuppression, got.AskSuppression)
+	}
+	want := []float64{0.116, 0.139, 0.167, 0.2, 0.24, 0.288, 0.346, 0.415, 0.498, 0.598}
+	for i, w := range want {
+		if math.Abs(got.Bids[i].Size-w) > 1e-9 || math.Abs(got.Asks[i].Size-w) > 1e-9 {
+			t.Fatalf("rung %d: bid %v ask %v, want %v", i, got.Bids[i].Size, got.Asks[i].Size, w)
+		}
+	}
+}
