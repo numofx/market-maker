@@ -99,8 +99,8 @@ func TestSpotBotKeepsQuotingAcrossARenameMidRun(t *testing.T) {
 	if err := bot.RunCycle(ctx); err != nil {
 		t.Fatalf("cycle 3: %v", err)
 	}
-	if !bot.snapshot.IsSpotMarket() || bot.snapshot.ReferenceSource != "external" {
-		t.Fatalf("after the rename: IsSpotMarket=%v reference %q", bot.snapshot.IsSpotMarket(), bot.snapshot.ReferenceSource)
+	if !bot.snapshot.IsCNGNSpotMarket() || bot.snapshot.ReferenceSource != "external" {
+		t.Fatalf("after the rename: IsCNGNSpotMarket=%v reference %q", bot.snapshot.IsCNGNSpotMarket(), bot.snapshot.ReferenceSource)
 	}
 	if len(client.cancelled) != 0 || len(client.placed) != 2 {
 		t.Fatalf("after the rename the ladder moved: cancels %v, placements %d", client.cancelled, len(client.placed))

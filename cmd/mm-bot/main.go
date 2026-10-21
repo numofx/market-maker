@@ -32,7 +32,7 @@ func main() {
 
 	logger := slog.New(logging.NewRedactingHandler(
 		slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}),
-		cfg.RPCURL, cfg.DatabaseURL, cfg.AnchorURL,
+		cfg.RPCURL, cfg.DatabaseURL, cfg.AnchorURL, cfg.AnchorChainlinkRPCURL,
 		cfg.USDCCNGNSpotExternalAnchor.RPCURL, cfg.USDCCNGNSpotExternalAnchor.BaseURL,
 	))
 	slog.SetDefault(logger)
@@ -98,20 +98,24 @@ func main() {
 	// configured; MM_MARKET_SYMBOL may be the pre-rename alias.
 	spotMarket, spotListed := client.SpotMarket()
 	logger.Info("market resolved", "configured_market", cfg.MarketSymbol, "market", spec.Symbol, "aliases", spec.Aliases, "kind", spec.Kind, "spot_reference_market", spotMarket)
-	if spec.IsSpot() && (!spotListed || spotMarket != spec.Symbol) {
+	if spec.IsCNGNSpot() && (!spotListed || spotMarket != spec.Symbol) {
 		// The spot-only pricing (the external anchor bootstrap, the standing last trade) keys on
 		// the spot reference market resolving to the traded one. Refuse rather than quote with it
 		// silently off.
 		logger.Error("spot reference market did not resolve to the traded market", "market", spec.Symbol, "spot_reference_market", spotMarket, "spot_listed", spotListed)
 		os.Exit(1)
 	}
-	if cfg.USDCCNGNSpotExternalAnchor.Enabled && !spec.IsSpot() {
+	if cfg.USDCCNGNSpotExternalAnchor.Enabled && !spec.IsCNGNSpot() {
 		logger.Error("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED needs the cNGN spot market; the venue resolved the configured market to something else", "configured_market", cfg.MarketSymbol, "market", spec.Symbol, "kind", spec.Kind)
 		os.Exit(1)
 	}
 
 	if err := client.CheckPerpWiring(ctx, spec); err != nil {
 		logger.Error("perp wiring", "error", err, "market", cfg.MarketSymbol)
+		os.Exit(1)
+	}
+	if err := client.CheckSpotWiring(ctx, spec); err != nil {
+		logger.Error("spot wiring", "error", err, "market", cfg.MarketSymbol)
 		os.Exit(1)
 	}
 

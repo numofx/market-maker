@@ -11,6 +11,7 @@ This bot keeps one market non-empty with one resting bid and one resting ask. It
 It supports one market per process. The intended symbols are:
 
 - the cNGN spot market: listed as `cNGN-USDC` (was `USDCcNGN-SPOT`)
+- the EURC spot market: listed as `EURC-USDC` (see [EURC-USDC](#eurc-usdc))
 - the cNGN perp: listed as `cNGN-PERP` (was `USDCcNGN-PERP`)
 - the dated `USDCcNGN-*-2026` futures (legacy; see Orientation)
 
@@ -54,6 +55,11 @@ venue serves:
 - **side**: `buy` is a buy of cNGN; on the perp a long is long the on-chain cNGN perp, and the
   position is the engine's signed cNGN amount, long positive
 - **base / quote**: cNGN / USDC
+
+EURC-USDC has none of this: it is listed in the engine's own orientation (USDC per EURC, sizes in
+EURC, buy = buy EURC), its base and quote are taken from the listing as served, and nothing in the
+bot inverts it whatever its `order_entry_spec` says. Only the cNGN markets go through
+`orientation.go`.
 
 Orders are submitted engine-native (`side`, `limit_price`, `desired_amount`, no `order_entry_spec`
 or `ui_intent`), the book and the tape are read from their engine fields (`limit_price`,
@@ -165,6 +171,9 @@ internal/metrics
 - `MM_ANCHOR_SOURCE_TYPE`
 - `MM_ANCHOR_URL`
 - `MM_ANCHOR_FIXED_PRICE`
+- `MM_ANCHOR_CHAINLINK_FEED` (with `MM_ANCHOR_SOURCE_TYPE=chainlink`)
+- `MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS` (default `90000`)
+- `MM_ANCHOR_CHAINLINK_RPC_URL` (default `MM_RPC_URL`)
 - `MM_KILL_SWITCH_FILE`
 - `MM_DRY_RUN`
 - `MM_LOG_LEVEL`
@@ -265,12 +274,13 @@ The bot reads total balances from `SubAccounts.getAccountBalances(accountId)` an
 - `reserved`: open-order exposure inferred from active orders
 - `available`: `total - reserved`
 
-Sizing rules (base cNGN, quote USDC):
+Sizing rules on every spot market (base cNGN or EURC, quote USDC):
 
-- bids are capped by available USDC divided by the bid price, in cNGN
-- asks are capped by available cNGN
+- bids are capped by available USDC divided by the bid price, in the base asset
+- asks are capped by the available base asset (the cNGN or EURC escrow balance of the subaccount, 18dp)
 - inventory caps (USDC at the reference) still apply after available-balance capping
-- every size is rounded down to a whole cNGN; a side whose budget is under 1 cNGN is suppressed
+- every size is rounded down to a whole base unit (`amount_step` 1, signed as 1e18); a side whose
+  budget is under one unit is suppressed
 
 ## Anchor Price And Fair Value
 
@@ -287,6 +297,19 @@ book and the rate picker, the perp off its index), so it is in the future's own 
 - `MM_ANCHOR_SOURCE_TYPE=oracle_carry`
   - reads the on-chain cNGN feed (USDC per cNGN), inverts it to the future's cNGN per USDC and
     applies `MM_CARRY_RATE_APR` to the market's expiry
+- `MM_ANCHOR_SOURCE_TYPE=chainlink` (EURC-USDC only, and required there; see [EURC-USDC](#eurc-usdc))
+  - reads a Chainlink AggregatorV3 feed, `MM_ANCHOR_CHAINLINK_FEED`, over JSON-RPC at
+    `MM_ANCHOR_CHAINLINK_RPC_URL` (default `MM_RPC_URL`): `latestRoundData()` (`0xfeaf968c`) and
+    `decimals()` (`0x313ce567`, read once); the price is `answer / 10^decimals`, used as is
+  - refuses `answer <= 0` (halt `anchor data invalid`) and a round whose `updatedAt` is unset or
+    older than `MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS` (default `90000`, a 24h heartbeat plus an hour;
+    halt `anchor data stale`). Both halt and cancel on the cycle they are seen, with no grace. An
+    RPC that cannot be read is a plain anchor failure: the cycle fails (nothing is re-signed, so
+    quotes lapse within `MM_ORDER_EXPIRY_SECONDS`), and the halt-and-cancel follows once
+    `MM_STALE_ANCHOR_TIMEOUT_SECONDS` has passed since the last good read
+  - the feed is re-read at most every 15s; the round's age is re-checked every cycle
+  - refused on any other market: the cNGN spot market and the perp never read the generic anchor,
+    and a future would be priced off a feed in the wrong unit
 
 Reference price selection is:
 
@@ -295,7 +318,7 @@ Reference price selection is:
 3. last trade
 4. otherwise no quote
 
-The bot also computes a local reference from the market itself. If local price deviates from anchor by more than `MM_MAX_ANCHOR_DEVIATION_BPS`, quoting halts and managed orders are canceled. `USDCcNGN-SPOT` is exempt: its book is the price, and its external anchor is a bootstrap only (below).
+The bot also computes a local reference from the market itself. If local price deviates from anchor by more than `MM_MAX_ANCHOR_DEVIATION_BPS`, quoting halts and managed orders are canceled. This applies to EURC-USDC, where it is required (`> 0`). `USDCcNGN-SPOT` is exempt: its book is the price, and its external anchor is a bootstrap only (below).
 
 Anchor freshness is tracked independently from exchange market-data freshness. `MM_STALE_ANCHOR_TIMEOUT_SECONDS` controls how long the bot will tolerate an old anchor before halting with `anchor data stale`.
 
@@ -328,7 +351,7 @@ This path does not apply to:
 
 - `USDCcNGN-APR30-2026`
 - any other future market
-- any other spot market
+- any other spot market (EURC-USDC is refused at load and at startup with it enabled)
 
 Bootstrap settings:
 
@@ -391,6 +414,52 @@ When the active reference source is the external bootstrap anchor:
 - quote size is reduced by `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_SIZE_MULTIPLIER`
 
 When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using the external anchor as soon as other participants quote a two-sided spot book. It keeps polling it, so the bootstrap price is warm if the book empties.
+
+## EURC-USDC
+
+`MM_MARKET_SYMBOL=EURC-USDC` quotes the EURC spot market: base EURC, quote USDC, a price in USDC per
+EURC (~1.12), a size in whole EURC (`desired_amount` 1 = 1 EURC, signed 1e18). Everything about the
+market is read from its `/v1/markets` row (base and quote symbols, `asset_address`, `amount_step`,
+`tick_size`, `taker_fee_bps`); nothing in the bot names it. It is a spot market (`contract_type:
+spot`) that is not cNGN's, which the code calls an *anchored spot* market (`MarketSpec.IsAnchoredSpot`).
+
+- **Wiring**, checked at startup against the listing; the bot refuses to start if any of it is wrong:
+  `MM_TRADE_MODULE_ADDRESS` must be the listing's `trade_module_address` (EURC-USDC's own module),
+  that module's `quoteAsset()` its `quote_asset_address` (the quote cash), `amount_scale` must be
+  1e18, and `MM_SUBACCOUNT_ID` must sit under its `margin_manager_address` (the MarginEngine).
+- **Balances.** The base balance is the subaccount's balance of the EURC escrow (`asset_address`,
+  18dp); the quote is the module's quote cash. A bid is capped by USDC / bid price, an ask by the EURC
+  held, both rounded down to a whole EURC.
+- **Reference: the anchor, not the book.** `MM_ANCHOR_SOURCE_TYPE=chainlink` is required (startup
+  refuses anything else), with the Chainlink EURC/USD feed on Base
+  (`0xDAe398520e2B67cd3f27aeF9Cf14D93D927f8250`, 8 decimals, 24h heartbeat plus deviation updates).
+  The bot quotes around the feed's price, book or no book (`reference_source=anchor`), and it is not
+  a bootstrap: other participants' mid (else a trade under 5 minutes old) is checked against it every
+  cycle, and more than `MM_MAX_ANCHOR_DEVIATION_BPS` away halts quoting and cancels
+  (`anchor deviation exceeded`). `MM_MAX_ANCHOR_DEVIATION_BPS` must be `> 0`. A stale or non-positive
+  round halts and cancels at once (above). The feed is USD per EURC and is used as USDC per EURC.
+- **The cNGN spot paths do not apply**: no `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_*` (enabling it is
+  refused), no book-first pricing, no standing last trade.
+- **Fees** come from `/v1/markets` (`taker_fee_bps`, 25 bps today), and `worstFee` is signed per EURC
+  at the order's price, as on every market.
+
+Operator units on EURC-USDC are the cNGN spot market's with EURC for cNGN: quote (USDC) for sizes and
+inventory, base (EURC) for the per-side cap.
+
+| Variable | Unit | Notes |
+| --- | --- | --- |
+| `MM_ORDER_SIZE` | USDC per rung | placed as that many USDC worth of EURC at the reference, whole EURC; `200` is 177 EURC at 1.1247 |
+| `MM_MAX_LONG_INVENTORY`, `MM_MAX_SHORT_INVENTORY`, `MM_MAX_NET_INVENTORY` | USDC | the EURC held valued at the reference. `MM_MAX_NET_INVENTORY` only tightens the long/short limits, whose defaults are `1000` / `-1000`: set them too, or the effective limit is 1,000 USDC |
+| `MM_INVENTORY_SKEW_FULL_AT` | USDC | as on the cNGN markets |
+| `MM_MAX_NOTIONAL_PER_SIDE` | EURC | the most EURC one side may rest, and the largest single rung |
+| `MM_MIN_BASE_BALANCE` / `MM_MIN_QUOTE_BALANCE` | EURC / USDC | |
+| `MM_ADOPT_SIZE_TOLERANCE` | EURC | floored by the one-EURC quantum |
+| `MM_MAX_ANCHOR_DEVIATION_BPS` | bps | book mid against the Chainlink price; required |
+| `MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS` | seconds | the round's `updatedAt` age; default `90000` |
+| `MM_STALE_ANCHOR_TIMEOUT_SECONDS` | seconds | time since the last good feed READ before an unreadable feed halts; keep it short (minutes), it is not the round's age |
+
+`mm_bot_net_inventory` is EURC, `mm_bot_net_inventory_usd` is USDC; `/control/state` units name EURC
+and USDC.
 
 ## USDCcNGN-PERP
 
@@ -816,6 +885,7 @@ The bot halts quoting and cancels managed orders in the selected market when any
 - exchange market data stale
 - balances stale
 - anchor data stale
+- anchor data invalid (a chainlink round with `answer <= 0`)
 - quote age exceeded
 - anchor deviation exceeded
 - open order notional exceeds limit

@@ -36,11 +36,11 @@ func FreshTradePrice(snapshot Snapshot) (float64, bool) {
 	return trade.Price, true
 }
 
-// IsSpotMarket reports whether the snapshot's market is the venue's cNGN spot market: the traded
+// IsCNGNSpotMarket reports whether the snapshot's market is the venue's cNGN spot market: the traded
 // market resolves to the same name as the spot reference market. Resolved names, never literals, so
 // the venue renaming the market changes nothing here. With no resolved spot reference (a snapshot
 // built without the loader) the bot's own knowledge of the spot market's names decides.
-func (s Snapshot) IsSpotMarket() bool {
+func (s Snapshot) IsCNGNSpotMarket() bool {
 	if s.SpotMarket != "" {
 		return s.Market == s.SpotMarket
 	}
@@ -53,7 +53,7 @@ func (s Snapshot) IsSpotMarket() bool {
 // an oracle guard compared against it. Other markets keep the ReferenceTradeMaxAge cutoff, since
 // their anchor still feeds the deviation guard.
 func ReferenceTradePrice(snapshot Snapshot) (float64, bool) {
-	if !snapshot.IsSpotMarket() {
+	if !snapshot.IsCNGNSpotMarket() {
 		return FreshTradePrice(snapshot)
 	}
 	if len(snapshot.RecentTrades) == 0 || snapshot.RecentTrades[0].Price <= 0 {
@@ -76,7 +76,7 @@ type Snapshot struct {
 	// Market is the traded market's canonical name, as the venue lists it.
 	Market string
 	// SpotMarket is the venue's cNGN spot market as listed: the spot reference market, resolved
-	// from the listing by the loader. Empty when the loader could not name it (then IsSpotMarket
+	// from the listing by the loader. Empty when the loader could not name it (then IsCNGNSpotMarket
 	// falls back to the names the bot knows).
 	SpotMarket string
 	// BestBid and BestAsk are other participants' best prices: the bot's own resting orders are

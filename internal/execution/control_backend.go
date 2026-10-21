@@ -149,28 +149,40 @@ func (b *Bot) publishView() {
 }
 
 func sideMeaning(spec exchange.MarketSpec) string {
-	if spec.CNGNDenominated() {
+	if spec.IsAnchoredSpot() {
+		return "buy = buy " + baseName(spec)
+	}
+	if spec.BaseSized() {
 		return "buy = buy cNGN (perp: long cNGN)"
 	}
 	return "engine side"
 }
 
 func orderSizeUnit(spec exchange.MarketSpec) string {
-	if spec.CNGNDenominated() {
+	if spec.IsAnchoredSpot() {
+		return quoteName(spec) + " per rung, placed as whole " + baseName(spec) + " at the quote price"
+	}
+	if spec.BaseSized() {
 		return "USDC per rung, placed as whole cNGN at the quote price"
 	}
 	return "contracts"
 }
 
 func inventoryUnit(spec exchange.MarketSpec) string {
-	if spec.CNGNDenominated() {
+	if spec.IsAnchoredSpot() {
+		return quoteName(spec) + " at the reference price (positions are reported in " + baseName(spec) + ")"
+	}
+	if spec.BaseSized() {
 		return "USDC at the reference price (positions are reported in cNGN)"
 	}
 	return "contracts"
 }
 
 func notionalUnit(spec exchange.MarketSpec) string {
-	if spec.CNGNDenominated() {
+	if spec.IsAnchoredSpot() {
+		return baseName(spec)
+	}
+	if spec.BaseSized() {
 		return "cNGN"
 	}
 	return "quote notional"

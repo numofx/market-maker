@@ -41,8 +41,8 @@ func TestSpotReferenceLogicIsActiveUnderEveryResolvedName(t *testing.T) {
 				ExternalAnchorPrice:   0.000800,
 				Positions:             fundedPositions(),
 			}
-			if snapshot.IsSpotMarket() != tc.wantSpot {
-				t.Fatalf("IsSpotMarket() = %v, want %v", snapshot.IsSpotMarket(), tc.wantSpot)
+			if snapshot.IsCNGNSpotMarket() != tc.wantSpot {
+				t.Fatalf("IsCNGNSpotMarket() = %v, want %v", snapshot.IsCNGNSpotMarket(), tc.wantSpot)
 			}
 
 			ref, source := ComputeReferencePrice(snapshot)

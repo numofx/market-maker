@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -135,6 +136,9 @@ func (b *Bot) Initialize(ctx context.Context) (err error) {
 		// outside it, where the venue refuses the order and the chain the fill.
 		return fmt.Errorf("%s is the MarginEngine future: MM_ANCHOR_SOURCE_TYPE must be future_index_carry, not %q", b.spec.Symbol, b.cfg.AnchorSourceType)
 	}
+	if err := checkAnchorForMarket(b.cfg, b.spec); err != nil {
+		return err
+	}
 	if validator, ok := b.client.(marketAssetValidator); ok {
 		if _, err := validator.ValidateMarketAssets(ctx, b.spec); err != nil {
 			b.metrics.SetReadiness(false, "token_address_has_no_code")
@@ -245,17 +249,39 @@ func marketMetadataAttrs(spec exchange.MarketSpec) []any {
 
 // priceUnit and sizeUnit name the bot's own units on this market for logs and the control API.
 func priceUnit(spec exchange.MarketSpec) string {
-	if spec.CNGNDenominated() {
+	if spec.IsAnchoredSpot() {
+		return quoteName(spec) + " per " + baseName(spec)
+	}
+	if spec.BaseSized() {
 		return "USDC per cNGN"
 	}
 	return "quote per contract"
 }
 
 func sizeUnit(spec exchange.MarketSpec) string {
-	if spec.CNGNDenominated() {
+	if spec.IsAnchoredSpot() {
+		return baseName(spec)
+	}
+	if spec.BaseSized() {
 		return "cNGN"
 	}
 	return "contracts"
+}
+
+// baseName and quoteName are an anchored spot market's asset symbols as listed (EURC, USDC). The
+// cNGN markets keep their fixed unit strings above.
+func baseName(spec exchange.MarketSpec) string {
+	if spec.BaseAsset != "" {
+		return spec.BaseAsset
+	}
+	return "base"
+}
+
+func quoteName(spec exchange.MarketSpec) string {
+	if spec.QuoteAsset != "" {
+		return spec.QuoteAsset
+	}
+	return "quote"
 }
 
 // syncFeeSchedule re-reads the market's fee schedule and, when the taker fee has RISEN, cancels
@@ -609,7 +635,7 @@ func inventoryUSD(spec exchange.MarketSpec, snapshot state.Snapshot) float64 {
 		// a contract is ContractSizeUSDC of notional, whatever its price in cNGN
 		return inventory * spec.ContractSizeUSDC
 	}
-	if !spec.CNGNDenominated() {
+	if !spec.BaseSized() {
 		return inventory
 	}
 	return inventory * snapshot.ReferencePrice
@@ -620,7 +646,7 @@ func (b *Bot) logReferenceSourceTransition(prev state.Snapshot, next state.Snaps
 		return
 	}
 	b.logger.Info("reference source changed", "market", b.spec.Symbol, "from", prev.ReferenceSource, "to", next.ReferenceSource)
-	if !b.spec.IsSpot() {
+	if !b.spec.IsCNGNSpot() {
 		return
 	}
 	if next.ReferenceSource == "external" {
@@ -661,6 +687,19 @@ func (b *Bot) handleLoadError(ctx context.Context, err error) error {
 			b.metrics.SetDependencyStale("balances", true)
 		}
 	case "anchor_data":
+		// The feed answered, and its answer is unusable (the chainlink anchor's round is older than
+		// MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS, or non-positive): halt now. The timeout below is grace
+		// for an anchor that could not be read at all, not for one that says it has no price.
+		if errors.Is(loadErr.Err, marketdata.ErrAnchorStale) {
+			haltReason = "anchor data stale"
+			b.metrics.SetDependencyStale("anchor_data", true)
+			break
+		}
+		if errors.Is(loadErr.Err, marketdata.ErrAnchorInvalid) {
+			haltReason = "anchor data invalid"
+			b.metrics.SetDependencyStale("anchor_data", true)
+			break
+		}
 		if b.cfg.StaleAnchorTimeout > 0 && !b.snapshot.LastAnchorRefresh.IsZero() && now.Sub(b.snapshot.LastAnchorRefresh) > b.cfg.StaleAnchorTimeout {
 			haltReason = "anchor data stale"
 			b.metrics.SetDependencyStale("anchor_data", true)
@@ -1038,4 +1077,26 @@ func mathAbs(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+// checkAnchorForMarket refuses an anchor that does not fit the market. An anchored spot market
+// (EURC-USDC) is priced off a Chainlink feed that also guards its book, so it needs
+// MM_ANCHOR_SOURCE_TYPE=chainlink and a non-zero MM_MAX_ANCHOR_DEVIATION_BPS: without them it would
+// quote around whatever its book says, with nothing outside the venue to hold it to. A chainlink
+// anchor anywhere else is refused too: the cNGN spot market and the perp never read the generic
+// anchor, and a future would be priced off a feed in the wrong unit.
+func checkAnchorForMarket(cfg config.Config, spec exchange.MarketSpec) error {
+	if spec.IsAnchoredSpot() {
+		if cfg.AnchorSourceType != config.AnchorSourceChainlink {
+			return fmt.Errorf("%s is an anchored spot market: MM_ANCHOR_SOURCE_TYPE must be %s, not %q", spec.Symbol, config.AnchorSourceChainlink, cfg.AnchorSourceType)
+		}
+		if !(cfg.MaxAnchorDeviationBPS > 0) {
+			return fmt.Errorf("%s is an anchored spot market: MM_MAX_ANCHOR_DEVIATION_BPS must be > 0", spec.Symbol)
+		}
+		return nil
+	}
+	if cfg.AnchorSourceType == config.AnchorSourceChainlink {
+		return fmt.Errorf("MM_ANCHOR_SOURCE_TYPE=%s is only for an anchored spot market such as EURC-USDC, not %s", config.AnchorSourceChainlink, spec.Symbol)
+	}
+	return nil
 }

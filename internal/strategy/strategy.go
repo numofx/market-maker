@@ -69,7 +69,7 @@ func ComputeReferencePrice(snapshot state.Snapshot) (float64, string) {
 		// The loader already chose: other traders' mid inside the basis band, else the index.
 		return snapshot.Perp.Reference, snapshot.Perp.ReferenceSource
 	}
-	if snapshot.IsSpotMarket() {
+	if snapshot.IsCNGNSpotMarket() {
 		// Other participants' two-sided book first; then the external fallback price; the venue's own last
 		// trade only when neither exists. A thin venue's last print can be hours old and far from the market
 		// (1327 against ~1371 on 2026-09-14), while the fallback is a live cross-venue rate.
@@ -86,6 +86,11 @@ func ComputeReferencePrice(snapshot state.Snapshot) (float64, string) {
 		return 0, "none"
 	}
 	if snapshot.AnchorPrice > 0 {
+		if snapshot.AnchorSource == "chainlink" {
+			// An anchored spot market (EURC-USDC) quotes around its oracle, book or no book; the
+			// book is held to it by the anchor-deviation guard (risk.Evaluate).
+			return snapshot.AnchorPrice, "anchor"
+		}
 		return snapshot.AnchorPrice, "none"
 	}
 	localRef := ComputeLocalReferencePrice(snapshot)
@@ -174,7 +179,7 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	skewBPS := inventorySkew(inventory, skewFullAt(cfg, spec, ref, maxLong, maxShort), cfg.InventorySkewBPS)
 	halfSpreadBPS := cfg.HalfSpreadBPS
 	orderSize := cfg.OrderSize
-	if snapshot.IsSpotMarket() && refSource == "external" {
+	if snapshot.IsCNGNSpotMarket() && refSource == "external" {
 		halfSpreadBPS *= cfg.USDCCNGNSpotExternalAnchor.SpreadMultiplier
 		orderSize *= cfg.USDCCNGNSpotExternalAnchor.SizeMultiplier
 	}
@@ -257,7 +262,7 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	if cfg.MaxNotionalPerSide > 0 && !marginEngineFuture {
 		// On the cNGN markets MM_MAX_NOTIONAL_PER_SIDE is a cNGN amount, so it caps the base size
 		// directly; on a future it is quote notional and divides by the price.
-		if spec.CNGNDenominated() {
+		if spec.BaseSized() {
 			maxBidSize = minFloat(maxBidSize, cfg.MaxNotionalPerSide)
 			maxAskSize = minFloat(maxAskSize, cfg.MaxNotionalPerSide)
 		} else {
@@ -393,7 +398,7 @@ func perpCapacity(cfg config.Config, perp state.PerpSnapshot, cash, inventory, p
 // configures USDC and the venue takes cNGN, so the size is divided by the reference price (USDC
 // per cNGN); a future's size is already in contracts.
 func baseSize(spec exchange.MarketSpec, usd, price float64) float64 {
-	if !spec.CNGNDenominated() {
+	if !spec.BaseSized() {
 		return usd
 	}
 	if !(price > 0) {
@@ -407,7 +412,7 @@ func baseSize(spec exchange.MarketSpec, usd, price float64) float64 {
 // cNGN held, or of the perp position, at the reference), contracts on a future.
 func inventoryLimits(cfg config.Config, spec exchange.MarketSpec, price float64) (maxLong, maxShort float64) {
 	maxLong, maxShort = effectiveMaxLong(cfg), effectiveMaxShort(cfg)
-	if spec.CNGNDenominated() {
+	if spec.BaseSized() {
 		if !(price > 0) {
 			return 0, 0
 		}
@@ -559,7 +564,7 @@ func buildLevels(cfg config.Config, spec exchange.MarketSpec, side exchange.Side
 // the whole cycle -- both sides -- when an ask was left with 0.000682 USDC (under 1 cNGN at the
 // time); below this size a side is suppressed instead, and the other side keeps quoting.
 func minQuoteSize(spec exchange.MarketSpec) float64 {
-	if spec.CNGNDenominated() {
+	if spec.BaseSized() {
 		return math.Max(spec.MinSize, 1)
 	}
 	return spec.MinSize
