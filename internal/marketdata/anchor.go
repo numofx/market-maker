@@ -24,6 +24,9 @@ import (
 	"github.com/numofx/market-maker/internal/exchange"
 )
 
+// cngnOracleABI is Chainlink's AggregatorV3Interface (decimals, latestRoundData): the cNGN oracle's
+// and the chainlink anchor's. Selectors, checked with cast sig: decimals() 0x313ce567,
+// latestRoundData() 0xfeaf968c (pinned by TestAggregatorV3Selectors).
 var cngnOracleABI = mustParseABI(`[
 {"name":"decimals","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"uint8"}]},
 {"name":"latestRoundData","type":"function","stateMutability":"view","inputs":[],"outputs":[
@@ -205,6 +208,12 @@ func NewAnchorSource(cfg config.Config, spec exchange.MarketSpec) AnchorSource {
 		}
 	case "future_index_carry":
 		return &FutureIndexCarryAnchorSource{rateAPR: cfg.CarryRateAPR, expiryUnix: spec.ExpiryTimestamp}
+	case config.AnchorSourceChainlink:
+		oracle := NewChainlinkAnchorSource(cfg.AnchorChainlinkRPCURL, cfg.AnchorChainlinkFeed, cfg.AnchorChainlinkMaxAge)
+		if cfg.AnchorPoolAddress == "" {
+			return oracle
+		}
+		return NewPoolBandedAnchorSource(oracle, cfg.AnchorChainlinkRPCURL, cfg.AnchorPoolAddress, cfg.AnchorPoolTWAP, cfg.AnchorBandBPS)
 	case "oracle_carry":
 		return &OracleCarryAnchorSource{
 			fetcher:         newCNGNOracleFetcher(cfg.RPCURL, cfg.AnchorOracleMaxAge),
@@ -258,7 +267,7 @@ const oracleRefreshThrottle = 15 * time.Second
 // NewUSDCCNGNSpotExternalAnchor serves the external anchor for the cNGN spot market, and nothing
 // for any other: the market is what the venue resolved it to, not what MM_MARKET_SYMBOL says.
 func NewUSDCCNGNSpotExternalAnchor(cfg config.Config, spec exchange.MarketSpec) USDCCNGNSpotExternalAnchor {
-	if !cfg.USDCCNGNSpotExternalAnchor.Enabled || !spec.IsSpot() {
+	if !cfg.USDCCNGNSpotExternalAnchor.Enabled || !spec.IsCNGNSpot() {
 		return NoopUSDCCNGNSpotExternalAnchor{}
 	}
 	return &ZeroExUSDCCNGNSpotExternalAnchor{
@@ -476,6 +485,12 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) cngnOracleDecimals(ctx context.Contex
 }
 
 func (s *ZeroExUSDCCNGNSpotExternalAnchor) rpcCall(ctx context.Context, to common.Address, data []byte) ([]byte, error) {
+	return ethCall(ctx, s.client, s.cfg.RPCURL, to, data)
+}
+
+// ethCall is one eth_call at "latest" over plain JSON-RPC: the on-chain oracle reads' client (the
+// cNGN oracle, oracle_carry, and the chainlink anchor all go through it).
+func ethCall(ctx context.Context, client *http.Client, rpcURL string, to common.Address, data []byte) ([]byte, error) {
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -492,12 +507,12 @@ func (s *ZeroExUSDCCNGNSpotExternalAnchor) rpcCall(ctx context.Context, to commo
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.RPCURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rpcURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

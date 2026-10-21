@@ -30,11 +30,11 @@ func TestMarketKind(t *testing.T) {
 	}
 	// A spec built by hand classifies like a loaded one, under either presentation.
 	for _, spec := range []string{SpecCNGNUSDCPerp, SpecUSDCCNGNPerp} {
-		if !(MarketSpec{Symbol: "USDCcNGN-PERP", OrderEntrySpec: spec}).CNGNDenominated() {
+		if !(MarketSpec{Symbol: "USDCcNGN-PERP", OrderEntrySpec: spec}).BaseSized() {
 			t.Fatalf("a perp spec (%s) must be cNGN-denominated", spec)
 		}
 	}
-	if (MarketSpec{Symbol: "USDCcNGN-SEP16-2026"}).CNGNDenominated() {
+	if (MarketSpec{Symbol: "USDCcNGN-SEP16-2026"}).BaseSized() {
 		t.Fatal("a future is not cNGN-denominated")
 	}
 	if usesContractLots(MarketSpec{Symbol: "USDCcNGN-PERP", Kind: MarketKindPerp, SizeStep: 1}) {

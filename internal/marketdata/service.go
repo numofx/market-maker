@@ -39,10 +39,12 @@ type SpotMarketResolver interface {
 	SpotMarket() (string, bool)
 }
 
-// ResolveSpotMarket names the spot reference market: the traded market itself when the venue says
-// it is spot, else the spot market the venue lists, else nothing.
+// ResolveSpotMarket names the spot reference market -- the cNGN spot market -- for the snapshot: the
+// traded market itself when it is the cNGN spot market, else the cNGN spot market the venue lists,
+// else nothing. Another spot market (EURC-USDC) is never the spot reference, so its snapshots never
+// take the cNGN spot pricing (book first, bootstrap-only oracle, a last trade however old).
 func ResolveSpotMarket(client exchange.Client, spec exchange.MarketSpec) string {
-	if spec.IsSpot() {
+	if spec.IsCNGNSpot() {
 		return spec.Symbol
 	}
 	if resolver, ok := client.(SpotMarketResolver); ok {
@@ -129,8 +131,8 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 			anchor.SetIndex(future.Index)
 		}
 	}
-	if l.spec.IsSpot() {
-		// The book is spot's source of truth: the reference is its mid, else its last trade, and
+	if l.spec.IsCNGNSpot() {
+		// The book is cNGN spot's source of truth: the reference is its mid, else its last trade, and
 		// the oracle is only a bootstrap for a venue with neither (strategy.ComputeReferencePrice).
 		// So the oracle is deliberately NOT the snapshot's AnchorPrice: that is what the risk
 		// layer's anchor-deviation and stale-anchor guards compare against, and an oracle that
@@ -146,6 +148,10 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 		return snapshot, nil
 	}
 
+	// Every other market reads the generic anchor, and it is the snapshot's AnchorPrice, so the risk
+	// layer's anchor-deviation and stale-anchor guards hold the book to it. On an anchored spot market
+	// (EURC-USDC, MM_ANCHOR_SOURCE_TYPE=chainlink) this is the guard: the oracle is the reference, and
+	// a book mid more than MM_MAX_ANCHOR_DEVIATION_BPS from it halts quoting and cancels.
 	anchorPrice, err := l.anchor.GetAnchorPrice(ctx, l.spec.Symbol)
 	if err != nil {
 		return state.Snapshot{}, &LoadError{Stage: "anchor_data", Err: fmt.Errorf("get anchor price: %w", err)}

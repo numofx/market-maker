@@ -237,6 +237,14 @@ type MarketSpec struct {
 	// engine future in USDC of notional (2026-10-14). Zero when the listing names no scale, and a
 	// unit is then one SizeStep, as before. The bot sizes and quotes in contracts, rounded to it.
 	UnitContracts float64
+	// AmountScale is the listing's amount_scale as served (the signed amount of one desired_amount
+	// unit; 1e18 on spot), empty when the listing names none.
+	AmountScale string
+	// ListedTradeModule and ListedQuoteAsset are the listing's own trade_module_address and
+	// quote_asset_address, lowercased; empty when the listing names none. CheckSpotWiring holds an
+	// anchored spot market's configuration to them.
+	ListedTradeModule string
+	ListedQuoteAsset  string
 }
 
 // rawLotContracts is what one unit of a future's raw fill, balance or signed amount is worth in
@@ -286,19 +294,23 @@ func (s MarketSpec) IsManagedOrderID(orderID string) bool {
 	return false
 }
 
-// CNGNDenominated reports whether this is one of the cNGN markets: priced in USDC per cNGN and
-// sized in whole cNGN, with the operator's USDC-denominated sizes and limits converted at the
-// quote price. True for spot and the perp; a future keeps its own contract units.
-func (s MarketSpec) CNGNDenominated() bool {
+// BaseSized reports whether the market is priced in quote per base unit and sized in whole base
+// units, with the operator's quote-denominated sizes and limits converted at the quote price: every
+// spot market (cNGN-USDC in cNGN, EURC-USDC in EURC) and the cNGN perp. A future keeps its own
+// contract units. (It was CNGNDenominated while cNGN was the only base asset the bot traded.)
+func (s MarketSpec) BaseSized() bool {
 	kind := s.kind()
 	return kind == MarketKindSpot || kind == MarketKindPerp
 }
 
+// IsSpot reports whether the market is a spot market of any base asset. What is particular to the
+// cNGN spot market (its legacy presentation, its book-first pricing and bootstrap-only external
+// anchor) keys on IsCNGNSpot instead.
 func (s MarketSpec) IsSpot() bool { return s.kind() == MarketKindSpot }
 
 // IsCNGNSpot reports whether the market is the cNGN spot market (cNGN-USDC, once USDCcNGN-SPOT),
-// identified by its order entry spec, any of its names, or its assets. Another spot market on the
-// venue is not it.
+// identified by its order entry spec, any of its names, or its assets. Any other spot market, such
+// as EURC-USDC, is a direct-orientation spot market priced off its anchor (IsAnchoredSpot).
 func (s MarketSpec) IsCNGNSpot() bool {
 	if !s.IsSpot() {
 		return false
@@ -311,8 +323,15 @@ func (s MarketSpec) IsCNGNSpot() bool {
 			return true
 		}
 	}
-	return strings.EqualFold(s.BaseAsset, "cNGN") || strings.EqualFold(s.QuoteAsset, "cNGN")
+	return strings.EqualFold(s.BaseAsset, cngnSymbol) || strings.EqualFold(s.QuoteAsset, cngnSymbol)
 }
+
+// IsAnchoredSpot reports whether the market is a spot market other than cNGN's: listed in the
+// engine's own orientation (never inverted), sized in whole base units, and priced off an external
+// anchor that also guards the book (MM_ANCHOR_SOURCE_TYPE=chainlink), not a bootstrap-only one.
+func (s MarketSpec) IsAnchoredSpot() bool { return s.IsSpot() && !s.IsCNGNSpot() }
+
+const cngnSymbol = "cNGN"
 
 func (s MarketSpec) IsPerp() bool { return s.kind() == MarketKindPerp }
 
@@ -620,12 +639,12 @@ func (c *HTTPClient) lookupMarket(name string) (MarketSpec, bool) {
 }
 
 // SpotMarket is the canonical name of the venue's cNGN spot market as listed, if it is listed: the
-// spot reference market the strategy's spot-only pricing keys on. It is resolved from the listing's
-// own statement of what each market is, never from a single name.
+// spot reference market the strategy's cNGN-spot-only pricing keys on. It is resolved from the
+// listing's own statement of what each market is, never from a single name.
 //
 // Only the cNGN spot market qualifies. It used to be "the first spot market in the map", which was
-// the cNGN one only while it was the only spot market: with a second spot market listed, map order
-// handed a cNGN-USDC bot the other market on some starts, and startup refuses that mismatch.
+// the cNGN one only while it was the only spot market: with EURC-USDC listed too, map order would
+// have handed a cNGN-USDC bot the EURC market half the time, and startup refuses that mismatch.
 func (c *HTTPClient) SpotMarket() (string, bool) {
 	c.marketsMu.RLock()
 	defer c.marketsMu.RUnlock()
@@ -706,8 +725,11 @@ func assetCodeReadinessError(checks []AssetCodeCheck) error {
 }
 
 func assetAddressEnvVar(spec MarketSpec) string {
-	if spec.IsSpot() {
+	if spec.IsCNGNSpot() {
 		return "CNGN_SPOT_ASSET_ADDRESS"
+	}
+	if spec.IsSpot() {
+		return strings.ToUpper(spec.BaseAsset) + "_SPOT_ASSET_ADDRESS"
 	}
 	if spec.IsPerp() {
 		return "CNGN_PERP_ASSET_ADDRESS"
@@ -1006,17 +1028,18 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	// market, so no branch can send the other (every engine-future order was refused on 2026-10-13 for it).
 	payloadLimitPrice := rawPriceToDecimalString(floatToRaw(req.Price))
 	payload := map[string]any{}
-	if spec.CNGNDenominated() {
+	if spec.BaseSized() {
 		if !(req.Price > 0) || !(req.Size > 0) {
 			return Order{}, fmt.Errorf("order price and size must be positive, got %v x %v", req.Price, req.Size)
 		}
-		// markets-service enforces a whole-cNGN atomic step ("1") on the cNGN markets'
-		// desired_amount. The order is submitted engine-native (side/limit_price/desired_amount,
-		// no order_entry_spec or ui_intent), so it is valid under either presentation the venue
-		// serves: floor the amount to a whole cNGN and send it directly.
+		// markets-service enforces a whole-unit atomic step ("1") on the base-sized markets'
+		// desired_amount: a whole cNGN on the cNGN markets, a whole EURC on EURC-USDC. The order is
+		// submitted engine-native (side/limit_price/desired_amount, no order_entry_spec or
+		// ui_intent), so it is valid under either presentation the venue serves: floor the amount
+		// to a whole base unit and send it directly, signed at 1e18 per unit.
 		engineAmount = math.Floor(engineAmount)
 		if engineAmount < 1 {
-			return Order{}, fmt.Errorf("order amount %v is below 1 cNGN", req.Size)
+			return Order{}, fmt.Errorf("order amount %v is below 1 %s", req.Size, baseUnitName(spec))
 		}
 		payloadDesiredAmount = strconv.FormatFloat(engineAmount, 'f', -1, 64)
 		signedDesiredAmount = floatToRaw(engineAmount)
@@ -1285,7 +1308,10 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		ContractType    string `json:"contract_type"`
 		// MarginManager is the market's manager: for the cNGN future, the MarginEngine.
 		MarginManager string `json:"margin_manager_address"`
-		Future        *struct {
+		// TradeModule and QuoteAssetAddress are where the market settles, per market.
+		TradeModule       string `json:"trade_module_address"`
+		QuoteAssetAddress string `json:"quote_asset_address"`
+		Future            *struct {
 			ContractSizeUSDC string `json:"contract_size_usdc"`
 		} `json:"future"`
 		Perp *struct {
@@ -1334,6 +1360,10 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			Kind:            kind,
 			Orientation:     OrientationEngine,
 			MarginManager:   strings.ToLower(strings.TrimSpace(item.MarginManager)),
+			AmountScale:     strings.TrimSpace(item.AmountScale),
+			// Named apart from the Perp block's addresses, which CheckPerpWiring reads.
+			ListedTradeModule: strings.ToLower(strings.TrimSpace(item.TradeModule)),
+			ListedQuoteAsset:  strings.ToLower(strings.TrimSpace(item.QuoteAssetAddress)),
 		}
 		if item.Future != nil {
 			spec.ContractSizeUSDC, _ = strconv.ParseFloat(strings.TrimSpace(item.Future.ContractSizeUSDC), 64)
@@ -1342,9 +1372,13 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		if scale, ok := new(big.Rat).SetString(strings.TrimSpace(item.AmountScale)); ok && scale.Sign() > 0 && scale.IsInt() && kind == MarketKindFuture {
 			spec.UnitContracts, _ = new(big.Rat).Quo(scale, new(big.Rat).SetInt(decimalScale)).Float64()
 		}
-		if spec.CNGNDenominated() {
+		if spec.IsCNGNSpot() || spec.IsPerp() {
 			// The one place the venue's presentation is read. Everything on the spec is engine
 			// terms from here on: cNGN is the base, USDC the quote, prices USDC per cNGN.
+			//
+			// Only the cNGN markets ever had an inverted presentation. Any other spot market
+			// (EURC-USDC) is listed as the engine trades it -- base, quote and price as served --
+			// and keeps OrientationEngine whatever its order_entry_spec says.
 			spec.Orientation = orientationOf(item.Market, item.OrderEntrySpec)
 			spec.BaseAsset, spec.QuoteAsset = spec.Orientation.EngineSymbols(item.BaseAssetSymbol, item.QuoteAssetSymbol)
 		}
@@ -1373,7 +1407,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			// The venue's own step. Sizes signed, sent and read back (orderAmountToFloat) are all in it.
 			spec.SizeStep = parsePositiveStep(item.AmountStep)
 			spec.MinSize = spec.SizeStep
-		case spec.CNGNDenominated():
+		case spec.BaseSized():
 			// Spot and the perp are sized in whole cNGN: the venue's atomic amount step is 1.
 			spec.SizeStep = 1
 			spec.MinSize = 1
@@ -1544,29 +1578,64 @@ func (c *HTTPClient) CheckPerpWiring(ctx context.Context, spec MarketSpec) error
 	if !strings.EqualFold(c.quoteAsset.Hex(), spec.Perp.QuoteAsset) {
 		return fmt.Errorf("the module's quoteAsset %s is not the perp's cash %s", c.quoteAsset.Hex(), spec.Perp.QuoteAsset)
 	}
+	manager, err := c.subaccountManager(ctx)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(manager.Hex(), spec.Perp.MarginManager) {
+		return fmt.Errorf("MM_SUBACCOUNT_ID %s is under manager %s, not the perp SRM %s", c.cfg.SubaccountID, manager.Hex(), spec.Perp.MarginManager)
+	}
+	return nil
+}
+
+// subaccountManager is SubAccounts.manager(MM_SUBACCOUNT_ID): the manager that margins the account.
+func (c *HTTPClient) subaccountManager(ctx context.Context) (common.Address, error) {
 	subaccountID, ok := new(big.Int).SetString(c.cfg.SubaccountID, 10)
 	if !ok {
-		return fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
+		return common.Address{}, fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
 	}
 	managerABI, err := abi.JSON(strings.NewReader(`[{"name":"manager","type":"function","stateMutability":"view","inputs":[{"name":"accountId","type":"uint256"}],"outputs":[{"name":"","type":"address"}]}]`))
 	if err != nil {
-		return err
+		return common.Address{}, err
 	}
 	input, err := managerABI.Pack("manager", subaccountID)
 	if err != nil {
-		return err
+		return common.Address{}, err
 	}
 	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(c.subAccounts, input), nil)
 	if err != nil {
-		return fmt.Errorf("SubAccounts.manager rpc: %w", err)
+		return common.Address{}, fmt.Errorf("SubAccounts.manager rpc: %w", err)
 	}
 	values, err := managerABI.Unpack("manager", output)
 	if err != nil || len(values) != 1 {
-		return fmt.Errorf("decode SubAccounts.manager: %v", err)
+		return common.Address{}, fmt.Errorf("decode SubAccounts.manager: %v", err)
 	}
 	manager, _ := values[0].(common.Address)
-	if !strings.EqualFold(manager.Hex(), spec.Perp.MarginManager) {
-		return fmt.Errorf("MM_SUBACCOUNT_ID %s is under manager %s, not the perp SRM %s", c.cfg.SubaccountID, manager.Hex(), spec.Perp.MarginManager)
+	return manager, nil
+}
+
+// CheckSpotWiring refuses an anchored spot run (EURC-USDC) whose configuration does not match the
+// venue's listing of that market: the bot signs for one module (MM_TRADE_MODULE_ADDRESS) and reads
+// its quote balance as that module's quoteAsset(), so both must be the ones the listing names; the
+// listing's amount_scale must be the 1e18 per whole base unit the bot signs; and MM_SUBACCOUNT_ID
+// must sit under the listing's margin manager (the MarginEngine). The cNGN markets and the futures
+// pass untouched: the cNGN spot bot has never been held to these and this change does not alter it.
+func (c *HTTPClient) CheckSpotWiring(ctx context.Context, spec MarketSpec) error {
+	if !spec.IsAnchoredSpot() {
+		return nil
+	}
+	if err := spotWiringError(spec, c.tradeModule.Hex(), c.quoteAsset.Hex()); err != nil {
+		return err
+	}
+	if spec.MarginManager == "" {
+		return nil
+	}
+	manager, err := c.subaccountManager(ctx)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(manager.Hex(), spec.MarginManager) {
+		return fmt.Errorf("MM_SUBACCOUNT_ID %s is under manager %s, not %s's margin manager %s", c.cfg.SubaccountID, manager.Hex(), spec.Symbol, spec.MarginManager)
 	}
 	return nil
 }
@@ -2069,7 +2138,7 @@ func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, sign
 }
 
 func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
-	if spec.CNGNDenominated() {
+	if spec.BaseSized() {
 		// cNGN-market amounts are stored by markets-service in atomic whole-cNGN units
 		// (amount step "1"), not wei — the raw value IS the engine cNGN amount.
 		if n, ok := new(big.Rat).SetString(strings.TrimSpace(raw)); ok {

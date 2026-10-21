@@ -74,8 +74,8 @@ func TestPerpLoaderSurvivesARenameMidRun(t *testing.T) {
 		if snapshot.Perp == nil || snapshot.Perp.Reference != 0.00073 {
 			t.Fatalf("%s: perp snapshot = %+v, want the index reference", stage, snapshot.Perp)
 		}
-		if snapshot.Market != marketnames.PerpLegacy || snapshot.IsSpotMarket() {
-			t.Fatalf("%s: market %q IsSpotMarket=%v", stage, snapshot.Market, snapshot.IsSpotMarket())
+		if snapshot.Market != marketnames.PerpLegacy || snapshot.IsCNGNSpotMarket() {
+			t.Fatalf("%s: market %q IsCNGNSpotMarket=%v", stage, snapshot.Market, snapshot.IsCNGNSpotMarket())
 		}
 	}
 	check("before the rename")
@@ -89,7 +89,7 @@ func TestPerpLoaderSurvivesARenameMidRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snapshot.IsSpotMarket() || snapshot.SpotMarket != marketnames.SpotLegacy {
+	if !snapshot.IsCNGNSpotMarket() || snapshot.SpotMarket != marketnames.SpotLegacy {
 		t.Fatalf("spot loader after the rename: market %q spot reference %q", snapshot.Market, snapshot.SpotMarket)
 	}
 }

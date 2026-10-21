@@ -40,9 +40,13 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 	// price (USDC per cNGN) before the comparison; a future compares in contracts.
 	inventory := snapshot.Inventory(spec.BaseAsset)
 	unit := "contracts"
-	if spec.CNGNDenominated() {
+	if spec.BaseSized() {
+		// The quote asset: USDC on the cNGN markets and on EURC-USDC alike.
 		inventory *= snapshot.ReferencePrice
 		unit = "USDC"
+		if spec.IsAnchoredSpot() && spec.QuoteAsset != "" {
+			unit = spec.QuoteAsset
+		}
 	}
 	maxLong := cfg.MaxLongInventory
 	maxShort := cfg.MaxShortInventory
@@ -65,7 +69,7 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 		// quote notional on a future.
 		for _, order := range snapshot.OpenOrders {
 			notional := order.Price * order.Size
-			if spec.CNGNDenominated() {
+			if spec.BaseSized() {
 				notional = order.Size
 			}
 			if spec.IsMarginEngineFuture() {
