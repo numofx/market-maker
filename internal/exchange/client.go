@@ -296,6 +296,24 @@ func (s MarketSpec) CNGNDenominated() bool {
 
 func (s MarketSpec) IsSpot() bool { return s.kind() == MarketKindSpot }
 
+// IsCNGNSpot reports whether the market is the cNGN spot market (cNGN-USDC, once USDCcNGN-SPOT),
+// identified by its order entry spec, any of its names, or its assets. Another spot market on the
+// venue is not it.
+func (s MarketSpec) IsCNGNSpot() bool {
+	if !s.IsSpot() {
+		return false
+	}
+	if s.OrderEntrySpec == SpecCNGNUSDCSpot || s.OrderEntrySpec == SpecUSDCCNGNSpot {
+		return true
+	}
+	for _, name := range s.Names() {
+		if marketnames.IsSpot(name) {
+			return true
+		}
+	}
+	return strings.EqualFold(s.BaseAsset, "cNGN") || strings.EqualFold(s.QuoteAsset, "cNGN")
+}
+
 func (s MarketSpec) IsPerp() bool { return s.kind() == MarketKindPerp }
 
 // kind is Kind when loadMarkets set it, else derived the same way from what the spec carries, so a
@@ -603,12 +621,16 @@ func (c *HTTPClient) lookupMarket(name string) (MarketSpec, bool) {
 
 // SpotMarket is the canonical name of the venue's cNGN spot market as listed, if it is listed: the
 // spot reference market the strategy's spot-only pricing keys on. It is resolved from the listing's
-// own statement of what each market is, never from a name.
+// own statement of what each market is, never from a single name.
+//
+// Only the cNGN spot market qualifies. It used to be "the first spot market in the map", which was
+// the cNGN one only while it was the only spot market: with a second spot market listed, map order
+// handed a cNGN-USDC bot the other market on some starts, and startup refuses that mismatch.
 func (c *HTTPClient) SpotMarket() (string, bool) {
 	c.marketsMu.RLock()
 	defer c.marketsMu.RUnlock()
 	for symbol, spec := range c.markets {
-		if spec.IsSpot() {
+		if spec.IsCNGNSpot() {
 			return symbol, true
 		}
 	}
