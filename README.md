@@ -174,6 +174,9 @@ internal/metrics
 - `MM_ANCHOR_CHAINLINK_FEED` (with `MM_ANCHOR_SOURCE_TYPE=chainlink`)
 - `MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS` (default `90000`)
 - `MM_ANCHOR_CHAINLINK_RPC_URL` (default `MM_RPC_URL`)
+- `MM_ANCHOR_POOL_ADDRESS` (with `MM_ANCHOR_SOURCE_TYPE=chainlink`: quote around this pool's TWAP, banded by the feed)
+- `MM_ANCHOR_POOL_TWAP_SECONDS` (default `60`, within `[10, 1800]`)
+- `MM_ANCHOR_BAND_BPS` (default `50`)
 - `MM_KILL_SWITCH_FILE`
 - `MM_DRY_RUN`
 - `MM_LOG_LEVEL`
@@ -308,6 +311,15 @@ book and the rate picker, the perp off its index), so it is in the future's own 
     quotes lapse within `MM_ORDER_EXPIRY_SECONDS`), and the halt-and-cancel follows once
     `MM_STALE_ANCHOR_TIMEOUT_SECONDS` has passed since the last good read
   - the feed is re-read at most every 15s; the round's age is re-checked every cycle
+  - with `MM_ANCHOR_POOL_ADDRESS` set, the anchor is a **live reference** and the feed its band: the
+    bot quotes around that Uniswap-v3-style pool's arithmetic-mean tick over
+    `MM_ANCHOR_POOL_TWAP_SECONDS` (`observe(uint32[])`, `0x883bdbfd`; one side must be Base USDC,
+    read as USDC per base whichever side it is), and refuses it when it is more than
+    `MM_ANCHOR_BAND_BPS` from the feed (halt `anchor out of band`, at once). The feed is read first,
+    with all of its refusals, so the band never runs without its reference. A Chainlink answer moves
+    only past its deviation threshold (0.3% on the 24h EURC/USD feed, 0.1% on the 1h one), so it lags
+    the market by up to that much; the pool moves every block, and the band bounds how far anyone can
+    push it. The pool is re-read at most every 5s
   - refused on any other market: the cNGN spot market and the perp never read the generic anchor,
     and a future would be priced off a feed in the wrong unit
 
@@ -431,16 +443,20 @@ spot`) that is not cNGN's, which the code calls an *anchored spot* market (`Mark
   18dp); the quote is the module's quote cash. A bid is capped by USDC / bid price, an ask by the EURC
   held, both rounded down to a whole EURC.
 - **Reference: the anchor, not the book.** `MM_ANCHOR_SOURCE_TYPE=chainlink` is required (startup
-  refuses anything else), with the Chainlink EURC/USD feed on Base
-  (`0xDAe398520e2B67cd3f27aeF9Cf14D93D927f8250`, 8 decimals, 24h heartbeat plus deviation updates).
-  The bot quotes around the feed's price, book or no book (`reference_source=anchor`), and it is not
+  refuses anything else). Base has two Chainlink EURC/USD feeds (Chainlink's directory, 2026-10-21):
+  `0x9867186e52d2F1C2c565CDA6E747101Fa56501e0` (0.1% deviation, 1h heartbeat) and
+  `0xDAe398520e2B67cd3f27aeF9Cf14D93D927f8250` (0.3%, 24h), both 8 decimals. Production runs the 1h
+  feed as the band (`MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS=7200`) around the live reference of the
+  EURC/USDC Slipstream pool, tick spacing 50 (`0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7`, ~80% of
+  Base's 2% depth): on 2026-10-21 its 60s TWAP and the 1h feed were 1.9 bps apart, the 24h feed ~15 bps
+  from both. The bot quotes around the anchor, book or no book (`reference_source=anchor`), and it is not
   a bootstrap: other participants' mid (else a trade under 5 minutes old) is checked against it every
   cycle, and more than `MM_MAX_ANCHOR_DEVIATION_BPS` away halts quoting and cancels
   (`anchor deviation exceeded`). `MM_MAX_ANCHOR_DEVIATION_BPS` must be `> 0`. A stale or non-positive
   round halts and cancels at once (above). The feed is USD per EURC and is used as USDC per EURC.
 - **The cNGN spot paths do not apply**: no `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_*` (enabling it is
   refused), no book-first pricing, no standing last trade.
-- **Fees** come from `/v1/markets` (`taker_fee_bps`, 25 bps today), and `worstFee` is signed per EURC
+- **Fees** come from `/v1/markets` (`taker_fee_bps`, 5 bps; maker 0), and `worstFee` is signed per EURC
   at the order's price, as on every market.
 
 Operator units on EURC-USDC are the cNGN spot market's with EURC for cNGN: quote (USDC) for sizes and
@@ -454,8 +470,10 @@ inventory, base (EURC) for the per-side cap.
 | `MM_MAX_NOTIONAL_PER_SIDE` | EURC | the most EURC one side may rest, and the largest single rung |
 | `MM_MIN_BASE_BALANCE` / `MM_MIN_QUOTE_BALANCE` | EURC / USDC | |
 | `MM_ADOPT_SIZE_TOLERANCE` | EURC | floored by the one-EURC quantum |
-| `MM_MAX_ANCHOR_DEVIATION_BPS` | bps | book mid against the Chainlink price; required |
-| `MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS` | seconds | the round's `updatedAt` age; default `90000` |
+| `MM_MAX_ANCHOR_DEVIATION_BPS` | bps | book mid against the anchor (the pool TWAP when `MM_ANCHOR_POOL_ADDRESS` is set); required |
+| `MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS` | seconds | the round's `updatedAt` age; default `90000`; `7200` for the 1h feed |
+| `MM_ANCHOR_BAND_BPS` | bps | pool TWAP against the Chainlink price; default `50` |
+| `MM_ANCHOR_POOL_TWAP_SECONDS` | seconds | the TWAP window; default `60` |
 | `MM_STALE_ANCHOR_TIMEOUT_SECONDS` | seconds | time since the last good feed READ before an unreadable feed halts; keep it short (minutes), it is not the round's age |
 
 `mm_bot_net_inventory` is EURC, `mm_bot_net_inventory_usd` is USDC; `/control/state` units name EURC
@@ -886,6 +904,7 @@ The bot halts quoting and cancels managed orders in the selected market when any
 - balances stale
 - anchor data stale
 - anchor data invalid (a chainlink round with `answer <= 0`)
+- anchor out of band (the live reference pool more than `MM_ANCHOR_BAND_BPS` from Chainlink)
 - quote age exceeded
 - anchor deviation exceeded
 - open order notional exceeds limit

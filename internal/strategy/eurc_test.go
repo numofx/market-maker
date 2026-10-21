@@ -12,7 +12,7 @@ import (
 
 var eurcSpec = exchange.MarketSpec{
 	Symbol: "EURC-USDC", Kind: exchange.MarketKindSpot, BaseAsset: "EURC", QuoteAsset: "USDC",
-	TickSize: 1e-18, SizeStep: 1, MinSize: 1, TakerFeeBps: 25,
+	TickSize: 1e-18, SizeStep: 1, MinSize: 1, TakerFeeBps: 5,
 }
 
 func eurcCfg() config.Config {

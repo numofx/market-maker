@@ -23,7 +23,7 @@ func eurcRow() map[string]any {
 	return map[string]any{
 		"market": "EURC-USDC", "base_asset_symbol": "EURC", "quote_asset_symbol": "USDC",
 		"asset_address": eurcEscrow, "sub_id": "0", "tick_size": "0.000000000000000001",
-		"amount_step": "1", "amount_scale": "1000000000000000000", "taker_fee_bps": 25,
+		"amount_step": "1", "amount_scale": "1000000000000000000", "taker_fee_bps": 5,
 		"contract_type": "spot", "trade_module_address": eurcTradeModule,
 		"quote_asset_address": eurcQuoteCash, "margin_manager_address": marginEngine,
 	}
@@ -51,7 +51,7 @@ func TestEURCUSDCResolvesFromTheListingAsADirectSpotMarket(t *testing.T) {
 	if spec.Orientation != OrientationEngine || spec.BaseAsset != "EURC" || spec.QuoteAsset != "USDC" {
 		t.Fatalf("EURC-USDC orientation %s base %s quote %s; want engine EURC/USDC as listed", spec.Orientation, spec.BaseAsset, spec.QuoteAsset)
 	}
-	if spec.AssetAddress != eurcEscrow || spec.SizeStep != 1 || spec.MinSize != 1 || spec.TakerFeeBps != 25 {
+	if spec.AssetAddress != eurcEscrow || spec.SizeStep != 1 || spec.MinSize != 1 || spec.TakerFeeBps != 5 {
 		t.Fatalf("EURC-USDC asset %s step %v min %v fee %d", spec.AssetAddress, spec.SizeStep, spec.MinSize, spec.TakerFeeBps)
 	}
 	if len(spec.Aliases) != 0 || !spec.IsManagedOrderID("mm:EURC-USDC:buy:7") || spec.IsManagedOrderID("mm:cNGN-USDC:buy:7") {

@@ -57,3 +57,42 @@ func TestChainlinkAnchorConfigRefusals(t *testing.T) {
 		})
 	}
 }
+
+// The live reference over the chainlink anchor: off by default, 60s TWAP and a 50 bps band when set.
+func TestAnchorPoolConfig(t *testing.T) {
+	setEURCEnv(t)
+	t.Setenv("MM_ANCHOR_POOL_ADDRESS", "")
+	cfg, err := Load()
+	if err != nil || cfg.AnchorPoolAddress != "" {
+		t.Fatalf("unset pool %q err %v: the anchor must stay the Chainlink answer", cfg.AnchorPoolAddress, err)
+	}
+	t.Setenv("MM_ANCHOR_POOL_ADDRESS", "0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7")
+	if cfg, err = Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AnchorPoolTWAP != 60*time.Second || cfg.AnchorBandBPS != 50 {
+		t.Fatalf("twap %s band %v, want the 60s / 50 bps defaults", cfg.AnchorPoolTWAP, cfg.AnchorBandBPS)
+	}
+}
+
+func TestAnchorPoolConfigRefusals(t *testing.T) {
+	for name, tc := range map[string]struct{ key, value, want string }{
+		"a pool without the chainlink band": {"MM_ANCHOR_SOURCE_TYPE", "fixed", "needs MM_ANCHOR_SOURCE_TYPE=chainlink"},
+		"a pool that is not an address":     {"MM_ANCHOR_POOL_ADDRESS", "slipstream", "must be the pool's 0x address"},
+		"a TWAP a block can move":           {"MM_ANCHOR_POOL_TWAP_SECONDS", "2", "within [10, 1800]"},
+		"a TWAP slower than the oracle":     {"MM_ANCHOR_POOL_TWAP_SECONDS", "3600", "within [10, 1800]"},
+		"no band":                           {"MM_ANCHOR_BAND_BPS", "0", "the band is what holds the pool"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setEURCEnv(t)
+			t.Setenv("MM_ANCHOR_POOL_ADDRESS", "0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7")
+			if tc.key == "MM_ANCHOR_SOURCE_TYPE" {
+				t.Setenv("MM_ANCHOR_FIXED_PRICE", "1.12")
+			}
+			t.Setenv(tc.key, tc.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %v, want it to say %q", err, tc.want)
+			}
+		})
+	}
+}

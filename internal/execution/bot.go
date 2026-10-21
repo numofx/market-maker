@@ -700,6 +700,12 @@ func (b *Bot) handleLoadError(ctx context.Context, err error) error {
 			b.metrics.SetDependencyStale("anchor_data", true)
 			break
 		}
+		// The live reference (MM_ANCHOR_POOL_ADDRESS) has left the Chainlink band: stop rather than follow it.
+		if errors.Is(loadErr.Err, marketdata.ErrAnchorOutOfBand) {
+			haltReason = "anchor out of band"
+			b.metrics.SetDependencyStale("anchor_data", true)
+			break
+		}
 		if b.cfg.StaleAnchorTimeout > 0 && !b.snapshot.LastAnchorRefresh.IsZero() && now.Sub(b.snapshot.LastAnchorRefresh) > b.cfg.StaleAnchorTimeout {
 			haltReason = "anchor data stale"
 			b.metrics.SetDependencyStale("anchor_data", true)

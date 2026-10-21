@@ -65,8 +65,12 @@ const (
 	// The Chainlink anchor's staleness bound: EURC/USD on Base has a 24h heartbeat, so 25h allows one
 	// missed-by-an-hour heartbeat before the anchor is refused and quoting halts.
 	defaultAnchorChainlinkMaxAgeSeconds = 90000
-	defaultMaxCancelsPerMinute          = 30
-	defaultSoakLogInterval              = 0
+	// The live reference over a chainlink anchor (MM_ANCHOR_POOL_ADDRESS): a 60s TWAP, held within 50 bps
+	// of the oracle.
+	defaultAnchorPoolTWAPSeconds = 60
+	defaultAnchorBandBPS         = 50
+	defaultMaxCancelsPerMinute   = 30
+	defaultSoakLogInterval       = 0
 )
 
 type OperatorMode string
@@ -211,8 +215,14 @@ type Config struct {
 	AnchorChainlinkFeed string
 	// AnchorChainlinkRPCURL is MM_ANCHOR_CHAINLINK_RPC_URL, falling back to MM_RPC_URL (as the cNGN
 	// spot anchor's MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_RPC_URL does).
-	AnchorChainlinkRPCURL        string
-	AnchorChainlinkMaxAge        time.Duration
+	AnchorChainlinkRPCURL string
+	AnchorChainlinkMaxAge time.Duration
+	// AnchorPoolAddress, with MM_ANCHOR_SOURCE_TYPE=chainlink, makes the anchor a live reference: the
+	// TWAP over AnchorPoolTWAP of this Uniswap-v3-style pool (one side USDC), refused when more than
+	// AnchorBandBPS from the Chainlink price. Empty: the anchor is the Chainlink answer itself.
+	AnchorPoolAddress            string
+	AnchorPoolTWAP               time.Duration
+	AnchorBandBPS                float64
 	QuoteLevels                  int
 	LevelSpreadStepBPS           float64
 	LevelSizeMult                float64
@@ -307,6 +317,9 @@ func Load() (Config, error) {
 		AnchorChainlinkFeed:          strings.TrimSpace(os.Getenv("MM_ANCHOR_CHAINLINK_FEED")),
 		AnchorChainlinkRPCURL:        envStringFallback([]string{"MM_ANCHOR_CHAINLINK_RPC_URL", "MM_RPC_URL"}, ""),
 		AnchorChainlinkMaxAge:        time.Duration(envInt("MM_ANCHOR_CHAINLINK_MAX_AGE_SECONDS", defaultAnchorChainlinkMaxAgeSeconds)) * time.Second,
+		AnchorPoolAddress:            strings.TrimSpace(os.Getenv("MM_ANCHOR_POOL_ADDRESS")),
+		AnchorPoolTWAP:               time.Duration(envInt("MM_ANCHOR_POOL_TWAP_SECONDS", defaultAnchorPoolTWAPSeconds)) * time.Second,
+		AnchorBandBPS:                envFloat("MM_ANCHOR_BAND_BPS", defaultAnchorBandBPS),
 		QuoteLevels:                  envInt("MM_QUOTE_LEVELS", 1),
 		LevelSpreadStepBPS:           envFloat("MM_LEVEL_SPREAD_STEP_BPS", 0),
 		LevelSizeMult:                envFloat("MM_LEVEL_SIZE_MULT", 1),
@@ -438,6 +451,22 @@ func Load() (Config, error) {
 		// checking the book against it.
 		if cfg.MaxAnchorDeviationBPS <= 0 {
 			return Config{}, fmt.Errorf("MM_MAX_ANCHOR_DEVIATION_BPS must be > 0 when MM_ANCHOR_SOURCE_TYPE=chainlink")
+		}
+	}
+	if cfg.AnchorPoolAddress != "" {
+		if cfg.AnchorSourceType != AnchorSourceChainlink {
+			return Config{}, fmt.Errorf("MM_ANCHOR_POOL_ADDRESS is a live reference banded by a chainlink anchor: it needs MM_ANCHOR_SOURCE_TYPE=chainlink, not %q", cfg.AnchorSourceType)
+		}
+		if !common.IsHexAddress(cfg.AnchorPoolAddress) || common.HexToAddress(cfg.AnchorPoolAddress) == (common.Address{}) {
+			return Config{}, fmt.Errorf("MM_ANCHOR_POOL_ADDRESS must be the pool's 0x address, got %q", cfg.AnchorPoolAddress)
+		}
+		// A TWAP under 10s is a spot read a single block can move; past 30 minutes it lags the market it is
+		// meant to follow by more than the oracle does.
+		if cfg.AnchorPoolTWAP < 10*time.Second || cfg.AnchorPoolTWAP > 30*time.Minute {
+			return Config{}, fmt.Errorf("MM_ANCHOR_POOL_TWAP_SECONDS must be within [10, 1800], got %s", cfg.AnchorPoolTWAP)
+		}
+		if cfg.AnchorBandBPS <= 0 {
+			return Config{}, fmt.Errorf("MM_ANCHOR_BAND_BPS must be > 0 with MM_ANCHOR_POOL_ADDRESS: the band is what holds the pool to the oracle")
 		}
 	}
 	if cfg.AnchorSourceType == "future_index_carry" && cfg.CarryRateAPR < 0 {

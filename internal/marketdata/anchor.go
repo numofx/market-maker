@@ -209,7 +209,11 @@ func NewAnchorSource(cfg config.Config, spec exchange.MarketSpec) AnchorSource {
 	case "future_index_carry":
 		return &FutureIndexCarryAnchorSource{rateAPR: cfg.CarryRateAPR, expiryUnix: spec.ExpiryTimestamp}
 	case config.AnchorSourceChainlink:
-		return NewChainlinkAnchorSource(cfg.AnchorChainlinkRPCURL, cfg.AnchorChainlinkFeed, cfg.AnchorChainlinkMaxAge)
+		oracle := NewChainlinkAnchorSource(cfg.AnchorChainlinkRPCURL, cfg.AnchorChainlinkFeed, cfg.AnchorChainlinkMaxAge)
+		if cfg.AnchorPoolAddress == "" {
+			return oracle
+		}
+		return NewPoolBandedAnchorSource(oracle, cfg.AnchorChainlinkRPCURL, cfg.AnchorPoolAddress, cfg.AnchorPoolTWAP, cfg.AnchorBandBPS)
 	case "oracle_carry":
 		return &OracleCarryAnchorSource{
 			fetcher:         newCNGNOracleFetcher(cfg.RPCURL, cfg.AnchorOracleMaxAge),
