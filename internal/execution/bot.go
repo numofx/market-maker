@@ -632,8 +632,8 @@ func (b *Bot) applyDerivedState(snapshot *state.Snapshot, quotes strategy.Result
 func inventoryUSD(spec exchange.MarketSpec, snapshot state.Snapshot) float64 {
 	inventory := snapshot.Inventory(spec.BaseAsset)
 	if spec.IsMarginEngineFuture() {
-		// a contract is ContractSizeUSDC of notional, whatever its price in cNGN
-		return inventory * spec.ContractSizeUSDC
+		// a contract's notional: fixed on v1, size x the reference price in American terms
+		return inventory * spec.ContractNotionalUSDC(snapshot.ReferencePrice)
 	}
 	if !spec.BaseSized() {
 		return inventory

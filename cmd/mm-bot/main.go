@@ -114,6 +114,10 @@ func main() {
 		logger.Error("perp wiring", "error", err, "market", cfg.MarketSymbol)
 		os.Exit(1)
 	}
+	if err := client.CheckFutureWiring(ctx, spec); err != nil {
+		logger.Error("future wiring", "error", err, "market", cfg.MarketSymbol)
+		os.Exit(1)
+	}
 	if err := client.CheckSpotWiring(ctx, spec); err != nil {
 		logger.Error("spot wiring", "error", err, "market", cfg.MarketSymbol)
 		os.Exit(1)

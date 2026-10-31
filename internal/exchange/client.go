@@ -232,6 +232,10 @@ type MarketSpec struct {
 	// ContractSizeUSDC is one contract's notional, from the listing's future block (1,000 for the cNGN
 	// future); zero for a market that reports none.
 	ContractSizeUSDC float64
+	// ContractSize is one contract in the base asset, from the listing's future block, on a series
+	// quoted in American terms (MarginEngine v2: 1,000,000 cNGN or 1,000 EURC, priced in USDC per base),
+	// whose notional moves with the price. Zero on a series listed with ContractSizeUSDC.
+	ContractSize float64
 	// UnitContracts is one unit of the venue's desired_amount in contracts, from the listing's
 	// amount_scale (signed amount per unit; 1e18 is a contract): 0.001 since the venue sized the
 	// engine future in USDC of notional (2026-10-14). Zero when the listing names no scale, and a
@@ -1313,6 +1317,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		QuoteAssetAddress string `json:"quote_asset_address"`
 		Future            *struct {
 			ContractSizeUSDC string `json:"contract_size_usdc"`
+			ContractSize     string `json:"contract_size"`
 		} `json:"future"`
 		Perp *struct {
 			MarkPrice      string `json:"mark_price"`
@@ -1367,6 +1372,9 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 		}
 		if item.Future != nil {
 			spec.ContractSizeUSDC, _ = strconv.ParseFloat(strings.TrimSpace(item.Future.ContractSizeUSDC), 64)
+			if spec.ContractSizeUSDC <= 0 {
+				spec.ContractSize, _ = strconv.ParseFloat(strings.TrimSpace(item.Future.ContractSize), 64)
+			}
 		}
 		// Spot also names a scale since 2026-10-14 (1e18, one whole cNGN), which its path signs already.
 		if scale, ok := new(big.Rat).SetString(strings.TrimSpace(item.AmountScale)); ok && scale.Sign() > 0 && scale.IsInt() && kind == MarketKindFuture {
@@ -1584,6 +1592,22 @@ func (c *HTTPClient) CheckPerpWiring(ctx context.Context, spec MarketSpec) error
 	}
 	if !strings.EqualFold(manager.Hex(), spec.Perp.MarginManager) {
 		return fmt.Errorf("MM_SUBACCOUNT_ID %s is under manager %s, not the perp SRM %s", c.cfg.SubaccountID, manager.Hex(), spec.Perp.MarginManager)
+	}
+	return nil
+}
+
+// CheckFutureWiring refuses to start a MarginEngine future on an account under another manager: each
+// engine margins only its own accounts, and a v1 account cannot hold a v2 series (or the reverse).
+func (c *HTTPClient) CheckFutureWiring(ctx context.Context, spec MarketSpec) error {
+	if !spec.IsMarginEngineFuture() {
+		return nil
+	}
+	manager, err := c.subaccountManager(ctx)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(manager.Hex(), spec.MarginManager) {
+		return fmt.Errorf("MM_SUBACCOUNT_ID %s is under manager %s, not %s's engine %s", c.cfg.SubaccountID, manager.Hex(), spec.Symbol, spec.MarginManager)
 	}
 	return nil
 }
@@ -2038,9 +2062,9 @@ func (c *HTTPClient) signedWorstFee(spec MarketSpec, enginePrice float64) (strin
 		return c.cfg.WorstFee, nil
 	}
 	if spec.IsMarginEngineFuture() {
-		// The future's fee is on contracts x contract size (USDC), so a contract's notional is the
-		// contract size, not the price in cNGN: 1,000 USDC at 25+5 bps is a 3e18 bound per contract.
-		enginePrice = spec.ContractSizeUSDC
+		// The future's fee is on a contract's notional in USDC: the fixed contract size on the v1 series
+		// (1,000 USDC at 25+5 bps is a 3e18 bound per contract), size x price in American terms.
+		enginePrice = spec.ContractNotionalUSDC(enginePrice)
 	}
 	if !(enginePrice > 0) {
 		return "", fmt.Errorf("cannot bound fee at engine price %v", enginePrice)
