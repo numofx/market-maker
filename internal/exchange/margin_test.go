@@ -47,6 +47,36 @@ func TestLoadMarketsReadsTheFuturesManagerAndContractSize(t *testing.T) {
 	if spec.MarginManager != "0x00000000000000000000000000000000000000e9" || spec.ContractSizeUSDC != 1000 {
 		t.Fatalf("manager %q, contract size %v", spec.MarginManager, spec.ContractSizeUSDC)
 	}
+	if spec.AmericanTerms() || spec.ContractSize != 0 {
+		t.Fatal("the v1 series is not in American terms")
+	}
+}
+
+// A v2 series as the venue lists it on 2026-10-31: its contract in the base asset, no contract_size_usdc.
+func TestLoadMarketsReadsAnAmericanSeries(t *testing.T) {
+	row := map[string]any{
+		"market": "EURC-30NOV26", "contract_type": "future", "base_asset_symbol": "EURC", "quote_asset_symbol": "USDC",
+		"asset_address": "0x6ff7084d6f1760a57b9475a41f54b12279cd7744", "sub_id": "1796054400", "expiry_timestamp": 1796054400,
+		"tick_size": "0.000000000000000001", "taker_fee_bps": 25, "amount_scale": "1000000000000000", "amount_step": "1",
+		"margin_manager_address": "0x0705219a1594d5fc5dc2573da4082caf3e1b0950",
+		"future":                 map[string]any{"contract_size": "1000", "contract_size_asset": "EURC", "trading_open": false},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{row})
+	}))
+	defer srv.Close()
+	client := &HTTPClient{cfg: ClientConfig{APIBaseURL: srv.URL, WorstFee: "0"}, httpClient: &http.Client{Timeout: 5 * time.Second},
+		markets: make(map[string]MarketSpec), refreshEvery: time.Minute}
+	spec, err := client.GetMarket(context.Background(), "EURC-30NOV26")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !spec.IsMarginEngineFuture() || !spec.AmericanTerms() || spec.ContractSize != 1000 || spec.ContractSizeUSDC != 0 {
+		t.Fatalf("spec: %+v", spec)
+	}
+	if spec.BaseAsset != "EURC" || spec.QuoteAsset != "USDC" || spec.UnitContracts != 0.001 || spec.SizeStep != 0.001 {
+		t.Fatalf("units: base %s quote %s unit %v step %v", spec.BaseAsset, spec.QuoteAsset, spec.UnitContracts, spec.SizeStep)
+	}
 }
 
 // The engine future is sized in the venue's step, whole contracts: with the listing's amount_step and, as
@@ -158,7 +188,7 @@ func TestFutureIMHeadroomDecodesTheEngine(t *testing.T) {
 	client := &HTTPClient{cfg: ClientConfig{SubaccountID: "803"}, rpc: rpc}
 	spec := MarketSpec{AssetAddress: "0x00000000000000000000000000000000000000f0", MarginManager: "0x00000000000000000000000000000000000000e9", ContractSizeUSDC: 1000}
 
-	surplus, perContract, err := client.FutureIMHeadroom(context.Background(), spec)
+	surplus, perContract, err := client.FutureIMHeadroom(context.Background(), spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,10 +196,19 @@ func TestFutureIMHeadroomDecodesTheEngine(t *testing.T) {
 		t.Fatalf("surplus %v per contract %v, expected 2500 and 250", surplus, perContract)
 	}
 	margin = new(big.Int).Neg(new(big.Int).Mul(big.NewInt(40), wad))
-	if surplus, _, err = client.FutureIMHeadroom(context.Background(), spec); err != nil || surplus != -40 {
+	if surplus, _, err = client.FutureIMHeadroom(context.Background(), spec, 0); err != nil || surplus != -40 {
 		t.Fatalf("a short account's surplus is negative: %v %v", surplus, err)
 	}
-	if _, _, err := client.FutureIMHeadroom(context.Background(), MarketSpec{}); err == nil {
+	// American terms (v2, EURC-30NOV26): a contract is 1,000 EURC, its IM 25% of 1,000 x 1.12 USDC.
+	american := MarketSpec{AssetAddress: spec.AssetAddress, MarginManager: spec.MarginManager, ContractSize: 1000}
+	margin = new(big.Int).Mul(big.NewInt(2500), wad)
+	if _, perContract, err = client.FutureIMHeadroom(context.Background(), american, 1.12); err != nil || math.Abs(perContract-280) > 1e-9 {
+		t.Fatalf("American-terms IM per contract %v (%v), expected 280", perContract, err)
+	}
+	if _, _, err = client.FutureIMHeadroom(context.Background(), american, 0); err == nil {
+		t.Fatal("American terms with no price has no IM to size")
+	}
+	if _, _, err := client.FutureIMHeadroom(context.Background(), MarketSpec{}, 0); err == nil {
 		t.Fatal("a market with no manager has no headroom to read")
 	}
 }
@@ -223,6 +262,12 @@ values ($1, '0xowner', '0xowner', $2, $2, $5, 'sell', '0xf0', '1798675200', '1',
 // window of a day before an expiry of 1798675200, last trade an hour before expiry, margin 2,500 USD.
 func futureChainRPC(t *testing.T, calls map[string]int) *httptest.Server {
 	wad := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	return futureChainRPCMarked(t, calls, new(big.Int).Mul(big.NewInt(1400), wad))
+}
+
+// futureChainRPCMarked is futureChainRPC with the series' mark: the feed reads 1/1400 USDC per cNGN either way.
+func futureChainRPCMarked(t *testing.T, calls map[string]int, mark *big.Int) *httptest.Server {
+	wad := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	word := func(v *big.Int) string { return fmt.Sprintf("%064x", v) }
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -248,7 +293,7 @@ func futureChainRPC(t *testing.T, calls map[string]int) *httptest.Server {
 			result = word(big.NewInt(86400))
 		case "0xc3c74b34": // futureContracts(uint256): listed, not settled, expiry, last trade, ...
 			result = word(big.NewInt(1)) + word(big.NewInt(0)) + word(big.NewInt(1798675200)) + word(big.NewInt(1798675200-3600)) +
-				word(big.NewInt(0)) + word(new(big.Int).Mul(big.NewInt(1400), wad)) + word(big.NewInt(0))
+				word(big.NewInt(0)) + word(mark) + word(big.NewInt(0))
 		case "0x2b37269c": // getSpot()
 			result = word(new(big.Int).Div(wad, big.NewInt(1400))) + word(wad)
 		case "0x968564c5": // markIndexBand(uint64)
@@ -302,6 +347,46 @@ func TestFutureStateReadsTheBandAndScheduleAsTheChainHasThem(t *testing.T) {
 	}
 	if calls["0xf4360442"] != 1 || calls["0x198cae76"] != 1 || calls["0x2b37269c"] != 2 || calls["0x968564c5"] != 2 {
 		t.Fatalf("reads: %v", calls)
+	}
+}
+
+// A v2 series in American terms (cNGN-30NOV26, USDC per cNGN) reads the feed as is, never inverted, and
+// sizes a contract's IM at size x mark x imReq: 1,000,000 cNGN at 1/1400 USDC and 25% is 178.57 USDC.
+func TestFutureStateInAmericanTermsReadsTheIndexAsIs(t *testing.T) {
+	wad := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	spot := new(big.Int).Div(wad, big.NewInt(1400))
+	srv := futureChainRPCMarked(t, map[string]int{}, spot)
+	defer srv.Close()
+	rpc, err := ethclient.Dial(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &HTTPClient{cfg: ClientConfig{SubaccountID: "803", FutureCutoffBeforeFixSeconds: 3600}, rpc: rpc}
+	spec := MarketSpec{Kind: MarketKindFuture, AssetAddress: "0x00000000000000000000000000000000000000f0", SubID: "1798675200",
+		MarginManager: "0x00000000000000000000000000000000000000e9", ContractSize: 1_000_000}
+	got, err := client.FutureState(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Index != rawBigToFloat(spot) || math.Abs(got.BandLow-got.Index*0.9) > 1e-12 || math.Abs(got.BandHigh-got.Index*1.1) > 1e-12 {
+		t.Fatalf("index %v band %v-%v, want the feed's %v +/- 10%%", got.Index, got.BandLow, got.BandHigh, rawBigToFloat(spot))
+	}
+	if math.Abs(got.PerContractIM-1_000_000*rawBigToFloat(spot)*0.25) > 1e-9 {
+		t.Fatalf("per contract IM %v", got.PerContractIM)
+	}
+}
+
+// American terms: a contract's notional is size x price, so the fee bound moves with the price (EURC-30NOV26:
+// 1,000 EURC at 1.12 USDC, 25+5 bps, is 3.36 USDC a contract), as the matcher charges it (feeNotionalPrice).
+func TestTheAmericanFutureWorstFeeIsOnSizeTimesPrice(t *testing.T) {
+	c := &HTTPClient{cfg: ClientConfig{WorstFee: "0"}}
+	spec := MarketSpec{Kind: MarketKindFuture, ContractSize: 1000, TakerFeeBps: 25}
+	got, err := c.signedWorstFee(spec, 1.12)
+	if err != nil || got != "3360000000000000000" {
+		t.Fatalf("worst fee %s %v", got, err)
+	}
+	if spec.ContractNotionalUSDC(1.12) != 1120 || (MarketSpec{ContractSizeUSDC: 1000}).ContractNotionalUSDC(1386) != 1000 {
+		t.Fatal("notional: size x price in American terms, the fixed size on v1")
 	}
 }
 

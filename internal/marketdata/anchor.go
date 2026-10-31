@@ -166,9 +166,9 @@ func (s *OracleCarryAnchorSource) spotPrice(ctx context.Context) (float64, error
 	return cngnPerUSDC, nil
 }
 
-// carryFairValue computes spot * e^(rate * yearsToExpiry) for a future priced in cNGN per USDC
-// (the carry is the naira's rate over the dollar's, so the naira price of a dollar rises toward
-// expiry), clamping expired or missing expiries to t = 0 (fair = spot).
+// carryFairValue computes spot * e^(rate * yearsToExpiry), clamping expired or missing expiries to t = 0
+// (fair = spot). The rate is the quote currency's over the base's: positive for the v1 series in cNGN
+// per USDC (the naira price of a dollar rises toward expiry), negative for cNGN-30NOV26 in USDC per cNGN.
 func carryFairValue(spot, rateAPR float64, expiryUnix int64, now time.Time) float64 {
 	if expiryUnix <= 0 {
 		return spot

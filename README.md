@@ -592,7 +592,24 @@ contract size, keep theirs.
 - **Fails closed.** A cycle that cannot read the future (its margin, index, band or schedule; a stale index
   reverts `BLF_DataTooOld`) halts the bot and cancels its quotes.
 
-The account (`MM_SUBACCOUNT_ID`) must sit under the MarginEngine: the venue refuses an order from any other.
+The account (`MM_SUBACCOUNT_ID`) must sit under the series' MarginEngine (the listing's `margin_manager_address`):
+the venue refuses an order from any other, and the bot refuses to start (`CheckFutureWiring`).
+
+### MarginEngine v2 series, in American terms
+
+`cNGN-30NOV26` and `EURC-30NOV26` (MarginEngine v2) are listed with `future.contract_size` in the base asset
+(1,000,000 cNGN; 1,000 EURC) in place of `contract_size_usdc`, and are priced in USDC per base. The same model,
+with three differences:
+
+- **The index is the feed as is**, not `1e36 / spot`.
+- **A contract's notional is size x price** (USDC), so it moves with the price: the IM a contract adds (at the
+  series' mark), `MM_MAX_NOTIONAL_PER_SIDE`, the open-order notional check, the inventory value and the signed
+  `worstFee` (as the matcher charges it: contract size x fill price) all use it.
+- **The carry is the dollar's rate over the base's**, so it takes either sign: about -0.118 on cNGN-30NOV26 (the
+  forward at a discount to the index) and +0.015 on EURC-30NOV26 (at a premium).
+
+One process per series, each on its own account under v2: a bot quotes one market and sizes its IM from its own
+account's surplus.
 
 ## Quote Age Sources
 

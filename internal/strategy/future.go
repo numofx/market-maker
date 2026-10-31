@@ -37,12 +37,14 @@ func marginEngineFutureCapacity(cfg config.Config, future *exchange.FutureState,
 	return maxBid, maxAsk
 }
 
-// marginEngineFutureNotionalCap is MM_MAX_NOTIONAL_PER_SIDE (USDC) in contracts.
-func marginEngineFutureNotionalCap(cfg config.Config, spec exchange.MarketSpec) float64 {
-	if cfg.MaxNotionalPerSide <= 0 || spec.ContractSizeUSDC <= 0 {
+// marginEngineFutureNotionalCap is MM_MAX_NOTIONAL_PER_SIDE (USDC) in contracts, a contract valued at
+// ref in American terms.
+func marginEngineFutureNotionalCap(cfg config.Config, spec exchange.MarketSpec, ref float64) float64 {
+	notional := spec.ContractNotionalUSDC(ref)
+	if cfg.MaxNotionalPerSide <= 0 || notional <= 0 {
 		return 0
 	}
-	return cfg.MaxNotionalPerSide / spec.ContractSizeUSDC
+	return cfg.MaxNotionalPerSide / notional
 }
 
 // applyMarginEngineFuture takes the future off the book from its quoting cutoff (the earlier of the

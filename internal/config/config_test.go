@@ -137,3 +137,24 @@ func TestExternalAnchorAcceptsEitherSpellingOfSpotOnly(t *testing.T) {
 		}
 	}
 }
+
+// The engine future's carry takes either sign: +0.118 on the v1 series (cNGN per USDC), -0.118 on cNGN-30NOV26 and
+// +0.015 on EURC-30NOV26 (USDC per base). Past +/-1 is a typo, not a rate.
+func TestFutureIndexCarryRateTakesEitherSign(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("MM_MARKET_SYMBOL", "cNGN-30NOV26")
+	t.Setenv("MM_ANCHOR_SOURCE_TYPE", "future_index_carry")
+	t.Setenv("MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_ENABLED", "false")
+	for _, rate := range []string{"0.118", "-0.118", "0.015", "0"} {
+		t.Setenv("MM_CARRY_RATE_APR", rate)
+		if _, err := Load(); err != nil {
+			t.Fatalf("rate %s: %v", rate, err)
+		}
+	}
+	for _, rate := range []string{"-1.5", "11.8"} {
+		t.Setenv("MM_CARRY_RATE_APR", rate)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MM_CARRY_RATE_APR") {
+			t.Fatalf("rate %s: %v, want a refusal", rate, err)
+		}
+	}
+}

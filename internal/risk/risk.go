@@ -73,8 +73,8 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 				notional = order.Size
 			}
 			if spec.IsMarginEngineFuture() {
-				// USDC: contracts x contract size, whatever the price in cNGN
-				notional = order.Size * spec.ContractSizeUSDC
+				// USDC: contracts x a contract's notional (fixed on v1, size x price in American terms)
+				notional = order.Size * spec.ContractNotionalUSDC(order.Price)
 			}
 			if notional > cfg.MaxNotionalPerSide {
 				return Decision{Halt: true, Reason: "open order notional exceeds limit"}

@@ -255,7 +255,7 @@ func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snaps
 	if marginEngineFuture {
 		// Margined by the engine's IM, in contracts; cash is not the budget (future.go).
 		maxBidSize, maxAskSize = marginEngineFutureCapacity(cfg, snapshot.Future, inventory)
-		if limit := marginEngineFutureNotionalCap(cfg, spec); limit > 0 {
+		if limit := marginEngineFutureNotionalCap(cfg, spec, ref); limit > 0 {
 			maxBidSize, maxAskSize = minFloat(maxBidSize, limit), minFloat(maxAskSize, limit)
 		}
 	}

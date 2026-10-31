@@ -65,8 +65,8 @@ func mustABI(definition string) abi.ABI {
 // MarginEngine) and the IM one contract adds there, both in USD: getMargin(account, true), and
 // contractSize x futureMarginRequirements(marketId).imReq. The engine refuses a fill that leaves the
 // surplus below zero, so an order of n contracts needs a surplus of at least n x perContract.
-func (c *HTTPClient) FutureIMHeadroom(ctx context.Context, spec MarketSpec) (surplus float64, perContract float64, err error) {
-	if spec.MarginManager == "" || spec.ContractSizeUSDC <= 0 {
+func (c *HTTPClient) FutureIMHeadroom(ctx context.Context, spec MarketSpec, price float64) (surplus float64, perContract float64, err error) {
+	if spec.MarginManager == "" || (spec.ContractSizeUSDC <= 0 && spec.ContractSize <= 0) {
 		return 0, 0, errors.New("the market lists no margin manager or contract size")
 	}
 	account, ok := new(big.Int).SetString(c.cfg.SubaccountID, 10)
@@ -107,7 +107,11 @@ func (c *HTTPClient) FutureIMHeadroom(ctx context.Context, spec MarketSpec) (sur
 	if !ok {
 		return 0, 0, fmt.Errorf("unexpected getMargin payload %T", margin[0])
 	}
-	return rawBigToFloat(marginWei), spec.ContractSizeUSDC * rawBigToFloat(imReq), nil
+	notional := spec.ContractNotionalUSDC(price)
+	if !(notional > 0) {
+		return 0, 0, fmt.Errorf("no contract notional at price %v", price)
+	}
+	return rawBigToFloat(marginWei), notional * rawBigToFloat(imReq), nil
 }
 
 func (c *HTTPClient) callMargin(ctx context.Context, to common.Address, method string, args ...any) ([]any, error) {
@@ -126,15 +130,35 @@ func (c *HTTPClient) callMargin(ctx context.Context, to common.Address, method s
 	return values, nil
 }
 
-// IsMarginEngineFuture reports whether the market is the cNGN future under the MarginEngine: a future
-// whose listing carries its contract size (the venue's `future` block). The DFXM-era dated futures this
-// bot was built for carry none.
+// IsMarginEngineFuture reports whether the market is a future under a MarginEngine: a future whose
+// listing carries its contract size (the venue's `future` block), in USDC (v1) or in the base asset
+// (v2). The DFXM-era dated futures this bot was built for carry none.
 func (s MarketSpec) IsMarginEngineFuture() bool {
-	return s.Kind == MarketKindFuture && s.ContractSizeUSDC > 0
+	return s.Kind == MarketKindFuture && (s.ContractSizeUSDC > 0 || s.ContractSize > 0)
+}
+
+// AmericanTerms reports a MarginEngine v2 series: priced in USDC per base (cNGN-30NOV26, EURC-30NOV26),
+// its index the feed as is, a contract a fixed amount of the base. The v1 series (USDC-cNGN-30NOV26) is
+// priced in cNGN per USDC against the inverted feed, a contract a fixed 1,000 USDC.
+func (s MarketSpec) AmericanTerms() bool {
+	return s.ContractSizeUSDC <= 0 && s.ContractSize > 0
+}
+
+// ContractNotionalUSDC is one contract's notional in USDC at price: the fixed contract size on the v1
+// series, size x price in American terms. Zero when neither is known.
+func (s MarketSpec) ContractNotionalUSDC(price float64) float64 {
+	if s.ContractSizeUSDC > 0 {
+		return s.ContractSizeUSDC
+	}
+	if s.ContractSize > 0 && price > 0 {
+		return s.ContractSize * price
+	}
+	return 0
 }
 
 // FutureState is the MarginEngine future as the bot sizes, prices and times its quotes on it, read from
-// the chain every cycle. Prices are cNGN per USDC; margin is USD.
+// the chain every cycle. Prices are the series' own (cNGN per USDC on v1, USDC per base in American
+// terms); margin is USD.
 type FutureState struct {
 	// IMSurplus is getMargin(account, true); PerContractIM the IM one more contract adds.
 	IMSurplus     float64
@@ -197,10 +221,6 @@ func (c *HTTPClient) FutureState(ctx context.Context, spec MarketSpec) (FutureSt
 	if !spec.IsMarginEngineFuture() {
 		return FutureState{}, errors.New("not the MarginEngine future")
 	}
-	surplus, perContract, err := c.FutureIMHeadroom(ctx, spec)
-	if err != nil {
-		return FutureState{}, err
-	}
 	future := common.HexToAddress(spec.AssetAddress)
 	subID, ok := new(big.Int).SetString(spec.SubID, 10)
 	if !ok {
@@ -259,10 +279,24 @@ func (c *HTTPClient) FutureState(ctx context.Context, spec MarketSpec) (FutureSt
 	}
 	contract := *abi.ConvertType(contractOut[0], new(futureContract)).(*futureContract)
 
-	// index = 1e36 / spot, in 18dp: FutureAsset._indexPrice
-	index := new(big.Int).Quo(new(big.Int).Mul(decimalScale, new(big.Int).Mul(decimalScale, decimalScale)), new(big.Int).Mul(spot, decimalScale))
+	// FutureAsset._indexPrice: the feed as is in American terms (USDC per base); 1e36 / spot on the v1
+	// series, which is priced in cNGN per USDC against a USDC-per-cNGN feed.
+	index := spot
+	if !spec.AmericanTerms() {
+		index = new(big.Int).Quo(new(big.Int).Mul(decimalScale, new(big.Int).Mul(decimalScale, decimalScale)), new(big.Int).Mul(spot, decimalScale))
+	}
 	if width == nil {
 		return FutureState{}, errors.New("markIndexBand returned nothing")
+	}
+	// A contract's IM in American terms is size x price x imReq: priced at the mark, the engine's own
+	// price for margin, or the index before the first mark.
+	imPrice := rawBigToFloat(contract.MarkPrice)
+	if !(imPrice > 0) {
+		imPrice = rawBigToFloat(index)
+	}
+	surplus, perContract, err := c.FutureIMHeadroom(ctx, spec, imPrice)
+	if err != nil {
+		return FutureState{}, err
 	}
 	state := FutureState{
 		IMSurplus: surplus, PerContractIM: perContract,

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -469,8 +470,11 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("MM_ANCHOR_BAND_BPS must be > 0 with MM_ANCHOR_POOL_ADDRESS: the band is what holds the pool to the oracle")
 		}
 	}
-	if cfg.AnchorSourceType == "future_index_carry" && cfg.CarryRateAPR < 0 {
-		return Config{}, fmt.Errorf("MM_CARRY_RATE_APR must be >= 0 when MM_ANCHOR_SOURCE_TYPE=future_index_carry")
+	// Either sign on the engine future: the v1 series (cNGN per USDC) carries at the naira's rate over the
+	// dollar's (+0.118); a v2 series in American terms at the dollar's over the base's (cNGN-30NOV26
+	// -0.118, EURC-30NOV26 +0.015).
+	if cfg.AnchorSourceType == "future_index_carry" && math.Abs(cfg.CarryRateAPR) > 1 {
+		return Config{}, fmt.Errorf("MM_CARRY_RATE_APR must be within [-1, 1] when MM_ANCHOR_SOURCE_TYPE=future_index_carry")
 	}
 	if cfg.AnchorSourceType == "oracle_carry" {
 		if cfg.CarryRateAPR < 0 {
