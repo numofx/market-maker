@@ -35,7 +35,7 @@ func optionBot(t *testing.T) (*Bot, *optionClient) {
 			spec: exchange.MarketSpec{Symbol: "cNGN-30NOV26-0.00072-P", Kind: exchange.MarketKindOption, BaseAsset: "cNGN", QuoteAsset: "USDC",
 				TickSize: 1e-18, SizeStep: 1000, MinSize: 1000, TakerFeeBps: 15, AmountScale: "1000000000000000000000",
 				MarginManager: "0x0705219a1594d5fc5dc2573da4082caf3e1b0950",
-				Option: &exchange.OptionTerms{Strike: 0.00072, Expiry: expiry, LastTradeTime: expiry - 3600, UnitBase: 1000}},
+				Option:        &exchange.OptionTerms{Strike: 0.00072, Expiry: expiry, LastTradeTime: expiry - 3600, UnitBase: 1000}},
 			balances: []exchange.Balance{{Asset: "cNGN"}, {Asset: "USDC", Total: 2000, Available: 2000}},
 		},
 		option: exchange.OptionState{OptionInputs: exchange.OptionInputs{BlockTime: now.Unix(), Forward: 0.000721, Vol: 0.40, VolConfidence: 1},
