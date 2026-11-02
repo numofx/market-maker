@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +57,8 @@ func runOptions(ctx context.Context, cfg config.Config, series string, signer ex
 		strikeCfg := cfg
 		strikeCfg.MarketSymbol = listed.Symbol
 		strikeCfg.StateFile = cfg.StateFile + "." + listed.Symbol
+		// Ten strikes are ten pools on one small RDS (db.t4g.micro, ~80 connections): two each bounds the process at 20.
+		strikeCfg.DatabaseURL = withPoolMaxConns(cfg.DatabaseURL, optionPoolMaxConns)
 		client, err := exchange.NewHTTPClient(ctx, clientConfig(strikeCfg, listed.Symbol, signer))
 		if err != nil {
 			logger.Error("init exchange client", "error", err, "market", listed.Symbol)
@@ -187,4 +192,25 @@ func (o optionBackends) CancelManaged(ctx context.Context, scope control.CancelS
 		}
 	}
 	return out, errors.Join(errs...)
+}
+
+// optionPoolMaxConns is each strike's Postgres pool size in options mode.
+const optionPoolMaxConns = 2
+
+// withPoolMaxConns sets pgx's pool_max_conns on a Postgres URL or keyword/value DSN, replacing any already there.
+func withPoolMaxConns(dsn string, n int) string {
+	if u, err := url.Parse(dsn); err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
+		q := u.Query()
+		q.Set("pool_max_conns", strconv.Itoa(n))
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	fields := strings.Fields(dsn)
+	out := fields[:0]
+	for _, f := range fields {
+		if !strings.HasPrefix(f, "pool_max_conns=") {
+			out = append(out, f)
+		}
+	}
+	return strings.Join(append(out, "pool_max_conns="+strconv.Itoa(n)), " ")
 }
