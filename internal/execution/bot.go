@@ -29,6 +29,8 @@ type marketAssetValidator interface {
 }
 
 type Bot struct {
+	// nonces is shared by the bots of one owner in one process (SetNonceAllocator); nil allocates alone.
+	nonces  *NonceAllocator
 	cfg     config.Config
 	client  exchange.Client
 	spec    exchange.MarketSpec
@@ -469,12 +471,16 @@ func (b *Bot) allocateIdentities() (map[exchange.Side][]Identity, error) {
 		levels = 1
 	}
 	base := b.persisted.NextNonceBase
-	nowBase := uint64(time.Now().UnixMicro()) * 2
-	if nowBase > base {
-		base = nowBase
-	}
-	if base%2 != 0 {
-		base++
+	if b.nonces != nil {
+		base = b.nonces.Base(base, uint64(2*levels))
+	} else {
+		nowBase := uint64(time.Now().UnixMicro()) * 2
+		if nowBase > base {
+			base = nowBase
+		}
+		if base%2 != 0 {
+			base++
+		}
 	}
 	// Interleave nonces per level: buy levels get even offsets, sell levels odd,
 	// so every order across both sides and all levels has a unique nonce.
@@ -1105,4 +1111,9 @@ func checkAnchorForMarket(cfg config.Config, spec exchange.MarketSpec) error {
 		return fmt.Errorf("MM_ANCHOR_SOURCE_TYPE=%s is only for an anchored spot market such as EURC-USDC, not %s", config.AnchorSourceChainlink, spec.Symbol)
 	}
 	return nil
+}
+
+// SetNonceAllocator shares one allocator between bots that sign for the same owner (see NonceAllocator).
+func (b *Bot) SetNonceAllocator(a *NonceAllocator) {
+	b.nonces = a
 }
