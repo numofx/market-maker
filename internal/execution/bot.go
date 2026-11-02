@@ -721,6 +721,11 @@ func (b *Bot) handleLoadError(ctx context.Context, err error) error {
 		// at a price the bot no longer stands behind (a stale index, say, that then catches up).
 		haltReason = "future state unreadable"
 		b.metrics.SetDependencyStale("future_state", true)
+	case "option_state":
+		// No grace either: the forward, the vol and the margin price the quote. A feed that reverts (a stale spot
+		// index takes the forward with it) leaves nothing to stand behind a resting option quote.
+		haltReason = "option state unreadable"
+		b.metrics.SetDependencyStale("option_state", true)
 	}
 	if haltReason != "" {
 		b.logger.Warn("dependency stale; halting quoting", "reason", haltReason, "error", loadErr.Err)
