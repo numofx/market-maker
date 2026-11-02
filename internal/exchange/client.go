@@ -135,6 +135,9 @@ const (
 	// MarketKindFuture is a dated, cash-margined future sized in 0.001 contract lots and priced in
 	// its own engine units; nothing about the cNGN orientation applies to it.
 	MarketKindFuture MarketKind = "future"
+	// MarketKindOption is one strike and side of an OptionAsset (cNGN options on MarginEngine v2): priced as the premium
+	// in USDC per base, sized in the base, the writer margined by the engine. Never a future, whatever its other fields.
+	MarketKindOption MarketKind = "option"
 )
 
 // marketKind classifies a /v1/markets row. The order entry spec is the venue's own statement of
@@ -146,6 +149,9 @@ func marketKind(symbol, contractType, orderEntrySpec string) MarketKind {
 		return MarketKindSpot
 	case orderEntrySpec == SpecCNGNUSDCPerp || orderEntrySpec == SpecUSDCCNGNPerp || marketnames.IsPerp(symbol) || contractType == "perpetual":
 		return MarketKindPerp
+	case contractType == "option":
+		// Before the default: an option listing also carries an expiry, and would otherwise read as a future.
+		return MarketKindOption
 	default:
 		return MarketKindFuture
 	}
@@ -249,6 +255,8 @@ type MarketSpec struct {
 	// anchored spot market's configuration to them.
 	ListedTradeModule string
 	ListedQuoteAsset  string
+	// Option is an option market's terms (MarketKindOption only): strike, side, expiry, vol feed.
+	Option *OptionTerms
 }
 
 // rawLotContracts is what one unit of a future's raw fill, balance or signed amount is worth in
@@ -1319,6 +1327,14 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			ContractSizeUSDC string `json:"contract_size_usdc"`
 			ContractSize     string `json:"contract_size"`
 		} `json:"future"`
+		// Option is an option strike's terms (markets-service optionMarketState).
+		Option *struct {
+			Strike          string `json:"strike"`
+			OptionType      string `json:"option_type"`
+			ExpiryTimestamp int64  `json:"expiry_timestamp"`
+			LastTradeTime   int64  `json:"last_trade_time"`
+			VolFeedAddress  string `json:"vol_feed_address"`
+		} `json:"option"`
 		Perp *struct {
 			MarkPrice      string `json:"mark_price"`
 			IndexPrice     string `json:"index_price"`
@@ -1369,6 +1385,13 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			// Named apart from the Perp block's addresses, which CheckPerpWiring reads.
 			ListedTradeModule: strings.ToLower(strings.TrimSpace(item.TradeModule)),
 			ListedQuoteAsset:  strings.ToLower(strings.TrimSpace(item.QuoteAssetAddress)),
+		}
+		if kind == MarketKindOption && item.Option != nil {
+			if wei, strike, err := strikeWei(item.Option.Strike); err == nil && (item.Option.OptionType == "call" || item.Option.OptionType == "put") {
+				spec.Option = &OptionTerms{Strike: strike, StrikeWei: wei, Call: item.Option.OptionType == "call",
+					Expiry: item.Option.ExpiryTimestamp, LastTradeTime: item.Option.LastTradeTime,
+					VolFeed: strings.ToLower(strings.TrimSpace(item.Option.VolFeedAddress))}
+			}
 		}
 		if item.Future != nil {
 			spec.ContractSizeUSDC, _ = strconv.ParseFloat(strings.TrimSpace(item.Future.ContractSizeUSDC), 64)
