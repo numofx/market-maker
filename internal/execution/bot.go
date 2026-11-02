@@ -1117,3 +1117,8 @@ func checkAnchorForMarket(cfg config.Config, spec exchange.MarketSpec) error {
 func (b *Bot) SetNonceAllocator(a *NonceAllocator) {
 	b.nonces = a
 }
+
+// SetDeltaBook shares the options process's delta book with this strike's loader (see state.DeltaBook).
+func (b *Bot) SetDeltaBook(book *state.DeltaBook) {
+	b.loader.WithDeltaBook(book)
+}

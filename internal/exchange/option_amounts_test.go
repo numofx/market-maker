@@ -146,3 +146,19 @@ func TestPlacingAnOptionSignsUnitsAtTheListedScale(t *testing.T) {
 		t.Fatalf("the order reads back as %v cNGN", order.Size)
 	}
 }
+
+func TestOptionWiringRefusesAnotherStack(t *testing.T) {
+	spec := optionSpec()
+	spec.Option.VolFeed, spec.MarginManager = "0xf2", "0x0705"
+	spec.ListedTradeModule, spec.ListedQuoteAsset = "0xdea9", "0xa74e"
+	if err := optionWiringError(spec, "0xDEA9", "0xA74E"); err != nil {
+		t.Fatal(err)
+	}
+	if optionWiringError(spec, "0xbeef", "0xa74e") == nil || optionWiringError(spec, "0xdea9", "0xbeef") == nil {
+		t.Fatal("another trade module or quote asset was accepted")
+	}
+	spec.ListedTradeModule = ""
+	if optionWiringError(spec, "0xdea9", "0xa74e") == nil {
+		t.Fatal("a listing without a trade module was accepted")
+	}
+}

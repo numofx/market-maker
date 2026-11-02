@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sort"
 	"strings"
 	"sync"
 
@@ -278,4 +279,50 @@ func readOptionState(ctx context.Context, rpc contractCaller, engine, option com
 		return OptionState{}, err
 	}
 	return OptionState{OptionInputs: in, IMSurplus: wad(surplus[0].(*big.Int)), WriteIMPerBase: -margin / terms.UnitBase}, nil
+}
+
+// OptionMarkets are the listed, priced option strikes of `series` (e.g. "cNGN-30NOV26"), by symbol.
+func (c *HTTPClient) OptionMarkets(series string) []MarketSpec {
+	prefix := strings.TrimSpace(series) + "-"
+	var out []MarketSpec
+	for _, spec := range c.marketsSnapshot() {
+		if spec.IsOption() && spec.Option != nil && spec.Option.UnitBase > 0 && strings.HasPrefix(spec.Symbol, prefix) {
+			out = append(out, spec)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Symbol < out[j].Symbol })
+	return out
+}
+
+// CheckOptionWiring refuses to quote an option the bot would sign for wrongly: the configured TradeModule and its
+// quoteAsset must be the listing's, and MM_SUBACCOUNT_ID must be margined by the option's engine.
+func (c *HTTPClient) CheckOptionWiring(ctx context.Context, spec MarketSpec) error {
+	if !spec.IsOption() {
+		return nil
+	}
+	if err := optionWiringError(spec, c.tradeModule.Hex(), c.quoteAsset.Hex()); err != nil {
+		return err
+	}
+	manager, err := c.subaccountManager(ctx)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(manager.Hex(), spec.MarginManager) {
+		return fmt.Errorf("MM_SUBACCOUNT_ID %s is under manager %s, not %s's engine %s", c.cfg.SubaccountID, manager.Hex(), spec.Symbol, spec.MarginManager)
+	}
+	return nil
+}
+
+func optionWiringError(spec MarketSpec, tradeModule, quoteAsset string) error {
+	switch {
+	case spec.Option == nil || !(spec.Option.UnitBase > 0) || spec.Option.VolFeed == "":
+		return fmt.Errorf("%s lists no option terms, unit or vol feed", spec.Symbol)
+	case spec.MarginManager == "":
+		return fmt.Errorf("%s lists no margin manager", spec.Symbol)
+	case !strings.EqualFold(tradeModule, spec.ListedTradeModule):
+		return fmt.Errorf("MM_TRADE_MODULE_ADDRESS %s is not %s's trade module %s", tradeModule, spec.Symbol, spec.ListedTradeModule)
+	case !strings.EqualFold(quoteAsset, spec.ListedQuoteAsset):
+		return fmt.Errorf("the module's quoteAsset %s is not %s's quote asset %s", quoteAsset, spec.Symbol, spec.ListedQuoteAsset)
+	}
+	return nil
 }

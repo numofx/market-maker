@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -58,31 +59,12 @@ func main() {
 		signer = kmsSigner
 	}
 
-	client, err := exchange.NewHTTPClient(ctx, exchange.ClientConfig{
-		APIBaseURL:                   cfg.APIBaseURL,
-		RPCURL:                       cfg.RPCURL,
-		DatabaseURL:                  cfg.DatabaseURL,
-		MarketSymbol:                 cfg.MarketSymbol,
-		ChainID:                      cfg.ChainID,
-		MatchingRepoPath:             cfg.MatchingRepoPath,
-		RiskCoreRepoPath:             cfg.RiskCoreRepoPath,
-		MatchingAddress:              cfg.MatchingAddress,
-		TradeModuleAddress:           cfg.TradeModuleAddress,
-		SubAccountsAddress:           cfg.SubAccountsAddress,
-		OwnerAddress:                 cfg.OwnerAddress,
-		SignerAddress:                cfg.SignerAddress,
-		OwnerPrivateKey:              cfg.OwnerPrivateKey,
-		SignerPrivateKey:             cfg.SignerPrivateKey,
-		SubaccountID:                 cfg.SubaccountID,
-		RecipientID:                  cfg.RecipientID,
-		WorstFee:                     cfg.WorstFee,
-		MarketRefreshSeconds:         cfg.MarketRefreshSeconds,
-		OrderExpirySeconds:           cfg.OrderExpirySeconds,
-		FutureCutoffBeforeFixSeconds: cfg.FutureCutoffBeforeFixSeconds,
-		ServiceName:                  cfg.ServiceName,
-		ProtectedPrefixes:            cfg.ProtectedOrderIDPrefixes,
-		Signer:                       signer,
-	})
+	if series := strings.TrimSpace(os.Getenv("MM_OPTION_SERIES")); series != "" {
+		// The options quoter: every listed strike of the series from this one account (options.go).
+		os.Exit(runOptions(ctx, cfg, series, signer, logger))
+	}
+
+	client, err := exchange.NewHTTPClient(ctx, clientConfig(cfg, cfg.MarketSymbol, signer))
 	if err != nil {
 		logger.Error("init exchange client", "error", err)
 		os.Exit(1)
@@ -210,4 +192,33 @@ func soakTick(t *time.Ticker) <-chan time.Time {
 		return nil
 	}
 	return t.C
+}
+
+// clientConfig is the exchange client for `market`, from the bot's configuration.
+func clientConfig(cfg config.Config, market string, signer exchange.Signer) exchange.ClientConfig {
+	return exchange.ClientConfig{
+		APIBaseURL:                   cfg.APIBaseURL,
+		RPCURL:                       cfg.RPCURL,
+		DatabaseURL:                  cfg.DatabaseURL,
+		MarketSymbol:                 market,
+		ChainID:                      cfg.ChainID,
+		MatchingRepoPath:             cfg.MatchingRepoPath,
+		RiskCoreRepoPath:             cfg.RiskCoreRepoPath,
+		MatchingAddress:              cfg.MatchingAddress,
+		TradeModuleAddress:           cfg.TradeModuleAddress,
+		SubAccountsAddress:           cfg.SubAccountsAddress,
+		OwnerAddress:                 cfg.OwnerAddress,
+		SignerAddress:                cfg.SignerAddress,
+		OwnerPrivateKey:              cfg.OwnerPrivateKey,
+		SignerPrivateKey:             cfg.SignerPrivateKey,
+		SubaccountID:                 cfg.SubaccountID,
+		RecipientID:                  cfg.RecipientID,
+		WorstFee:                     cfg.WorstFee,
+		MarketRefreshSeconds:         cfg.MarketRefreshSeconds,
+		OrderExpirySeconds:           cfg.OrderExpirySeconds,
+		FutureCutoffBeforeFixSeconds: cfg.FutureCutoffBeforeFixSeconds,
+		ServiceName:                  cfg.ServiceName,
+		ProtectedPrefixes:            cfg.ProtectedOrderIDPrefixes,
+		Signer:                       signer,
+	}
 }

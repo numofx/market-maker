@@ -61,6 +61,17 @@ func TestOptionPricingMatchesTheEngineLive(t *testing.T) {
 			rel := math.Abs(ours-mark) / math.Max(mark, 1e-12)
 			worst = math.Max(worst, rel)
 			t.Logf("%s %v: vol %.4f fwd %.12f | engine %.9f ours %.9f (rel %.2g)", strike, map[bool]string{true: "C", false: "P"}[call], in.Vol, in.Forward, mark, ours, rel)
+			// A writer's requirement for one 1,000-cNGN unit, as the quoter sizes against it: at least the premium it owes.
+			unit := new(big.Int).Mul(big.NewInt(1000), decimalScale)
+			im, _, err := readEngineOptionMark(ctx, rpc, engine, option, terms, new(big.Int).Neg(unit), true, block)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeIM := -im / 1000
+			t.Logf("    write IM %.9f USDC per cNGN (premium %.9f): 100k cNGN needs $%.2f", writeIM, price, writeIM*100_000)
+			if !(writeIM > price) || writeIM > 0.001 {
+				t.Errorf("%s call=%v: write IM %v per cNGN against a premium of %v", strike, call, writeIM, price)
+			}
 			if rel > 1e-6 {
 				t.Errorf("%s call=%v: Black-76 %.12f vs the engine's %.12f", strike, call, ours, mark)
 			}
