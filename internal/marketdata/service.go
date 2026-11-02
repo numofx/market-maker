@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/numofx/market-maker/internal/exchange"
+	"github.com/numofx/market-maker/internal/pricing"
 	"github.com/numofx/market-maker/internal/state"
 )
 
@@ -19,6 +20,7 @@ type Loader struct {
 	spotExternal              USDCCNGNSpotExternalAnchor
 	spotExternalBootstrapOnly bool
 	perpMaxBasisBPS           float64
+	deltas                    *state.DeltaBook
 }
 
 // WithPerpBasis sets how far from the index the perp reference may sit (MM_PERP_MAX_BASIS_BPS).
@@ -65,6 +67,18 @@ func NewLoaderWithSpotExternal(client exchange.Client, spec exchange.MarketSpec,
 	}
 	loader.spotExternalBootstrapOnly = bootstrapOnly
 	return loader
+}
+
+// optionStateReader is the HTTP client's read of an option strike (exchange.HTTPClient.OptionState).
+type optionStateReader interface {
+	OptionState(ctx context.Context, spec exchange.MarketSpec) (exchange.OptionState, error)
+}
+
+// WithDeltaBook shares the options process's delta book: this strike records its position's delta there each cycle
+// and skews against the total.
+func (l *Loader) WithDeltaBook(book *state.DeltaBook) *Loader {
+	l.deltas = book
+	return l
 }
 
 // futureStateReader is the HTTP client's read of the MarginEngine future (exchange.HTTPClient.FutureState).
@@ -115,6 +129,9 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 	}
 	if l.spec.IsPerp() {
 		return l.loadPerp(ctx, snapshot)
+	}
+	if l.spec.IsOption() {
+		return l.loadOption(ctx, snapshot)
 	}
 	if l.spec.IsMarginEngineFuture() {
 		// Sizing, the band and the cutoff all come from here: a cycle that cannot read them does not quote.
@@ -262,4 +279,28 @@ func (e *LoadError) Error() string {
 
 func (e *LoadError) Unwrap() error {
 	return e.Err
+}
+
+// loadOption reads the strike's chain state: price inputs, the account's IM surplus and a writer's requirement. A cycle
+// that cannot read them does not quote. A vol feed that reverts is not an error: the strategy pulls the strike.
+func (l *Loader) loadOption(ctx context.Context, snapshot state.Snapshot) (state.Snapshot, error) {
+	reader, ok := l.client.(optionStateReader)
+	if !ok {
+		return state.Snapshot{}, &LoadError{Stage: "option_state", Err: fmt.Errorf("this client cannot read options")}
+	}
+	st, err := reader.OptionState(ctx, l.spec)
+	if err != nil {
+		return state.Snapshot{}, &LoadError{Stage: "option_state", Err: fmt.Errorf("read the option: %w", err)}
+	}
+	option := &state.OptionSnapshot{OptionState: st}
+	if !st.VolUnavailable && l.spec.Option != nil {
+		delta := snapshot.Inventory(l.spec.BaseAsset) * pricing.Option{Forward: st.Forward, Strike: l.spec.Option.Strike, Vol: st.Vol,
+			Seconds: float64(l.spec.Option.Expiry - st.BlockTime), Call: l.spec.Option.Call}.Delta()
+		option.PortfolioDelta = delta
+		if l.deltas != nil {
+			option.PortfolioDelta = l.deltas.Set(l.spec.Symbol, delta)
+		}
+	}
+	snapshot.Option = option
+	return snapshot, nil
 }

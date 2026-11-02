@@ -38,6 +38,7 @@ var optionABI = mustABI(`[
 {"name":"getVol","type":"function","stateMutability":"view","inputs":[{"name":"strike","type":"uint128"},{"name":"expiry","type":"uint64"}],"outputs":[{"name":"vol","type":"uint256"},{"name":"confidence","type":"uint256"}]},
 {"name":"getExpiryMinConfidence","type":"function","stateMutability":"view","inputs":[{"name":"expiry","type":"uint64"}],"outputs":[{"name":"","type":"uint256"}]},
 {"name":"assetDetails","type":"function","stateMutability":"view","inputs":[{"name":"asset","type":"address"}],"outputs":[{"name":"","type":"tuple","components":[{"name":"isWhitelisted","type":"bool"},{"name":"assetType","type":"uint8"},{"name":"marketId","type":"uint256"}]}]},
+{"name":"getMargin","type":"function","stateMutability":"view","inputs":[{"name":"accountId","type":"uint256"},{"name":"isInitial","type":"bool"}],"outputs":[{"name":"margin","type":"int256"}]},
 {"name":"getIsolatedMargin","type":"function","stateMutability":"view","inputs":[{"name":"marketId","type":"uint256"},{"name":"strike","type":"uint256"},{"name":"expiry","type":"uint256"},{"name":"isCall","type":"bool"},{"name":"balance","type":"int256"},{"name":"isInitial","type":"bool"}],"outputs":[{"name":"margin","type":"int256"},{"name":"markToMarket","type":"int256"}]}
 ]`)
 
@@ -229,3 +230,52 @@ func strikeWei(strike string) (*big.Int, float64, error) {
 
 // abiUnused keeps the abi import honest if the ABI moves.
 var _ = abi.ABI{}
+
+// OptionState is one cycle's chain view of an option strike for the quoter, all read at one block.
+type OptionState struct {
+	OptionInputs
+	// VolUnavailable: the vol feed reverted for the expiry (no surface, or past its heartbeat). The engine cannot margin
+	// a writer then; nothing is quoted.
+	VolUnavailable bool
+	// IMSurplus is getMargin(account, true) on the engine, USDC: what a fill may consume.
+	IMSurplus float64
+	// WriteIMPerBase is the initial margin one more written base unit (cNGN) needs, standalone, USDC: -margin of
+	// getIsolatedMargin(-1 unit, initial) / unit. Conservative for an account already holding offsetting longs.
+	WriteIMPerBase float64
+}
+
+// OptionState reads the strike's forward, vol, the account's IM surplus and a writer's per-unit requirement at one block.
+func (c *HTTPClient) OptionState(ctx context.Context, spec MarketSpec) (OptionState, error) {
+	if spec.Option == nil || !(spec.Option.UnitBase > 0) {
+		return OptionState{}, fmt.Errorf("%s is not a priced option market", spec.Symbol)
+	}
+	account, ok := new(big.Int).SetString(c.cfg.SubaccountID, 10)
+	if !ok {
+		return OptionState{}, fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
+	}
+	return readOptionState(ctx, c.rpc, common.HexToAddress(spec.MarginManager), common.HexToAddress(spec.AssetAddress), *spec.Option, spec.AmountScale, account)
+}
+
+func readOptionState(ctx context.Context, rpc contractCaller, engine, option common.Address, terms OptionTerms, amountScale string, account *big.Int) (OptionState, error) {
+	in, err := readOptionInputs(ctx, rpc, option, terms, nil)
+	if errors.Is(err, ErrVolUnavailable) {
+		return OptionState{VolUnavailable: true}, nil
+	}
+	if err != nil {
+		return OptionState{}, err
+	}
+	at := new(big.Int).SetUint64(in.Block)
+	surplus, err := callAt(ctx, rpc, engine, at, "getMargin", account, true)
+	if err != nil {
+		return OptionState{}, err
+	}
+	unit, ok := new(big.Int).SetString(strings.TrimSpace(amountScale), 10)
+	if !ok || unit.Sign() <= 0 {
+		return OptionState{}, fmt.Errorf("amount_scale %q", amountScale)
+	}
+	margin, _, err := readEngineOptionMark(ctx, rpc, engine, option, terms, new(big.Int).Neg(unit), true, at)
+	if err != nil {
+		return OptionState{}, err
+	}
+	return OptionState{OptionInputs: in, IMSurplus: wad(surplus[0].(*big.Int)), WriteIMPerBase: -margin / terms.UnitBase}, nil
+}

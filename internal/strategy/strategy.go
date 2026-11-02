@@ -156,6 +156,10 @@ func BuildQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot state.Sna
 // the quoted-spread metric, and /control/state, all of which are about the market, not about where
 // the operator chose to lean.
 func BuildQuotesWithOverrides(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapshot, ov Overrides) (Result, error) {
+	if spec.IsOption() {
+		// An option is priced from the chain's forward and vol, not from a reference and a bps spread.
+		return buildOptionQuotes(cfg, spec, snapshot, ov, time.Now().UTC()), nil
+	}
 	ref, refSource := ComputeReferencePrice(snapshot)
 	localRef, localSource := ComputeLocalReference(snapshot)
 	result := Result{

@@ -40,6 +40,10 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 	// price (USDC per cNGN) before the comparison; a future compares in contracts.
 	inventory := snapshot.Inventory(spec.BaseAsset)
 	unit := "contracts"
+	if spec.IsOption() {
+		// An option position is signed base units (cNGN), written negative; MM_MAX_LONG/SHORT_INVENTORY are cNGN here.
+		unit = spec.BaseAsset
+	}
 	if spec.BaseSized() {
 		// The quote asset: USDC on the cNGN markets and on EURC-USDC alike.
 		inventory *= snapshot.ReferencePrice
@@ -86,7 +90,8 @@ func Evaluate(cfg config.Config, spec exchange.MarketSpec, snapshot state.Snapsh
 	basePosition := snapshot.Position(spec.BaseAsset)
 	// On the perp the base "balance" is the signed position, not a holding a quote draws on.
 	// So it is on the MarginEngine future: a signed position in contracts, margined by the engine.
-	if !spec.IsPerp() && !spec.IsMarginEngineFuture() && basePosition.Available < cfg.MinBaseBalance {
+	// So is an option: a written strike is a negative position, margined by the engine.
+	if !spec.IsPerp() && !spec.IsMarginEngineFuture() && !spec.IsOption() && basePosition.Available < cfg.MinBaseBalance {
 		return Decision{Halt: true, Reason: fmt.Sprintf("available base balance below threshold for %s", spec.BaseAsset)}
 	}
 	quotePosition := snapshot.Position(spec.QuoteAsset)

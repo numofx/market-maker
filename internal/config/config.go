@@ -180,8 +180,10 @@ type Config struct {
 	// engine refuses a fill. FutureBandBufferBPS keeps quotes this far inside the fill band, which moves
 	// with the index between the bot's read and the matcher's. FutureCutoffBeforeFixSeconds is how long
 	// before the earlier of the fixing window and last trade the bot stops quoting the future.
-	FutureIMUsage                float64
-	FutureBandBufferBPS          float64
+	FutureIMUsage       float64
+	FutureBandBufferBPS float64
+	// Option is the options quoter's configuration (cmd/options-mm); unused by every other market.
+	Option                       OptionConfig
 	FutureCutoffBeforeFixSeconds int64
 	// PerpMaxBasisBPS is how far from the index the perp reference may sit. Other traders' book mid
 	// is the reference when it is two-sided, clamped to index +/- this; otherwise the index.
@@ -296,6 +298,7 @@ func Load() (Config, error) {
 		InventorySkewFullAt:          envFloat("MM_INVENTORY_SKEW_FULL_AT", 0),
 		PerpMaxLeverage:              envFloat("MM_PERP_MAX_LEVERAGE", defaultPerpMaxLeverage),
 		FutureIMUsage:                envFloat("MM_FUTURE_IM_USAGE", defaultFutureIMUsage),
+		Option:                       loadOptionConfig(),
 		FutureBandBufferBPS:          envFloat("MM_FUTURE_BAND_BUFFER_BPS", defaultFutureBandBufferBPS),
 		FutureCutoffBeforeFixSeconds: int64(envFloat("MM_FUTURE_CUTOFF_BEFORE_FIX_SECONDS", defaultFutureCutoffBeforeFixSec)),
 		PerpMaxBasisBPS:              envFloat("MM_PERP_MAX_BASIS_BPS", defaultPerpMaxBasisBPS),
@@ -399,6 +402,9 @@ func Load() (Config, error) {
 	}
 	if cfg.OrderSize <= 0 {
 		return Config{}, fmt.Errorf("MM_ORDER_SIZE must be > 0")
+	}
+	if err := cfg.Option.validate(); err != nil {
+		return Config{}, err
 	}
 	if cfg.FutureIMUsage <= 0 || cfg.FutureIMUsage > 1 {
 		return Config{}, fmt.Errorf("MM_FUTURE_IM_USAGE must be > 0 and <= 1, got %v", cfg.FutureIMUsage)

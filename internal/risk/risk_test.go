@@ -204,3 +204,19 @@ func TestInventoryLimitsAreUSDCOnTheCNGNMarkets(t *testing.T) {
 		t.Fatal("a 460k cNGN order must halt against a 450k cap")
 	}
 }
+
+// A written option is a negative position, not a missing holding: MM_MIN_BASE_BALANCE does not halt it, and the inventory
+// limits compare it in cNGN.
+func TestOptionShortIsNotABaseBalanceShortfall(t *testing.T) {
+	spec := exchange.MarketSpec{Symbol: "cNGN-30NOV26-0.00072-P", Kind: exchange.MarketKindOption, BaseAsset: "cNGN", QuoteAsset: "USDC"}
+	cfg := config.Config{MinBaseBalance: 1, MaxLongInventory: 300_000, MaxShortInventory: -300_000}
+	snap := state.Snapshot{ReferencePrice: 0.00003, InventoryByAsset: map[string]float64{"cNGN": -100_000},
+		Positions: map[string]state.AssetPosition{"cNGN": {Total: -100_000}, "USDC": {Total: 500, Available: 500}}}
+	if d := Evaluate(cfg, spec, snap); d.Halt {
+		t.Fatalf("a 100k written put halted: %s", d.Reason)
+	}
+	snap.InventoryByAsset["cNGN"] = -400_000
+	if d := Evaluate(cfg, spec, snap); !d.Halt || !strings.Contains(d.Reason, "cNGN exceeds max short") {
+		t.Fatalf("400k written past a 300k limit: %+v", d)
+	}
+}

@@ -110,6 +110,17 @@ type Snapshot struct {
 	// Future is the MarginEngine future's margin, band and schedule, read from the chain this cycle; nil
 	// on every other market.
 	Future *exchange.FutureState
+	// Option is an option strike's forward, vol and margin, read from the chain this cycle, and the delta of every
+	// strike the process quotes; nil on every other market.
+	Option *OptionSnapshot
+}
+
+// OptionSnapshot is one cycle's view of an option strike.
+type OptionSnapshot struct {
+	exchange.OptionState
+	// PortfolioDelta is the net base-unit (cNGN) delta of the account's positions across every strike this process
+	// quotes, this one included, as last read by each strike's cycle.
+	PortfolioDelta float64
 }
 
 // PerpSnapshot is one cycle's view of the perp, from /v1/markets. Prices are USDC per cNGN.
