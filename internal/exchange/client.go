@@ -347,6 +347,9 @@ const cngnSymbol = "cNGN"
 
 func (s MarketSpec) IsPerp() bool { return s.kind() == MarketKindPerp }
 
+// IsOption reports whether the market is one strike and side of an OptionAsset.
+func (s MarketSpec) IsOption() bool { return s.kind() == MarketKindOption }
+
 // kind is Kind when loadMarkets set it, else derived the same way from what the spec carries, so a
 // spec built by hand (tests, tools) classifies exactly as a loaded one.
 func (s MarketSpec) kind() MarketKind {
@@ -1040,7 +1043,18 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 	// market, so no branch can send the other (every engine-future order was refused on 2026-10-13 for it).
 	payloadLimitPrice := rawPriceToDecimalString(floatToRaw(req.Price))
 	payload := map[string]any{}
-	if spec.BaseSized() {
+	if spec.IsOption() {
+		bodyUnits, signedWei, roundedSize, oerr := optionOrderAmounts(spec, req.Size)
+		if oerr != nil {
+			return Order{}, oerr
+		}
+		if !(req.Price > 0) {
+			return Order{}, fmt.Errorf("option premium must be positive, got %v", req.Price)
+		}
+		engineAmount = roundedSize
+		payloadDesiredAmount = bodyUnits
+		signedDesiredAmount = signedWei
+	} else if spec.BaseSized() {
 		if !(req.Price > 0) || !(req.Size > 0) {
 			return Order{}, fmt.Errorf("order price and size must be positive, got %v x %v", req.Price, req.Size)
 		}
@@ -1391,6 +1405,11 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 				spec.Option = &OptionTerms{Strike: strike, StrikeWei: wei, Call: item.Option.OptionType == "call",
 					Expiry: item.Option.ExpiryTimestamp, LastTradeTime: item.Option.LastTradeTime,
 					VolFeed: strings.ToLower(strings.TrimSpace(item.Option.VolFeedAddress))}
+				// One desired_amount signs as amount_scale of the OptionAsset's 1e18 per base unit: 1e21 is 1,000 cNGN. The bot
+				// sizes options in base units and orders in whole venue units, so the step is the unit.
+				if scale, ok := new(big.Rat).SetString(strings.TrimSpace(item.AmountScale)); ok && scale.Sign() > 0 && scale.IsInt() {
+					spec.Option.UnitBase, _ = new(big.Rat).Quo(scale, new(big.Rat).SetInt(decimalScale)).Float64()
+				}
 			}
 		}
 		if item.Future != nil {
@@ -1428,6 +1447,12 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			}
 		}
 		switch {
+		case spec.IsOption():
+			// An option with no terms or no unit has no step: its order path refuses it (optionOrderAmounts).
+			if spec.Option != nil && spec.Option.UnitBase > 0 {
+				spec.SizeStep = spec.Option.UnitBase
+				spec.MinSize = spec.Option.UnitBase
+			}
 		case spec.UnitContracts > 0 && spec.IsMarginEngineFuture():
 			// The engine future sized in USDC of notional: the bot quotes contracts rounded to the venue's
 			// unit (0.001 contract, 1 USDC), so a rung can be 116 USDC rather than a whole 1,000, and
@@ -2149,6 +2174,27 @@ func ratFromFloat(value float64) *big.Rat {
 // The requested size is first rounded DOWN to the MinSize step so the body always
 // normalizes to a whole atomic count and the signed amount stays an exact integer
 // multiple of that count (see markets-service inferSharedScale / validateActionDataInvariants).
+// optionOrderAmounts is an option order's body desired_amount (whole venue units) and signed amount (units x
+// amount_scale), for `size` in base units rounded down to a whole unit. markets-service refuses any other signed scale.
+func optionOrderAmounts(spec MarketSpec, size float64) (bodyUnits string, signedWei string, roundedSize float64, err error) {
+	if spec.Option == nil || !(spec.Option.UnitBase > 0) {
+		return "", "", 0, fmt.Errorf("%s lists no option unit (amount_scale %q)", spec.Symbol, spec.AmountScale)
+	}
+	scale, ok := new(big.Int).SetString(strings.TrimSpace(spec.AmountScale), 10)
+	if !ok || scale.Sign() <= 0 {
+		return "", "", 0, fmt.Errorf("%s amount_scale %q", spec.Symbol, spec.AmountScale)
+	}
+	if !(size > 0) || math.IsInf(size, 0) {
+		return "", "", 0, fmt.Errorf("invalid order size %v", size)
+	}
+	units := int64(math.Floor(size/spec.Option.UnitBase + 1e-9))
+	if units < 1 {
+		return "", "", 0, fmt.Errorf("order size %v is below one %v-%s unit on %s", size, spec.Option.UnitBase, spec.BaseAsset, spec.Symbol)
+	}
+	signed := new(big.Int).Mul(big.NewInt(units), scale)
+	return strconv.FormatInt(units, 10), signed.String(), float64(units) * spec.Option.UnitBase, nil
+}
+
 func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, signedWei string, roundedSize float64, err error) {
 	step := ratFromFloat(spec.MinSize)
 	if step.Sign() <= 0 {
@@ -2185,6 +2231,14 @@ func futureOrderAmounts(spec MarketSpec, size float64) (bodyDecimal string, sign
 }
 
 func rawOrderSizeToFloat(spec MarketSpec, raw string) float64 {
+	if spec.IsOption() {
+		// markets-service stores, books and reports an option's amount as its count of venue units (1,000 cNGN each).
+		if n, ok := new(big.Rat).SetString(strings.TrimSpace(raw)); ok && spec.Option != nil {
+			size, _ := new(big.Rat).Mul(n, ratFromFloat(spec.Option.UnitBase)).Float64()
+			return size
+		}
+		return 0
+	}
 	if spec.BaseSized() {
 		// cNGN-market amounts are stored by markets-service in atomic whole-cNGN units
 		// (amount step "1"), not wei — the raw value IS the engine cNGN amount.

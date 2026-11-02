@@ -26,6 +26,8 @@ type OptionTerms struct {
 	Expiry        int64
 	LastTradeTime int64
 	VolFeed       string
+	// UnitBase is the base units one desired_amount is (amount_scale / 1e18): 1,000 cNGN.
+	UnitBase float64
 }
 
 var optionABI = mustABI(`[

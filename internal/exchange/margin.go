@@ -343,7 +343,13 @@ func (c *HTTPClient) futureOrderExpiryCap() time.Time {
 // outlive the quoting cutoff: one signed before it would otherwise rest, and fill, into the fixing window
 // or past last trade. A cutoff not yet read refuses the order rather than signing it uncapped.
 func cappedOrderExpiry(spec MarketSpec, expiry int64, cutoff time.Time, now time.Time) (int64, error) {
-	if !spec.IsMarginEngineFuture() {
+	if spec.IsOption() {
+		// An option's last trade time is in its listing: no order outlives it, and none is signed without it.
+		if spec.Option == nil || spec.Option.LastTradeTime <= 0 {
+			return 0, errors.New("the option lists no last trade time; refusing to sign an order without its expiry cap")
+		}
+		cutoff = time.Unix(spec.Option.LastTradeTime, 0)
+	} else if !spec.IsMarginEngineFuture() {
 		return expiry, nil
 	}
 	if cutoff.IsZero() {
