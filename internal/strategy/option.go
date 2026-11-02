@@ -118,7 +118,7 @@ func buildOptionQuotes(cfg config.Config, spec exchange.MarketSpec, snapshot sta
 		if q < terms.UnitBase {
 			return suppress(reasonOptionCapacity)
 		}
-		return &Quote{Price: price, Size: q}, nil
+		return &Quote{Side: sideName, Price: price, Size: q}, nil
 	}
 	result.Bid, result.BidSuppression = side(exchange.SideBuy, bidPrice, bidRoom, bidCap, ov.BidDisabled)
 	result.Ask, result.AskSuppression = side(exchange.SideSell, askPrice, askRoom, askCap, ov.AskDisabled)

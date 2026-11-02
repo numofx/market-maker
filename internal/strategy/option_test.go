@@ -65,6 +65,10 @@ func TestOptionQuotesSitThreeVolPointsOffTheSurface(t *testing.T) {
 	if want := black(0.00072, 0.43, 0.000721, false); math.Abs(r.Ask.Price-want) > 1e-17 {
 		t.Fatalf("ask %v, want the 43-vol premium %v", r.Ask.Price, want)
 	}
+	// The syncer places what the quote says: a side-less quote is refused at the client ("invalid side").
+	if r.Bid.Side != exchange.SideBuy || r.Ask.Side != exchange.SideSell || r.Bids[0].Side != exchange.SideBuy || r.Asks[0].Side != exchange.SideSell {
+		t.Fatalf("sides: bid %q ask %q", r.Bid.Side, r.Ask.Side)
+	}
 	if r.Bid.Size != 100_000 || r.Ask.Size != 100_000 {
 		t.Fatalf("sizes %v / %v", r.Bid.Size, r.Ask.Size)
 	}
