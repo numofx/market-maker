@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// marketsServer serves /v1/markets with a taker fee the test can change between calls, and counts
+// marketsServer serves /markets with a taker fee the test can change between calls, and counts
 // how many times it was asked. Everything below turns on when the client refetches and what it
 // does when it cannot.
 type marketsServer struct {
@@ -203,7 +203,7 @@ func TestGetMarketServesTheCacheWithinTheRefreshWindow(t *testing.T) {
 		}
 	}
 	if got := venue.calls.Load(); got != 1 {
-		t.Fatalf("hit /v1/markets %d times for 20 reads inside the window, want 1", got)
+		t.Fatalf("hit /markets %d times for 20 reads inside the window, want 1", got)
 	}
 }
 

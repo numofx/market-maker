@@ -415,7 +415,7 @@ func parsePresentedBookPrice(level bookLevel) (float64, bool) {
 }
 
 func (h *handler) getBook(ctx context.Context, symbol string) (bookResponse, error) {
-	u, err := url.Parse(strings.TrimRight(h.cfg.APIBaseURL, "/") + "/v1/book")
+	u, err := url.Parse(strings.TrimRight(h.cfg.APIBaseURL, "/") + "/book")
 	if err != nil {
 		return bookResponse{}, err
 	}
@@ -442,7 +442,7 @@ func (h *handler) getBook(ctx context.Context, symbol string) (bookResponse, err
 }
 
 func (h *handler) getTrades(ctx context.Context, symbol string) ([]trade, error) {
-	u, err := url.Parse(strings.TrimRight(h.cfg.APIBaseURL, "/") + "/v1/trades")
+	u, err := url.Parse(strings.TrimRight(h.cfg.APIBaseURL, "/") + "/trades")
 	if err != nil {
 		return nil, err
 	}

@@ -16,7 +16,7 @@ It supports one market per process. The intended symbols are:
 - the dated `USDCcNGN-*-2026` futures (legacy; see Orientation)
 
 `MM_MARKET_SYMBOL` may name the spot or the perp under either spelling. The bot resolves it against
-`/v1/markets` (the listed `market` or any of its `aliases`, falling back to its own table of the two
+`/markets` (the listed `market` or any of its `aliases`, falling back to its own table of the two
 spellings when the venue lists none) and uses the venue's canonical name from then on: in order ids,
 logs and every comparison. A ladder tagged under the old name is still recognised as the bot's. An
 unknown symbol refuses to start, naming what the venue lists.
@@ -25,7 +25,7 @@ unknown symbol refuses to start, naming what the venue lists.
 
 On startup it:
 
-1. loads the selected market metadata from `/v1/markets`
+1. loads the selected market metadata from `/markets`
 2. loads all active orders for the configured owner in the selected market from Postgres
 3. loads book, trades, and balances to compute fresh target quotes
 4. classifies every existing order deterministically
@@ -43,7 +43,7 @@ On each cycle it:
 6. runs risk checks
 7. computes one target bid and one target ask
 8. cancels stale or wrong orders
-9. places missing passive quotes using signed `POST /v1/orders` payloads
+9. places missing passive quotes using signed `POST /orders` payloads
 
 ## Orientation: cNGN-USDC
 
@@ -65,7 +65,7 @@ Orders are submitted engine-native (`side`, `limit_price`, `desired_amount`, no 
 or `ui_intent`), the book and the tape are read from their engine fields (`limit_price`,
 `desired_amount`, `price`, `size`, `aggressor_side`), and balances are read from the chain. None of
 that depends on how markets-service presents the market. The one place the presentation matters
-is `/v1/markets`, and `internal/exchange/orientation.go` is the only code that knows about it,
+is `/markets`, and `internal/exchange/orientation.go` is the only code that knows about it,
 keyed on each market's `order_entry_spec`:
 
 | `order_entry_spec` | venue presentation | `base_asset_symbol` / `quote_asset_symbol` | `mark_price_ui`, `index_price_ui`, `liquidation_price_ui` | `spot_contract.ui_intent` |
@@ -431,7 +431,7 @@ When `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_BOOTSTRAP_ONLY=true`, the bot stops using
 
 `MM_MARKET_SYMBOL=EURC-USDC` quotes the EURC spot market: base EURC, quote USDC, a price in USDC per
 EURC (~1.12), a size in whole EURC (`desired_amount` 1 = 1 EURC, signed 1e18). Everything about the
-market is read from its `/v1/markets` row (base and quote symbols, `asset_address`, `amount_step`,
+market is read from its `/markets` row (base and quote symbols, `asset_address`, `amount_step`,
 `tick_size`, `taker_fee_bps`); nothing in the bot names it. It is a spot market (`contract_type:
 spot`) that is not cNGN's, which the code calls an *anchored spot* market (`MarketSpec.IsAnchoredSpot`).
 
@@ -456,7 +456,7 @@ spot`) that is not cNGN's, which the code calls an *anchored spot* market (`Mark
   round halts and cancels at once (above). The feed is USD per EURC and is used as USDC per EURC.
 - **The cNGN spot paths do not apply**: no `MM_USDCCNGN_SPOT_EXTERNAL_ANCHOR_*` (enabling it is
   refused), no book-first pricing, no standing last trade.
-- **Fees** come from `/v1/markets` (`taker_fee_bps`, 5 bps; maker 0), and `worstFee` is signed per EURC
+- **Fees** come from `/markets` (`taker_fee_bps`, 5 bps; maker 0), and `worstFee` is signed per EURC
   at the order's price, as on every market.
 
 Operator units on EURC-USDC are the cNGN spot market's with EURC for cNGN: quote (USDC) for sizes and
@@ -482,7 +482,7 @@ and USDC.
 ## USDCcNGN-PERP
 
 `MM_MARKET_SYMBOL=USDCcNGN-PERP` quotes the USDC-settled cNGN perp (`cNGN-PERP`). The market kind
-comes from `/v1/markets` (`order_entry_spec: cngn_usdc_perp_v1`, or the older `usdc_cngn_perp_v1`),
+comes from `/markets` (`order_entry_spec: cngn_usdc_perp_v1`, or the older `usdc_cngn_perp_v1`),
 not the symbol.
 
 - **Orders** are the engine's: a price in USDC per cNGN, a size in whole cNGN, a bid is a long of
@@ -502,14 +502,14 @@ not the symbol.
 - **Reference.** Other traders' two-sided mid, clamped to the index ± `MM_PERP_MAX_BASIS_BPS`
   (default 100, at most the mark feed's 200). With no two-sided book it is the index, in USDC per
   cNGN (`perp.index_price`, else `perp.index_price_ui` through the market's orientation). The index
-  is the snapshot's anchor, so `MM_STALE_ANCHOR_TIMEOUT_SECONDS` halts on a `/v1/markets` that
+  is the snapshot's anchor, so `MM_STALE_ANCHOR_TIMEOUT_SECONDS` halts on a `/markets` that
   stopped refreshing.
 - **Size.** Each side is limited by the bot's own leverage cap, `MM_PERP_MAX_LEVERAGE` (default
   1.5x, at most the SRM's 3x). After a fill the bot's gross position stays within
   cash × min(that, the SRM's max leverage), converted to cNGN at the reference. A bid may first buy
   back a short and an ask sell a long. Opening size is also bounded by the room left under the OI
   cap (`position_cap / 2 - open_interest`, in cNGN); closing size is not.
-- **Closed until launch.** While `/v1/markets` reports `trading_enabled: false`, both sides are
+- **Closed until launch.** While `/markets` reports `trading_enabled: false`, both sides are
   suppressed with the reason `perp_trading_disabled`, unless `MM_PERP_QUOTE_WHILE_CLOSED=true`. Set
   that for the launch: the enable gate (`propose_perp_enable_batch.py`) needs a two-sided book of at
   least $1k within 2% of the index before it opens the market. The matcher skips a closed market,
@@ -900,7 +900,7 @@ The harness fails loudly with actionable errors if required services are missing
 
 - If Postgres is unavailable, the bot cannot reconcile or compute reserved exposure correctly and will fail.
 - If the deployment addresses or chain ID do not match the target environment, signed orders will be rejected.
-- If the exchange changes `/v1/orders` payload validation or market metadata format, the client must be updated.
+- If the exchange changes `/orders` payload validation or market metadata format, the client must be updated.
 - If the anchor source fails and neither top-of-book nor last trade can provide a local fallback, the bot halts.
 - For `USDCcNGN-SPOT`, if the local market has no two-sided book and has never traded, and the external bootstrap anchor is missing, stale, malformed, or rejected by the deviation guard, the bot halts with `reference price unavailable`.
 - A cNGN-market order is a whole number of cNGN, so a side whose budget is under 1 cNGN (an ask with no cNGN, a bid with less USDC than one cNGN costs) cannot quote. That side is suppressed and logged every quoting cycle as `quote side suppressed` (`insufficient_base_capacity` for asks, `insufficient_quote_capacity` for bids) — the low-inventory alert — and the other side keeps quoting.
@@ -985,7 +985,7 @@ What a passing run proves:
 ## Perp fill report (read-only)
 
 `cmd/perp-fill-report` reports on the USDCcNGN-PERP maker's account for a time window and changes
-nothing: fills from `/v1/trades` (the bot's orders carry the `mm:USDCcNGN-PERP:` prefix), the index
+nothing: fills from `/trades` (the bot's orders carry the `mm:USDCcNGN-PERP:` prefix), the index
 just before and after each fill from the index feed's `SpotPriceUpdated` events, a flag on fills
 followed within 60 s by an index move of more than 20 bps against the bot, realized P&L (cash against
 the starting cash) and unrealized P&L (`PerpAsset.getUnsettledAndUnrealizedCash`), and the account's

@@ -33,7 +33,7 @@ const (
 	defaultMetricsAddr          = ":8080"
 	defaultLogLevel             = "INFO"
 	defaultWorstFee             = "0"
-	// How long a fetched /v1/markets schedule is trusted before the next quote refetches it.
+	// How long a fetched /markets schedule is trusted before the next quote refetches it.
 	// Short enough that a fee change reaches the signed bound within a cycle or two; long enough
 	// that it is one request a minute, not one per order.
 	defaultMarketRefreshSeconds = 60
@@ -109,7 +109,7 @@ type Config struct {
 	SubaccountID       string
 	RecipientID        string
 	// WorstFee is the signed fee ceiling for markets that publish NO taker schedule on
-	// /v1/markets -- the futures path, where the bound is a contract notional rather than a
+	// /markets -- the futures path, where the bound is a contract notional rather than a
 	// price. On a market that does publish one, the bound is derived per order from that
 	// schedule and the order's own engine price (see HTTPClient.signedWorstFee): the contract
 	// checks fee PER FILLED UNIT, so a single configured number is wrong at every price but one.

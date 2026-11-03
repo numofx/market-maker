@@ -22,7 +22,7 @@ func TestHostOnlyKeepsSchemeAndHostOnly(t *testing.T) {
 		"https://x.quiknode.pro/abc/?k=v#f":  "https://x.quiknode.pro",
 		"http://127.0.0.1:8545/key":          "http://127.0.0.1:8545",
 		dbURL:                                "postgres://db.internal:5432",
-		"wss://api.numofx.com/v1/ws?token=1": "wss://api.numofx.com",
+		"wss://api.numofx.com/ws?token=1": "wss://api.numofx.com",
 		"":                                   "",
 		"  ":                                 "",
 		"not a url":                          "<redacted-url>",
@@ -78,9 +78,9 @@ func TestRedactingHandlerStripsConfiguredURLsEverywhere(t *testing.T) {
 func TestRedactingHandlerLeavesOtherValuesAlone(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(NewRedactingHandler(slog.NewTextHandler(&buf, nil), rpcURL))
-	logger.Info("quote decision", "market", "cNGN-USDC", "price", 0.00073, "ok", true, "api", "https://api.numofx.com/v1/book?symbol=cNGN-USDC")
+	logger.Info("quote decision", "market", "cNGN-USDC", "price", 0.00073, "ok", true, "api", "https://api.numofx.com/book?symbol=cNGN-USDC")
 	out := buf.String()
-	for _, want := range []string{"market=cNGN-USDC", "price=0.00073", "ok=true", "api=\"https://api.numofx.com/v1/book?symbol=cNGN-USDC\""} {
+	for _, want := range []string{"market=cNGN-USDC", "price=0.00073", "ok=true", "api=\"https://api.numofx.com/book?symbol=cNGN-USDC\""} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log output lacks %q:\n%s", want, out)
 		}

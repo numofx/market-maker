@@ -3,7 +3,7 @@
 Repoint the existing `market-maker` Railway service from its broken config (Base **Sepolia** +
 the abandoned `0xC7bE60` key + spot-only, every order 400s) to **quote the live SEP-16
 deliverable FX future on Base mainnet**. The MM already supports FX futures (APR30-2026 is a
-built-in intended symbol) and resolves market specs dynamically from `/v1/markets`, so this is a
+built-in intended symbol) and resolves market specs dynamically from `/markets`, so this is a
 config + funded-subaccount job, not a code change — with one caveat on pricing (§4).
 
 Live addresses (Base 8453): matching `0x9E90A9cD13d859Bd6a08168082FB1F6F7405F191`, trade
