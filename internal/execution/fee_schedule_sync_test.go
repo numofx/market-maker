@@ -4,11 +4,14 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
 
 	"github.com/numofx/market-maker/internal/config"
 	"github.com/numofx/market-maker/internal/exchange"
 	"github.com/numofx/market-maker/internal/metrics"
+	"github.com/numofx/market-maker/internal/state"
+	"github.com/numofx/market-maker/internal/strategy"
 )
 
 // feeClient serves a taker fee the test controls and records cancellations, so the assertions are
@@ -106,5 +109,49 @@ func TestNoScheduleAtAllStopsTheCycle(t *testing.T) {
 	}
 	if len(client.cancelled) != 0 {
 		t.Fatalf("cancelled %v, want nothing when the schedule is simply unknown", client.cancelled)
+	}
+}
+
+// scheduleBoundClient derives the required bound from the spec it is handed, as the real client does, so the
+// test can see which schedule the syncer judged an order against.
+type scheduleBoundClient struct{ feeClient }
+
+func (c *scheduleBoundClient) RequiredWorstFee(spec exchange.MarketSpec, _ float64) (string, error) {
+	return strconv.Itoa(spec.TakerFeeBps * 1000), nil
+}
+
+// Orders signed after a schedule change must not read as stale. The syncer used to keep the startup schedule
+// after a cut, so spot and both futures makers replaced their whole ladder every cycle for four days.
+func TestAScheduleChangeReachesTheOrdersTheSyncerJudges(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		startBps, venueBps int
+	}{
+		{"cut", 25, 15},
+		{"rise", 25, 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &scheduleBoundClient{feeClient{takerFeeBps: tc.venueBps}}
+			bot := NewBot(config.Config{MarketSymbol: "USDCcNGN-SPOT", CancelStaleOrderThreshold: 20}, client,
+				exchange.MarketSpec{Symbol: "USDCcNGN-SPOT", TakerFeeBps: tc.startBps}, metrics.New(),
+				slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+			if err := bot.syncFeeSchedule(context.Background()); err != nil {
+				t.Fatalf("syncFeeSchedule: %v", err)
+			}
+			client.cancelled = nil
+
+			// Signed by the client under the schedule the venue serves now.
+			signed := restingOrder("1", exchange.SideBuy, false, strconv.Itoa(tc.venueBps*1000))
+			quotes := strategy.Result{Bid: &strategy.Quote{Side: exchange.SideBuy, Price: signed.Price, Size: signed.Size}}
+			ids := map[exchange.Side][]Identity{exchange.SideBuy: {{OrderID: "next", Nonce: "2"}}}
+			if _, err := bot.syncer.Sync(context.Background(), state.Snapshot{
+				Market: "USDCcNGN-SPOT", OpenOrders: []exchange.Order{signed},
+			}, quotes, ids); err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if len(client.cancelled) != 0 {
+				t.Fatalf("cancelled %v: an order signed under the current schedule was replaced", client.cancelled)
+			}
+		})
 	}
 }
