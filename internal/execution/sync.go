@@ -486,7 +486,7 @@ func evaluateCancel(current *exchange.Order, target *strategy.Quote, opposite *s
 //
 // It exists because it could not be. On 2026-09-11 a quantum floor was added to stop the ladder
 // replacing itself over differences the venue cannot express, and it cut the churn by 16% rather
-// than the expected ~92%. Running the same function on the numbers read off /v1/book and the
+// than the expected ~92%. Running the same function on the numbers read off /book and the
 // place-order logs said "keep"; production said "replace". The decision inputs were never logged,
 // so the gap could only be guessed at -- twice, wrongly.
 //

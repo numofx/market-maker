@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// spotSpec is the spot market as /v1/markets reports it once fees are live: a 25 bps taker
+// spotSpec is the spot market as /markets reports it once fees are live: a 25 bps taker
 // schedule, published by markets-service rather than configured here.
 func spotSpec() MarketSpec {
 	return MarketSpec{Symbol: "USDCcNGN-SPOT", TakerFeeBps: 25}

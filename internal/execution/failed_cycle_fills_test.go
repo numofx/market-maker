@@ -15,7 +15,7 @@ import (
 )
 
 // The perp bot on 2026-10-01..05 (task 890da33b) counted 4,382 fills against 11 real ones, through 883
-// failed placements (POST /v1/orders 503). A failing cycle returns before saving its snapshot, so every
+// failed placements (POST /orders 503). A failing cycle returns before saving its snapshot, so every
 // cycle of a failing streak compared against the last good one -- in which a quote cancelled early in the
 // streak still rested -- with that cancel long since drained, and counted it again, once per cycle.
 func TestOrdersCancelledInAFailedCycleAreNotFills(t *testing.T) {
@@ -50,7 +50,7 @@ func TestOrdersCancelledInAFailedCycleAreNotFills(t *testing.T) {
 
 	// the market moves: the bot cancels both quotes to replace them, and the venue refuses the placement
 	client.book = exchange.Book{Bids: []exchange.BookLevel{{Price: 1.09}}, Asks: []exchange.BookLevel{{Price: 1.11}}}
-	client.placeErr = errors.New("POST /v1/orders returned 503")
+	client.placeErr = errors.New("POST /orders returned 503")
 	cancelledBefore := len(client.cancelled)
 	if err := bot.RunCycle(ctx); err == nil {
 		t.Fatal("the cycle must fail on the refused placement")

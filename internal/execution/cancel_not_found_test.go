@@ -23,7 +23,7 @@ type goneClient struct {
 
 func (g *goneClient) CancelOrder(ctx context.Context, orderID string, reason string) error {
 	if g.gone[orderID] {
-		return fmt.Errorf("%w: POST /v1/orders/cancel: 404", exchange.ErrOrderNotFound)
+		return fmt.Errorf("%w: POST /orders/cancel: 404", exchange.ErrOrderNotFound)
 	}
 	return g.mockClient.CancelOrder(ctx, orderID, reason)
 }
@@ -91,5 +91,5 @@ func TestOtherCancelErrorsStillAbortTheCycle(t *testing.T) {
 type failingCancelClient struct{ mockClient }
 
 func (f *failingCancelClient) CancelOrder(context.Context, string, string) error {
-	return fmt.Errorf("POST /v1/orders/cancel: 500 failed to cancel order")
+	return fmt.Errorf("POST /orders/cancel: 500 failed to cancel order")
 }
