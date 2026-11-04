@@ -17,7 +17,7 @@ import (
 )
 
 // cNGN options on MarginEngine v2 (exchange risk-core deploy-cngn-options-v2.s.sol). One OptionAsset per expiry; each
-// strike and side is its own market on /v1/markets (contract_type "option", with an `option` block).
+// strike and side is its own market on /markets (contract_type "option", with an `option` block).
 
 // OptionTerms is an option market's contract: strike, side, expiry and where its vol comes from.
 type OptionTerms struct {

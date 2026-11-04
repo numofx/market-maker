@@ -123,7 +123,7 @@ type OptionSnapshot struct {
 	PortfolioDelta float64
 }
 
-// PerpSnapshot is one cycle's view of the perp, from /v1/markets. Prices are USDC per cNGN.
+// PerpSnapshot is one cycle's view of the perp, from /markets. Prices are USDC per cNGN.
 type PerpSnapshot struct {
 	// Reference is other traders' two-sided book mid clamped to IndexPrice +/- the basis band, or
 	// the index when the book is not two-sided. ReferenceSource says which ("book", "book_clamped",

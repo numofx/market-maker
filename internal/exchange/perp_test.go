@@ -42,7 +42,7 @@ func TestMarketKind(t *testing.T) {
 	}
 }
 
-// perpRow is a /v1/markets perp row under one presentation. The engine fields (mark_price,
+// perpRow is a /markets perp row under one presentation. The engine fields (mark_price,
 // index_price) are included only when withEngine is set, so both read paths are covered.
 func perpRow(spec, base, quote, markUI, indexUI string, withEngine bool) map[string]any {
 	perp := map[string]any{

@@ -47,9 +47,9 @@ func TestCancelAllWithResultsReportsEachOrderAndOnlyTouchesTheRequestedSide(t *t
 			{ID: "ask-ok", Side: exchange.SideSell},
 		}},
 		errs: map[string]error{
-			"bid-gone":     errors.New(`POST /v1/orders/cancel returned 404: {"error":"active order not found"}`),
+			"bid-gone":     errors.New(`POST /orders/cancel returned 404: {"error":"active order not found"}`),
 			"bid-settling": fmt.Errorf("%w: lookup", exchange.ErrOrderNotFound),
-			"bid-broken":   errors.New("POST /v1/orders/cancel returned 500: boom"),
+			"bid-broken":   errors.New("POST /orders/cancel returned 500: boom"),
 		},
 	}
 	syncer := NewSyncer(client, exchange.MarketSpec{Symbol: "USDCcNGN-SPOT"}, config.Config{}, metrics.New(), quietLogger())
