@@ -115,7 +115,7 @@ func TestPerpPriceFromVenuePrefersTheEngineFieldAndConvertsTheUIField(t *testing
 	}
 }
 
-// spotVenue serves /v1/markets, /v1/book and /v1/trades for USDCcNGN-SPOT under one presentation,
+// spotVenue serves /markets, /book and /trades for USDCcNGN-SPOT under one presentation,
 // with the engine fields markets-service carries on every row regardless of it.
 func spotVenue(t *testing.T, spec, base, quote string) *httptest.Server {
 	t.Helper()
@@ -128,21 +128,21 @@ func spotVenue(t *testing.T, spec, base, quote string) *httptest.Server {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/v1/markets"):
+		case strings.HasSuffix(r.URL.Path, "/markets"):
 			_ = json.NewEncoder(w).Encode([]map[string]any{{
 				"market": "USDCcNGN-SPOT", "contract_type": "spot",
 				"base_asset_symbol": base, "quote_asset_symbol": quote,
 				"asset_address": "0x9d806fd040a719d27a8e5e77dc5ae0ed1e089493", "sub_id": "0",
 				"tick_size": "0.000000000000000001", "order_entry_spec": spec, "taker_fee_bps": 25,
 			}})
-		case strings.HasSuffix(r.URL.Path, "/v1/book"):
+		case strings.HasSuffix(r.URL.Path, "/book"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bids": []map[string]any{{"order_id": "b1", "side": "buy", "limit_price": "0.000728", "desired_amount": "68700",
 					"spot_contract": map[string]any{"spec": spec, "ui_intent": uiBid}}},
 				"asks": []map[string]any{{"order_id": "a1", "side": "sell", "limit_price": "0.000735", "desired_amount": "27206",
 					"spot_contract": map[string]any{"spec": spec, "ui_intent": uiAsk}}},
 			})
-		case strings.HasSuffix(r.URL.Path, "/v1/trades"):
+		case strings.HasSuffix(r.URL.Path, "/trades"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"trades": []map[string]any{{
 				"trade_id": 391, "price": "0.00073500753010437", "size": "56476", "aggressor_side": "buy",
 				"created_at":    "2026-10-07T10:01:45.327555Z",

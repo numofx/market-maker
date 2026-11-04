@@ -119,7 +119,7 @@ type Order struct {
 	Expiry int64 `json:"expiry"`
 }
 
-// MarketKind is what a market is, from /v1/markets: it decides what a size is and what backs a
+// MarketKind is what a market is, from /markets: it decides what a size is and what backs a
 // quote.
 type MarketKind string
 
@@ -137,7 +137,7 @@ const (
 	MarketKindFuture MarketKind = "future"
 )
 
-// marketKind classifies a /v1/markets row. The order entry spec is the venue's own statement of
+// marketKind classifies a /markets row. The order entry spec is the venue's own statement of
 // the market, under either presentation (see Orientation); the symbol and contract type are kept
 // as a fallback for a markets-service that omits it.
 func marketKind(symbol, contractType, orderEntrySpec string) MarketKind {
@@ -151,7 +151,7 @@ func marketKind(symbol, contractType, orderEntrySpec string) MarketKind {
 	}
 }
 
-// PerpState is the perp's live chain state as /v1/markets serves it (the `perp` object), refreshed
+// PerpState is the perp's live chain state as /markets serves it (the `perp` object), refreshed
 // with the rest of the market schedule. Prices are the engine's: USDC per cNGN, whichever
 // presentation the venue served them under (see perpPriceFromVenue).
 type PerpState struct {
@@ -196,12 +196,12 @@ type MarketSpec struct {
 	Orientation Orientation
 	// Perp is set for a perp market with a readable `perp` object; nil otherwise.
 	Perp *PerpState
-	// Symbol is the market's canonical identifier: the `market` /v1/markets lists it under. It is
+	// Symbol is the market's canonical identifier: the `market` /markets lists it under. It is
 	// what every order id, log line and comparison downstream uses, whatever the operator wrote in
 	// MM_MARKET_SYMBOL.
 	Symbol string
 	// Aliases are the other identifiers the venue accepts for this market: its `aliases` from
-	// /v1/markets, or, for a listing without them, the bot's own fallback table (marketnames). An
+	// /markets, or, for a listing without them, the bot's own fallback table (marketnames). An
 	// order id tagged with any of them is this bot's.
 	Aliases []string
 	// BaseAsset and QuoteAsset are the engine's: cNGN and USDC on the cNGN markets, whatever order
@@ -216,14 +216,14 @@ type MarketSpec struct {
 	MinSize        float64
 	OrderEntrySpec string
 	// TakerFeeBps is the venue's taker fee for this market, in basis points of the quote
-	// notional, exactly as /v1/markets reports it. It is never configured here: the matcher
+	// notional, exactly as /markets reports it. It is never configured here: the matcher
 	// charges what markets-service's instrument registry says, so a copy in this repo would be a
 	// second source of truth that goes stale the first time the venue's changes.
 	//
 	// It exists so the bot can sign a worstFee that covers the charge. Zero means the market
 	// reported no schedule, and the bot falls back to MM_WORST_FEE.
 	TakerFeeBps int
-	// ExpiryTimestamp is the market's expiry (unix seconds) from /v1/markets;
+	// ExpiryTimestamp is the market's expiry (unix seconds) from /markets;
 	// zero for spot / perpetual markets.
 	ExpiryTimestamp int64
 	// MarginManager is the manager the venue lists for the market (the MarginEngine for the cNGN
@@ -390,7 +390,7 @@ type ClientConfig struct {
 	SubaccountID       string
 	RecipientID        string
 	WorstFee           string
-	// MarketRefreshSeconds bounds how stale the cached /v1/markets schedule may get before the
+	// MarketRefreshSeconds bounds how stale the cached /markets schedule may get before the
 	// next GetMarket refetches it. Unset falls back to defaultRefreshEvery; there is no way to
 	// switch the refresh off, because "never refresh" is the defect this exists to fix.
 	MarketRefreshSeconds int64
@@ -432,7 +432,7 @@ type HTTPClient struct {
 	subAccounts    common.Address
 	quoteAsset     common.Address
 
-	// markets is the fee schedule and instrument metadata as /v1/markets last reported it.
+	// markets is the fee schedule and instrument metadata as /markets last reported it.
 	//
 	// It used to be written once in the constructor and never again, which made the signed
 	// worstFee bound permanently whatever the venue was publishing at boot. A bot that started
@@ -563,7 +563,7 @@ func (c *HTTPClient) Close() {
 	}
 }
 
-// GetMarket returns the market's metadata, refreshing it from /v1/markets when the cached copy
+// GetMarket returns the market's metadata, refreshing it from /markets when the cached copy
 // has aged past refreshEvery.
 //
 // The refresh is what keeps the signed fee bound honest: PlaceLimitOrder derives worstFee from
@@ -758,7 +758,7 @@ func (c *HTTPClient) GetBook(ctx context.Context, market string) (Book, error) {
 		Bids []bookRow `json:"bids"`
 		Asks []bookRow `json:"asks"`
 	}
-	if err := c.get(ctx, "/v1/book", url.Values{"symbol": []string{market}}, &resp); err != nil {
+	if err := c.get(ctx, "/book", url.Values{"symbol": []string{market}}, &resp); err != nil {
 		return Book{}, err
 	}
 	book := Book{
@@ -798,7 +798,7 @@ func (c *HTTPClient) GetTrades(ctx context.Context, market string) ([]Trade, err
 			CreatedAt     string `json:"created_at"`
 		} `json:"trades"`
 	}
-	if err := c.get(ctx, "/v1/trades", url.Values{"symbol": []string{market}, "limit": []string{"20"}}, &resp); err != nil {
+	if err := c.get(ctx, "/trades", url.Values{"symbol": []string{market}, "limit": []string{"20"}}, &resp); err != nil {
 		return nil, err
 	}
 	out := make([]Trade, 0, len(resp.Trades))
@@ -925,7 +925,7 @@ where owner_address = $1 and subaccount_id = $2 and status = 'active'
 // would double-count exactly as it did for futures.
 func PerpBalances(spec MarketSpec, positions map[string]float64) ([]Balance, error) {
 	if spec.Perp == nil || spec.Perp.IndexPrice <= 0 {
-		return nil, fmt.Errorf("perp %s has no index in /v1/markets: cannot value the position", spec.Symbol)
+		return nil, fmt.Errorf("perp %s has no index in /markets: cannot value the position", spec.Symbol)
 	}
 	baseKey, quoteKey := balanceKeys(spec)
 	positionNGN := positions[baseKey]
@@ -1123,7 +1123,7 @@ func (c *HTTPClient) PlaceLimitOrder(ctx context.Context, req PlaceOrderRequest)
 			Market        string `json:"market"`
 		} `json:"order"`
 	}
-	if err := c.post(ctx, "/v1/orders", payload, &resp); err != nil {
+	if err := c.post(ctx, "/orders", payload, &resp); err != nil {
 		return Order{}, err
 	}
 
@@ -1170,7 +1170,7 @@ func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string, reason str
 		"reason":         machineCancelReason(c.cfg.ServiceName, reason),
 		"service":        normalizeCancelToken(c.cfg.ServiceName),
 	}
-	if err := c.post(ctx, "/v1/orders/cancel", body, nil); err != nil {
+	if err := c.post(ctx, "/orders/cancel", body, nil); err != nil {
 		if strings.Contains(err.Error(), "active order not found") {
 			return fmt.Errorf("%w: %w", ErrOrderNotFound, err)
 		}
@@ -1333,7 +1333,7 @@ func (c *HTTPClient) loadMarkets(ctx context.Context) error {
 			PositionCap    string `json:"position_cap"`
 		} `json:"perp"`
 	}
-	if err := c.get(ctx, "/v1/markets", nil, &resp); err != nil {
+	if err := c.get(ctx, "/markets", nil, &resp); err != nil {
 		return err
 	}
 
@@ -1578,7 +1578,7 @@ func (c *HTTPClient) CheckPerpWiring(ctx context.Context, spec MarketSpec) error
 		return nil
 	}
 	if spec.Perp == nil {
-		return fmt.Errorf("%s: /v1/markets serves no perp state", spec.Symbol)
+		return fmt.Errorf("%s: /markets serves no perp state", spec.Symbol)
 	}
 	if !strings.EqualFold(c.tradeModule.Hex(), spec.Perp.TradeModule) {
 		return fmt.Errorf("MM_TRADE_MODULE_ADDRESS %s is not the perp's module %s", c.tradeModule.Hex(), spec.Perp.TradeModule)

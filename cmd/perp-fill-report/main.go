@@ -3,7 +3,7 @@
 //	go run ./cmd/perp-fill-report -from 2026-10-05T14:00:00Z -to now
 //	go run ./cmd/perp-fill-report -from 24h            # the last 24 hours
 //
-// It reads markets-service (/v1/trades) and the chain (SubAccounts BalanceAdjusted events, the index
+// It reads markets-service (/trades) and the chain (SubAccounts BalanceAdjusted events, the index
 // feed's SpotPriceUpdated events, the perp's unrealized cash) and writes nothing anywhere. It shows
 // every fill the bot took part in with the index just before and after, flags fills followed within
 // 60 s by an index move of more than 20 bps against the bot, the account's realized and unrealized
@@ -164,7 +164,7 @@ func readFills(ctx context.Context, api string, from, to time.Time) ([]fill, err
 	var fills []fill
 	before := int64(0)
 	for page := 0; page < 200; page++ {
-		url := fmt.Sprintf("%s/v1/trades?asset_address=%s&sub_id=0&limit=100", strings.TrimRight(api, "/"), defaultPerp)
+		url := fmt.Sprintf("%s/trades?asset_address=%s&sub_id=0&limit=100", strings.TrimRight(api, "/"), defaultPerp)
 		if before > 0 {
 			url += "&before_trade_id=" + strconv.FormatInt(before, 10)
 		}

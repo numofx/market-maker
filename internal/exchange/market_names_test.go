@@ -18,11 +18,11 @@ const (
 	namesPerpAsset = "0xc74efc8b4808803dbcf439e76fde076d56625b8e"
 )
 
-// listingVenue serves one /v1/markets listing: rows as the venue would send them.
+// listingVenue serves one /markets listing: rows as the venue would send them.
 func listingVenue(t *testing.T, rows []map[string]any) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/v1/markets") {
+		if strings.HasSuffix(r.URL.Path, "/markets") {
 			_ = json.NewEncoder(w).Encode(rows)
 			return
 		}
