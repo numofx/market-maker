@@ -12,7 +12,7 @@ import (
 	"github.com/numofx/market-maker/internal/marketnames"
 )
 
-// renamingVenue serves a /v1/markets listing that can be swapped while clients keep calling it:
+// renamingVenue serves a /markets listing that can be swapped while clients keep calling it:
 // the markets-service deploying the rename under a running bot.
 type renamingVenue struct {
 	mu   sync.Mutex

@@ -107,8 +107,8 @@ func (o Orientation) EngineOrder(side Side, uiPrice, uiSize float64) (Side, floa
 	return engineSide, 1 / uiPrice, uiSize * uiPrice, nil
 }
 
-// EngineOrderFromUIIntent decodes a spot_contract row (its spec and ui_intent strings, as /v1/book
-// and /v1/trades carry them) into engine terms, keyed on the ROW's own spec rather than the
+// EngineOrderFromUIIntent decodes a spot_contract row (its spec and ui_intent strings, as /book
+// and /trades carry them) into engine terms, keyed on the ROW's own spec rather than the
 // market's: a tape can hold trades presented under both contracts across a cutover.
 func EngineOrderFromUIIntent(spec, side, price, size string) (Side, float64, float64, error) {
 	uiPrice, err := strconv.ParseFloat(strings.TrimSpace(price), 64)
@@ -132,7 +132,7 @@ func (o Orientation) EngineSymbols(base, quote string) (string, string) {
 	return base, quote
 }
 
-// perpPriceFromVenue is a perp price from /v1/markets in USDC per cNGN. The engine field
+// perpPriceFromVenue is a perp price from /markets in USDC per cNGN. The engine field
 // (mark_price / index_price) is already engine-oriented under both contracts and is preferred; the
 // *_ui field is converted through the market's orientation when the engine field is absent.
 func perpPriceFromVenue(engineRaw, uiRaw string, o Orientation) float64 {

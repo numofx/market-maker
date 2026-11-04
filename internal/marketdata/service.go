@@ -162,14 +162,14 @@ func (l *Loader) Load(ctx context.Context, last state.Snapshot) (state.Snapshot,
 // through the venue's presentation). The venue publishes the index (the rate-picker sources' TWAP)
 // and a mark that is the book mid clamped to index +/- 200bps; the bot follows other traders'
 // two-sided mid inside a tighter band, and the index otherwise. The index is also the snapshot's
-// anchor, so the stale-anchor guard halts the bot when /v1/markets stops refreshing it.
+// anchor, so the stale-anchor guard halts the bot when /markets stops refreshing it.
 func (l *Loader) loadPerp(ctx context.Context, snapshot state.Snapshot) (state.Snapshot, error) {
 	spec, err := l.client.GetMarket(ctx, l.spec.Symbol)
 	if err != nil {
 		return state.Snapshot{}, &LoadError{Stage: "perp_state", Err: fmt.Errorf("get market: %w", err)}
 	}
 	if spec.Perp == nil || spec.Perp.IndexPrice <= 0 {
-		return state.Snapshot{}, &LoadError{Stage: "perp_state", Err: fmt.Errorf("%s has no index in /v1/markets (feeds stale?)", spec.Symbol)}
+		return state.Snapshot{}, &LoadError{Stage: "perp_state", Err: fmt.Errorf("%s has no index in /markets (feeds stale?)", spec.Symbol)}
 	}
 	perp := spec.Perp
 	reference, source := PerpReference(snapshot.BestBid, snapshot.BestAsk, perp.IndexPrice, l.perpMaxBasisBPS)
