@@ -284,6 +284,10 @@ func (b *Bot) syncFeeSchedule(ctx context.Context) error {
 		return nil
 	}
 	b.spec = spec
+	// The syncer judges resting orders against this schedule and the client signs new ones from its own
+	// refreshed copy. If the two differ after a cut, every order just signed reads as below the schedule and
+	// is replaced on every cycle: 2.8M cancels between 2026-10-31 and 2026-11-04.
+	b.syncer.spec = spec
 
 	if spec.TakerFeeBps < was {
 		b.logger.Info(
