@@ -17,6 +17,7 @@ import (
 	"github.com/numofx/market-maker/internal/execution"
 	"github.com/numofx/market-maker/internal/logging"
 	"github.com/numofx/market-maker/internal/metrics"
+	"github.com/numofx/market-maker/internal/rpccount"
 	"github.com/numofx/market-maker/internal/state"
 )
 
@@ -40,6 +41,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Before any client dials: every RPC call this process makes is counted and logged as "rpc_calls" each minute.
+	rpccount.Install(ctx, logger, time.Minute)
 
 	// A nil interface, not a nil *KMSSigner, when the backend is local: the client tests Signer != nil
 	// to decide whether the private keys are in play.
