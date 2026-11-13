@@ -119,7 +119,7 @@ func (c *HTTPClient) callMargin(ctx context.Context, to common.Address, method s
 	if err != nil {
 		return nil, err
 	}
-	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(to, input), nil)
+	output, err := c.chain().CallContract(ctx, ethereumCallMsg(to, input), nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s rpc: %w", method, err)
 	}

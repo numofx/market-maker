@@ -74,7 +74,7 @@ func (c *HTTPClient) OptionInputs(ctx context.Context, spec MarketSpec, block *b
 	if spec.Option == nil {
 		return OptionInputs{}, fmt.Errorf("%s is not an option market", spec.Symbol)
 	}
-	return readOptionInputs(ctx, c.rpc, common.HexToAddress(spec.AssetAddress), *spec.Option, block)
+	return readOptionInputs(ctx, c.chain(), common.HexToAddress(spec.AssetAddress), *spec.Option, block)
 }
 
 // contractCaller is what the option reads need of an ethclient: calls and headers at a block.
@@ -121,7 +121,7 @@ func (c *HTTPClient) EngineOptionMark(ctx context.Context, spec MarketSpec, bala
 	if spec.Option == nil {
 		return 0, 0, fmt.Errorf("%s is not an option market", spec.Symbol)
 	}
-	return readEngineOptionMark(ctx, c.rpc, common.HexToAddress(spec.MarginManager), common.HexToAddress(spec.AssetAddress), *spec.Option, balance, initial, block)
+	return readEngineOptionMark(ctx, c.chain(), common.HexToAddress(spec.MarginManager), common.HexToAddress(spec.AssetAddress), *spec.Option, balance, initial, block)
 }
 
 func readEngineOptionMark(ctx context.Context, rpc contractCaller, engine, option common.Address, terms OptionTerms, balance *big.Int, initial bool, block *big.Int) (float64, float64, error) {
@@ -254,7 +254,7 @@ func (c *HTTPClient) OptionState(ctx context.Context, spec MarketSpec) (OptionSt
 	if !ok {
 		return OptionState{}, fmt.Errorf("invalid subaccount id %q", c.cfg.SubaccountID)
 	}
-	return readOptionState(ctx, c.rpc, common.HexToAddress(spec.MarginManager), common.HexToAddress(spec.AssetAddress), *spec.Option, spec.AmountScale, account)
+	return readOptionState(ctx, c.chain(), common.HexToAddress(spec.MarginManager), common.HexToAddress(spec.AssetAddress), *spec.Option, spec.AmountScale, account)
 }
 
 func readOptionState(ctx context.Context, rpc contractCaller, engine, option common.Address, terms OptionTerms, amountScale string, account *big.Int) (OptionState, error) {

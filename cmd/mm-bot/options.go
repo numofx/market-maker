@@ -47,6 +47,8 @@ func runOptions(ctx context.Context, cfg config.Config, series string, signer ex
 		return 1
 	}
 	nonces := execution.NewNonceAllocator()
+	// Every strike reads the same header, forward, balances and IM surplus each cycle: make each read once.
+	reads := exchange.NewReadCache(optionReadTTL(cfg.PollInterval))
 	deltas := state.NewDeltaBook()
 	mux := http.NewServeMux()
 	var (
@@ -59,7 +61,9 @@ func runOptions(ctx context.Context, cfg config.Config, series string, signer ex
 		strikeCfg.StateFile = cfg.StateFile + "." + listed.Symbol
 		// Ten strikes are ten pools on one small RDS (db.t4g.micro, ~80 connections): two each bounds the process at 20.
 		strikeCfg.DatabaseURL = withPoolMaxConns(cfg.DatabaseURL, optionPoolMaxConns)
-		client, err := exchange.NewHTTPClient(ctx, clientConfig(strikeCfg, listed.Symbol, signer))
+		strikeClientCfg := clientConfig(strikeCfg, listed.Symbol, signer)
+		strikeClientCfg.ReadCache = reads
+		client, err := exchange.NewHTTPClient(ctx, strikeClientCfg)
 		if err != nil {
 			logger.Error("init exchange client", "error", err, "market", listed.Symbol)
 			return 1
@@ -192,6 +196,12 @@ func (o optionBackends) CancelManaged(ctx context.Context, scope control.CancelS
 		}
 	}
 	return out, errors.Join(errs...)
+}
+
+// optionReadTTL is how long the strikes share a read at "latest": long enough to span one cycle's concurrent strikes,
+// at most half the poll interval so the next cycle always reads afresh.
+func optionReadTTL(poll time.Duration) time.Duration {
+	return min(time.Second, poll/2)
 }
 
 // optionPoolMaxConns is each strike's Postgres pool size in options mode.

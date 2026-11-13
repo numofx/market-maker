@@ -414,6 +414,9 @@ type ClientConfig struct {
 	// Signer, when set, is the only key: OwnerPrivateKey/SignerPrivateKey are ignored and the
 	// configured addresses must equal Signer.Address(). See resolveSigner.
 	Signer Signer
+	// ReadCache, when set, shares this client's chain reads with the other clients holding the same cache: options
+	// mode gives every strike one, so reads common to the subaccount are made once a cycle rather than once a strike.
+	ReadCache *ReadCache
 }
 
 type PlaceOrderRequest struct {
@@ -434,6 +437,8 @@ type HTTPClient struct {
 	httpClient *http.Client
 	pg         *pgxpool.Pool
 	rpc        *ethclient.Client
+	// reads is rpc behind the process's ReadCache (ClientConfig.ReadCache), or nil to read rpc directly.
+	reads chainReader
 	// futureSchedule is the MarginEngine future's fixed schedule, read once by FutureState.
 	futureMu       sync.Mutex
 	futureSchedule *futureSchedule
@@ -539,6 +544,9 @@ func NewHTTPClient(ctx context.Context, cfg ClientConfig) (*HTTPClient, error) {
 		markets:      make(map[string]MarketSpec),
 		refreshEvery: refreshInterval(cfg.MarketRefreshSeconds),
 	}
+	if cfg.ReadCache != nil {
+		client.reads = cfg.ReadCache.Wrap(rpc)
+	}
 
 	quoteAsset, err := client.readAddressCall(ctx, client.tradeModule, "quoteAsset", `{"name":"quoteAsset","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]}`)
 	if err != nil {
@@ -563,6 +571,14 @@ func refreshInterval(seconds int64) time.Duration {
 		return defaultRefreshEvery
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// chain is what the client reads the chain through: the shared cache when it has one, else its own connection.
+func (c *HTTPClient) chain() chainReader {
+	if c.reads != nil {
+		return c.reads
+	}
+	return c.rpc
 }
 
 func (c *HTTPClient) Close() {
@@ -699,7 +715,7 @@ func (c *HTTPClient) ValidateMarketAssets(ctx context.Context, spec MarketSpec) 
 	}
 	for i := range checks {
 		address := common.HexToAddress(checks[i].Address)
-		code, err := c.rpc.CodeAt(ctx, address, nil)
+		code, err := c.chain().CodeAt(ctx, address, nil)
 		if err != nil {
 			return checks, fmt.Errorf("check %s code at %s: %w", checks[i].Role, checks[i].Address, err)
 		}
@@ -1576,7 +1592,7 @@ func (c *HTTPClient) readAccountBalances(ctx context.Context) (map[string]float6
 	if err != nil {
 		return nil, nil, err
 	}
-	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(c.subAccounts, input), nil)
+	output, err := c.chain().CallContract(ctx, ethereumCallMsg(c.subAccounts, input), nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("getAccountBalances rpc: %w", err)
 	}
@@ -1674,7 +1690,7 @@ func (c *HTTPClient) subaccountManager(ctx context.Context) (common.Address, err
 	if err != nil {
 		return common.Address{}, err
 	}
-	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(c.subAccounts, input), nil)
+	output, err := c.chain().CallContract(ctx, ethereumCallMsg(c.subAccounts, input), nil)
 	if err != nil {
 		return common.Address{}, fmt.Errorf("SubAccounts.manager rpc: %w", err)
 	}
@@ -1721,7 +1737,7 @@ func (c *HTTPClient) readAddressCall(ctx context.Context, address common.Address
 	if err != nil {
 		return common.Address{}, err
 	}
-	output, err := c.rpc.CallContract(ctx, ethereumCallMsg(address, input), nil)
+	output, err := c.chain().CallContract(ctx, ethereumCallMsg(address, input), nil)
 	if err != nil {
 		c.logRPCCallFailure(ctx, address, method, input, nil, err)
 		return common.Address{}, err
