@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/numofx/market-maker/internal/logging"
 	"github.com/numofx/market-maker/internal/metrics"
 	"github.com/numofx/market-maker/internal/rpccount"
+	"github.com/numofx/market-maker/internal/rpcfallback"
 	"github.com/numofx/market-maker/internal/state"
 )
 
@@ -42,6 +44,11 @@ func main() {
 	defer stop()
 	// Before any client dials: every RPC call this process makes is counted and logged as "rpc_calls" each minute.
 	rpccount.Install(ctx, logger, time.Minute)
+	// After the counter, so it counts both the refused request and its retry, each under its own host.
+	if err := rpcfallback.Install(cfg.RPCURL, strings.TrimSpace(os.Getenv("MM_RPC_FALLBACK_URL"))); err != nil {
+		logger.Error("MM_RPC_FALLBACK_URL", "error", err)
+		os.Exit(1)
+	}
 
 	// A nil interface, not a nil *KMSSigner, when the backend is local: the client tests Signer != nil
 	// to decide whether the private keys are in play.
