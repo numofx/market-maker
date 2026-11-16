@@ -39,7 +39,7 @@ func inputs() Inputs {
 func live(offset int32, at time.Time) Spline {
 	p := params()
 	return Spline{OffsetTicks: offset, HalfSpreadTicks: p.HalfSpreadTicks, BidCurve: 1, AskCurve: 1,
-		MaxSkewTicks: p.MaxSkewTicks, TTL: 3600, UpdatedAt: at, Seq: uint64(at.UnixMilli()), Active: true}
+		MaxSkewTicks: p.MaxSkewTicks, TTL: 3600, UpdatedAt: at, Seq: uint64(at.UnixMilli()), Active: true, Owner: maker}
 }
 
 func TestTheLiveReadsGiveTheForwardsBasisInTicks(t *testing.T) {

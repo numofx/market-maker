@@ -227,6 +227,7 @@ func (c *Chain) Spline(ctx context.Context) (Spline, error) {
 		TTL:                 out[8].(uint32),
 		Seq:                 out[9].(uint64),
 		Active:              out[10].(bool),
+		Owner:               out[11].(common.Address),
 	}, nil
 }
 

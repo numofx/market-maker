@@ -28,6 +28,8 @@ type Maker struct {
 	Params Params
 	Feeds  Feeds
 	Market Market
+	// Owner is the signer, the account's owner: a stored spline written by anyone else is one the book ignores.
+	Owner  common.Address
 	DryRun bool
 	Log    *slog.Logger
 	Now    func() time.Time
@@ -56,6 +58,10 @@ func (m *Maker) Cycle(ctx context.Context) (Decision, error) {
 	// that process owns the spline. A process that has not written yet (lastSent 0) takes over instead.
 	if m.lastSent != 0 && cur.Seq > m.lastSent {
 		return Decision{}, ErrSuperseded
+	}
+	if cur.Active && cur.Owner != m.Owner {
+		// Written before the account changed hands: the book does not quote it, so neither may Decide assume it.
+		cur.Active = false
 	}
 	index, forward, reference, errs := m.Book.Prices(ctx, m.Feeds, m.Market.Expiry)
 	for _, e := range errs {

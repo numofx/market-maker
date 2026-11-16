@@ -37,6 +37,7 @@ func (f *fakeBook) Update(_ context.Context, s Spline) (common.Hash, error) {
 	}
 	f.updates++
 	s.UpdatedAt = time.Unix(int64(s.Seq/1000), 0)
+	s.Owner = maker
 	f.spline = s
 	return common.Hash{1}, nil
 }
@@ -47,10 +48,12 @@ func (f *fakeBook) Cancel(context.Context) (common.Hash, error) {
 	return common.Hash{2}, nil
 }
 
+var maker = common.HexToAddress("0x3a4e")
+
 func newMaker(book *fakeBook, clock *time.Time) *Maker {
 	in := inputs()
 	book.index, book.forward, book.reference = in.Index, in.Forward, in.Reference
-	return &Maker{Book: book, Params: params(), Market: Market{TickSize: tick, LastTradeTime: in.LastTradeTime},
+	return &Maker{Book: book, Params: params(), Market: Market{TickSize: tick, LastTradeTime: in.LastTradeTime}, Owner: maker,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return *clock }}
 }
 
@@ -160,5 +163,23 @@ func TestAHeldDownSplineSaysWhyOnce(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), "reason=reference_unreadable"); n != 1 {
 		t.Fatalf("the reason is logged once at info, got %d:\n%s", n, buf.String())
+	}
+}
+
+// A spline written by the account's previous owner is ignored by the book: the bot re-sends rather than trusting it.
+func TestASplineFromAPreviousOwnerIsTreatedAsDown(t *testing.T) {
+	clock := now
+	book := &fakeBook{}
+	m := newMaker(book, &clock)
+	if _, err := m.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(5 * time.Second)
+	book.spline.Owner = common.HexToAddress("0x01d")
+	if d, _ := m.Cycle(context.Background()); d.Action != ActionUpdate || d.Reason != "down" {
+		t.Fatalf("a spline the book ignores must be re-sent: %+v", d)
+	}
+	if book.spline.Owner != maker {
+		t.Fatal("re-sent under the current owner")
 	}
 }

@@ -81,7 +81,8 @@ func run(log *slog.Logger) int {
 		log.Error("preflight refused", "error", err)
 		return 1
 	}
-	maker := &onchainbook.Maker{Book: chain, Params: cfg.params, Feeds: feeds, Market: market, DryRun: cfg.dryRun, Log: log}
+	maker := &onchainbook.Maker{Book: chain, Params: cfg.params, Feeds: feeds, Market: market, Owner: signer.Address(),
+		DryRun: cfg.dryRun, Log: log}
 
 	ticker := time.NewTicker(cfg.poll)
 	defer ticker.Stop()

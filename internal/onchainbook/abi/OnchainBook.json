@@ -293,6 +293,11 @@
         "name": "active",
         "type": "bool",
         "internalType": "bool"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"

@@ -16,6 +16,8 @@ import (
 	"math"
 	"math/big"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // Region is one step of a curve: Lots at OffsetTicks from the side's best level (OnchainBook.Region).
@@ -37,9 +39,12 @@ type Spline struct {
 	TTL                 uint32
 	Seq                 uint64
 	Active              bool
+	// Owner is the account owner that wrote it: after a transfer of the account the book stops quoting it.
+	Owner common.Address
 }
 
-// Live is whether the book would quote it at now: active and within its ttl.
+// Live is whether the book would quote it at now: active and within its ttl. The book also requires the account's
+// current owner to be Owner; Maker.Cycle marks a spline written by another owner as inactive before deciding.
 func (s Spline) Live(now time.Time) bool {
 	return s.Active && !now.After(s.UpdatedAt.Add(time.Duration(s.TTL)*time.Second))
 }
