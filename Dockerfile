@@ -19,6 +19,8 @@ ARG GIT_SHA=unknown
 
 # CGO off and a static build so the result runs on distroless/static.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mm-bot ./cmd/mm-bot
+# The OnchainBook maker (docs/book-maker.md), in the same image: its service overrides the entrypoint.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/book-maker ./cmd/book-maker
 
 # --------------------------------------------------------------------- runtime
 
@@ -29,6 +31,7 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.source="https://github.com/numofx/market-maker"
 
 COPY --from=build /out/mm-bot /app/mm-bot
+COPY --from=build /out/book-maker /app/book-maker
 
 # MM_STATE_FILE defaults under /tmp, which is writable and ephemeral on Fargate.
 # The bot rebuilds its state from the book on startup, so losing it costs a cycle,

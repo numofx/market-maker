@@ -47,6 +47,13 @@ refresh of 30 minutes plus repricing, that is a small fraction of the EURC v3 re
    call with 0. Transferring the account NFT drops the allowances.
 5. Fund the owner with ETH for gas, and add it to `GAS_WATCH` and `check_signer_balance.py` the same day.
 
+## Where it runs
+
+On ECS as `market-maker-book` (exchange `infra/aws/market-maker-book.tf`), from the same image as the other makers
+(`/app/book-maker`, the entrypoint overridden), with the same `mm_private_key` and `mm_rpc_url` secrets. Not on the ops
+box: the box may read the maker key only for the length of one apply (`ops_box_mm_key_grant`). Its stop timeout leaves
+SIGTERM time to cancel the spline.
+
 ## Configuration
 
 | Env | Default | |
