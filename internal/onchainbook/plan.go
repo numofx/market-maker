@@ -1,0 +1,219 @@
+// Package onchainbook quotes EURC-30NOV26 on risk-core's OnchainBook (exchange repo,
+// contracts/risk-core/src/periphery/OnchainBook.sol; spec docs/eurc-usdc-futures-spec.md, Part B).
+//
+// The book does not hold orders. A maker registers a curve shape once (regions of lots at tick offsets
+// from the best level, setCurve) and then keeps one spline per market: a mid as an offset in ticks from
+// the index the book reads at each take, a half-spread, and on-chain skew and refill. Repricing is one
+// updateSplines transaction that moves the offset; the book prices every take against the index of that
+// moment, so the offset only has to track the forward's basis to the index, which moves slowly.
+//
+// This file is the decision, with no chain access: given what was read, what should the spline be and
+// is a transaction worth sending.
+package onchainbook
+
+import (
+	"fmt"
+	"math"
+	"math/big"
+	"time"
+)
+
+// Region is one step of a curve: Lots at OffsetTicks from the side's best level (OnchainBook.Region).
+type Region struct {
+	Lots        uint32
+	OffsetTicks uint32
+}
+
+// Spline mirrors OnchainBook.Spline as read from splines(marketId, accountId).
+type Spline struct {
+	OffsetTicks         int32
+	HalfSpreadTicks     uint32
+	BidCurve            uint16
+	AskCurve            uint16
+	SkewTicksPerLot     uint32
+	MaxSkewTicks        uint32
+	RefillLotsPerSecond uint32
+	UpdatedAt           time.Time
+	TTL                 uint32
+	Seq                 uint64
+	Active              bool
+}
+
+// Live is whether the book would quote it at now: active and within its ttl.
+func (s Spline) Live(now time.Time) bool {
+	return s.Active && !now.After(s.UpdatedAt.Add(time.Duration(s.TTL)*time.Second))
+}
+
+// Params is the operator's configuration of the spline.
+type Params struct {
+	HalfSpreadTicks     uint32
+	BidCurve            uint16
+	AskCurve            uint16
+	SkewTicksPerLot     uint32
+	MaxSkewTicks        uint32
+	RefillLotsPerSecond uint32
+	TTL                 time.Duration
+	// RepriceTicks is the smallest move of the target offset worth a transaction.
+	RepriceTicks int64
+	// RefreshAfter re-sends an unchanged spline once it is this old, well inside TTL, so a slow block
+	// never lets it lapse.
+	RefreshAfter time.Duration
+	// CutoffBeforeLastTrade takes the spline down this long before the series' last trade.
+	CutoffBeforeLastTrade time.Duration
+	// MaxDivergenceBPS cancels when the Data Streams index and the Chainlink push reference disagree by
+	// more: the index is DEX-weighted and the book cannot tell a pool skew from a move (spec B6, B14a).
+	MaxDivergenceBPS float64
+}
+
+func (p Params) Validate() error {
+	switch {
+	case p.TTL < 10*time.Second:
+		return fmt.Errorf("ttl %s: at least 10s", p.TTL)
+	case p.RefreshAfter <= 0 || p.RefreshAfter >= p.TTL:
+		return fmt.Errorf("refresh after %s must be positive and under the ttl %s", p.RefreshAfter, p.TTL)
+	case p.RepriceTicks <= 0:
+		return fmt.Errorf("reprice ticks %d must be positive", p.RepriceTicks)
+	case p.MaxDivergenceBPS <= 0:
+		return fmt.Errorf("max divergence %v bps must be positive", p.MaxDivergenceBPS)
+	case p.CutoffBeforeLastTrade < 0:
+		return fmt.Errorf("cutoff %s must not be negative", p.CutoffBeforeLastTrade)
+	case p.BidCurve == 0 || p.AskCurve == 0:
+		return fmt.Errorf("curve ids must be set")
+	}
+	return nil
+}
+
+// Inputs is one cycle's reads. A nil price is one that could not be read: the feeds revert when stale.
+type Inputs struct {
+	Now           time.Time
+	Index         *big.Int // EurcIndexFeed.getSpot, USDC per EURC, 18 dp
+	Forward       *big.Int // the series' forward (LyraForwardFeed.getForwardPrice(expiry)), 18 dp
+	Reference     *big.Int // market 2's Chainlink push feed, USD per EURC, 18 dp
+	TickSize      *big.Int // the book market's tick, 18 dp
+	LastTradeTime time.Time
+}
+
+type Action int
+
+const (
+	ActionNone Action = iota
+	ActionUpdate
+	ActionCancel
+)
+
+func (a Action) String() string {
+	return [...]string{"none", "update", "cancel"}[a]
+}
+
+// Decision is what to do this cycle, and why.
+type Decision struct {
+	Action Action
+	Reason string
+	Target Spline // for ActionUpdate: the spline to send, Seq included
+}
+
+// Decide is the whole policy. Every way it cannot price safely takes the spline down (cancel when it is
+// live, nothing when it is already down); otherwise it sends an update only when the target moved by
+// RepriceTicks, the configuration changed, the spline is down, or it is due a refresh.
+func Decide(p Params, in Inputs, cur Spline) Decision {
+	down := func(reason string) Decision {
+		if cur.Active {
+			return Decision{Action: ActionCancel, Reason: reason}
+		}
+		return Decision{Action: ActionNone, Reason: reason}
+	}
+	if !in.Now.Before(in.LastTradeTime.Add(-p.CutoffBeforeLastTrade)) {
+		return down("cutoff_before_last_trade")
+	}
+	if in.Index == nil || in.Index.Sign() <= 0 {
+		return down("index_unreadable")
+	}
+	if in.Forward == nil || in.Forward.Sign() <= 0 {
+		return down("forward_unreadable")
+	}
+	if in.Reference == nil || in.Reference.Sign() <= 0 {
+		return down("reference_unreadable")
+	}
+	if divergenceBPS(in.Index, in.Reference) > p.MaxDivergenceBPS {
+		return down("index_reference_divergence")
+	}
+	offset, ok := OffsetTicks(in.Forward, in.Index, in.TickSize)
+	if !ok {
+		return down("offset_out_of_range")
+	}
+
+	target := Spline{
+		OffsetTicks:         offset,
+		HalfSpreadTicks:     p.HalfSpreadTicks,
+		BidCurve:            p.BidCurve,
+		AskCurve:            p.AskCurve,
+		SkewTicksPerLot:     p.SkewTicksPerLot,
+		MaxSkewTicks:        p.MaxSkewTicks,
+		RefillLotsPerSecond: p.RefillLotsPerSecond,
+		TTL:                 uint32(p.TTL / time.Second),
+		Seq:                 NextSeq(cur.Seq, in.Now),
+		Active:              true,
+	}
+	reason := ""
+	switch {
+	case !cur.Live(in.Now):
+		reason = "down"
+	case cur.HalfSpreadTicks != target.HalfSpreadTicks || cur.BidCurve != target.BidCurve ||
+		cur.AskCurve != target.AskCurve || cur.SkewTicksPerLot != target.SkewTicksPerLot ||
+		cur.MaxSkewTicks != target.MaxSkewTicks || cur.RefillLotsPerSecond != target.RefillLotsPerSecond ||
+		cur.TTL != target.TTL:
+		reason = "config_changed"
+	case abs64(int64(target.OffsetTicks)-int64(cur.OffsetTicks)) >= p.RepriceTicks:
+		reason = "repriced"
+	case in.Now.Sub(cur.UpdatedAt) >= p.RefreshAfter:
+		reason = "refresh"
+	default:
+		return Decision{Action: ActionNone, Reason: "unchanged"}
+	}
+	return Decision{Action: ActionUpdate, Reason: reason, Target: target}
+}
+
+// OffsetTicks is round((forward - index) / tick), the mid's distance from the index, if it fits an int32.
+func OffsetTicks(forward, index, tick *big.Int) (int32, bool) {
+	if tick == nil || tick.Sign() <= 0 {
+		return 0, false
+	}
+	diff := new(big.Int).Sub(forward, index)
+	q, r := new(big.Int).QuoRem(diff, tick, new(big.Int))
+	// round half away from zero
+	if new(big.Int).Mul(new(big.Int).Abs(r), big.NewInt(2)).Cmp(tick) >= 0 {
+		if diff.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	if !q.IsInt64() || q.Int64() > math.MaxInt32 || q.Int64() < math.MinInt32 {
+		return 0, false
+	}
+	return int32(q.Int64()), true
+}
+
+// NextSeq is strictly above the stored seq and at least the wall clock in milliseconds, so a newer
+// process's updates supersede an older one's without reading first: the book refuses a seq not above
+// the stored one (OB_StaleSeq), so a draining container cannot overwrite its successor.
+func NextSeq(stored uint64, now time.Time) uint64 {
+	ms := uint64(now.UnixMilli())
+	if stored+1 > ms {
+		return stored + 1
+	}
+	return ms
+}
+
+func divergenceBPS(a, b *big.Int) float64 {
+	af, _ := new(big.Float).SetInt(a).Float64()
+	bf, _ := new(big.Float).SetInt(b).Float64()
+	return math.Abs(af/bf-1) * 10_000
+}
+
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}

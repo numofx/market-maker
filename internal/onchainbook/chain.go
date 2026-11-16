@@ -1,0 +1,487 @@
+package onchainbook
+
+import (
+	"bytes"
+	"context"
+	"embed"
+	"errors"
+	"fmt"
+	"math/big"
+	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
+
+	"github.com/numofx/market-maker/internal/exchange"
+)
+
+// The ABIs are trimmed copies of risk-core's compiled artifacts (exchange repo, contracts/risk-core/out), the
+// functions this package calls plus every custom error, so a revert is reported by name. Regenerate with
+// jq from the artifacts; chain_test.go pins each selector to `cast sig`.
+//
+//go:embed abi/*.json
+var abiFiles embed.FS
+
+type abis struct {
+	book, subAccounts, future, engine, forward, spot abi.ABI
+}
+
+func loadABIs() (abis, error) {
+	var a abis
+	for name, dst := range map[string]*abi.ABI{
+		"OnchainBook": &a.book, "SubAccounts": &a.subAccounts, "FutureAsset": &a.future,
+		"MarginEngine": &a.engine, "ForwardFeed": &a.forward, "SpotFeed": &a.spot,
+	} {
+		raw, err := abiFiles.ReadFile("abi/" + name + ".json")
+		if err != nil {
+			return a, err
+		}
+		parsed, err := abi.JSON(bytes.NewReader(raw))
+		if err != nil {
+			return a, fmt.Errorf("%s abi: %w", name, err)
+		}
+		*dst = parsed
+	}
+	return a, nil
+}
+
+// Market is OnchainBook.markets(id), the fields this package uses.
+type Market struct {
+	Future        common.Address
+	Engine        common.Address
+	Expiry        uint64
+	LastTradeTime time.Time
+	TickSize      *big.Int
+	LotSize       *big.Int
+	MaxTTL        uint32
+	Enabled       bool
+}
+
+// Feeds are the three prices a cycle reads, resolved from the chain at startup.
+type Feeds struct {
+	Index     common.Address // the future's index (EurcIndexFeed): what the book's band and peg read
+	Forward   common.Address // the future's forward feed: the fair the forward publisher signs
+	Reference common.Address // the reference market's spot feed on the engine (Chainlink push)
+}
+
+type Chain struct {
+	eth         *ethclient.Client
+	chainID     *big.Int
+	signer      exchange.Signer
+	a           abis
+	Book        common.Address
+	SubAccounts common.Address
+	MarketID    *big.Int
+	AccountID   *big.Int
+	// ReceiptTimeout bounds the wait for each transaction.
+	ReceiptTimeout time.Duration
+}
+
+func NewChain(ctx context.Context, url string, signer exchange.Signer, book, subAccounts common.Address, marketID, accountID uint64) (*Chain, error) {
+	a, err := loadABIs()
+	if err != nil {
+		return nil, err
+	}
+	eth, err := ethclient.DialContext(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	chainID, err := eth.ChainID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("chain id: %w", err)
+	}
+	return &Chain{eth: eth, chainID: chainID, signer: signer, a: a, Book: book, SubAccounts: subAccounts,
+		MarketID: new(big.Int).SetUint64(marketID), AccountID: new(big.Int).SetUint64(accountID),
+		ReceiptTimeout: 60 * time.Second}, nil
+}
+
+func (c *Chain) ChainID() *big.Int { return c.chainID }
+
+// BookSubAccounts is the SubAccounts the book was deployed on: the account checks read the same contract.
+func BookSubAccounts(ctx context.Context, url string, book common.Address) (common.Address, error) {
+	a, err := loadABIs()
+	if err != nil {
+		return common.Address{}, err
+	}
+	eth, err := ethclient.DialContext(ctx, url)
+	if err != nil {
+		return common.Address{}, err
+	}
+	defer eth.Close()
+	data, _ := a.book.Pack("subAccounts")
+	out, err := eth.CallContract(ctx, ethereum.CallMsg{To: &book, Data: data}, nil)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("book.subAccounts: %w", err)
+	}
+	res, err := a.book.Unpack("subAccounts", out)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("book.subAccounts at %s (is it the book?): %w", book.Hex(), err)
+	}
+	return res[0].(common.Address), nil
+}
+
+func (c *Chain) Close() { c.eth.Close() }
+
+func (c *Chain) call(ctx context.Context, to common.Address, a abi.ABI, method string, args ...any) ([]any, error) {
+	data, err := a.Pack(method, args...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.eth.CallContract(ctx, ethereum.CallMsg{To: &to, Data: data}, nil)
+	if err != nil {
+		return nil, c.revertError(err)
+	}
+	return a.Unpack(method, out)
+}
+
+// ---------------------------------------------------------------------------------------------
+// reads
+// ---------------------------------------------------------------------------------------------
+
+func (c *Chain) Market(ctx context.Context) (Market, error) {
+	out, err := c.call(ctx, c.Book, c.a.book, "markets", c.MarketID)
+	if err != nil {
+		return Market{}, fmt.Errorf("markets(%s): %w", c.MarketID, err)
+	}
+	m := Market{
+		Future:        out[0].(common.Address),
+		Engine:        out[1].(common.Address),
+		Expiry:        out[3].(uint64),
+		LastTradeTime: time.Unix(int64(out[4].(uint64)), 0),
+		TickSize:      out[6].(*big.Int),
+		LotSize:       out[7].(*big.Int),
+		MaxTTL:        out[10].(uint32),
+		Enabled:       out[12].(bool),
+	}
+	if m.Future == (common.Address{}) {
+		return Market{}, fmt.Errorf("the book has no market %s", c.MarketID)
+	}
+	return m, nil
+}
+
+func (c *Chain) ResolveFeeds(ctx context.Context, m Market, referenceMarketID uint64) (Feeds, error) {
+	var f Feeds
+	out, err := c.call(ctx, m.Future, c.a.future, "indexFeed")
+	if err != nil {
+		return f, fmt.Errorf("future.indexFeed: %w", err)
+	}
+	f.Index = out[0].(common.Address)
+	if out, err = c.call(ctx, m.Future, c.a.future, "forwardFeed"); err != nil {
+		return f, fmt.Errorf("future.forwardFeed: %w", err)
+	}
+	f.Forward = out[0].(common.Address)
+	if out, err = c.call(ctx, m.Engine, c.a.engine, "getMarketFeeds", new(big.Int).SetUint64(referenceMarketID)); err != nil {
+		return f, fmt.Errorf("engine.getMarketFeeds(%d): %w", referenceMarketID, err)
+	}
+	f.Reference = out[0].(common.Address)
+	if f.Index == (common.Address{}) || f.Forward == (common.Address{}) || f.Reference == (common.Address{}) {
+		return f, fmt.Errorf("a feed is unset: %+v", f)
+	}
+	if f.Reference == f.Index {
+		return f, errors.New("the reference feed is the index itself: the divergence guard would compare it with itself")
+	}
+	return f, nil
+}
+
+// Prices reads index, forward and reference. A feed that reverts (stale) or fails to answer is nil, with the
+// error returned for the log; Decide takes the spline down on any nil.
+func (c *Chain) Prices(ctx context.Context, f Feeds, expiry uint64) (index, forward, reference *big.Int, errs []error) {
+	spot := func(feed common.Address, what string) *big.Int {
+		out, err := c.call(ctx, feed, c.a.spot, "getSpot")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", what, err))
+			return nil
+		}
+		return out[0].(*big.Int)
+	}
+	index = spot(f.Index, "index")
+	reference = spot(f.Reference, "reference")
+	out, err := c.call(ctx, f.Forward, c.a.forward, "getForwardPrice", expiry)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("forward: %w", err))
+	} else {
+		forward = out[0].(*big.Int)
+	}
+	return index, forward, reference, errs
+}
+
+func (c *Chain) Spline(ctx context.Context) (Spline, error) {
+	out, err := c.call(ctx, c.Book, c.a.book, "splines", c.MarketID, c.AccountID)
+	if err != nil {
+		return Spline{}, fmt.Errorf("splines: %w", err)
+	}
+	return Spline{
+		OffsetTicks:         out[0].(int32),
+		HalfSpreadTicks:     out[1].(uint32),
+		BidCurve:            out[2].(uint16),
+		AskCurve:            out[3].(uint16),
+		SkewTicksPerLot:     out[4].(uint32),
+		MaxSkewTicks:        out[5].(uint32),
+		RefillLotsPerSecond: out[6].(uint32),
+		UpdatedAt:           time.Unix(out[7].(*big.Int).Int64(), 0),
+		TTL:                 out[8].(uint32),
+		Seq:                 out[9].(uint64),
+		Active:              out[10].(bool),
+	}, nil
+}
+
+func (c *Chain) Curve(ctx context.Context, owner common.Address, id uint16) ([]Region, error) {
+	out, err := c.call(ctx, c.Book, c.a.book, "curve", owner, id)
+	if err != nil {
+		return nil, fmt.Errorf("curve(%s, %d): %w", owner.Hex(), id, err)
+	}
+	regions, ok := abi.ConvertType(out[0], new([]Region)).(*[]Region)
+	if !ok {
+		return nil, errors.New("curve: unexpected abi type")
+	}
+	return *regions, nil
+}
+
+func (c *Chain) IsRegistered(ctx context.Context) (bool, error) {
+	out, err := c.call(ctx, c.Book, c.a.book, "isRegistered", c.MarketID, c.AccountID)
+	if err != nil {
+		return false, err
+	}
+	return out[0].(bool), nil
+}
+
+func (c *Chain) MakerAllowed(ctx context.Context, owner common.Address) (bool, error) {
+	out, err := c.call(ctx, c.Book, c.a.book, "makerAllowed", owner)
+	if err != nil {
+		return false, err
+	}
+	return out[0].(bool), nil
+}
+
+func (c *Chain) AccountOwnerAndManager(ctx context.Context) (owner, manager common.Address, err error) {
+	out, err := c.call(ctx, c.SubAccounts, c.a.subAccounts, "ownerOf", c.AccountID)
+	if err != nil {
+		return owner, manager, fmt.Errorf("ownerOf(%s): %w", c.AccountID, err)
+	}
+	owner = out[0].(common.Address)
+	if out, err = c.call(ctx, c.SubAccounts, c.a.subAccounts, "manager", c.AccountID); err != nil {
+		return owner, manager, fmt.Errorf("manager(%s): %w", c.AccountID, err)
+	}
+	return owner, out[0].(common.Address), nil
+}
+
+func (c *Chain) Cash(ctx context.Context, engine common.Address) (common.Address, error) {
+	out, err := c.call(ctx, engine, c.a.engine, "cashAsset")
+	if err != nil {
+		return common.Address{}, err
+	}
+	return out[0].(common.Address), nil
+}
+
+// Allowance is the account's asset allowance to the book, positive or negative direction.
+func (c *Chain) Allowance(ctx context.Context, owner, asset common.Address, positive bool) (*big.Int, error) {
+	method := "negativeAssetAllowance"
+	if positive {
+		method = "positiveAssetAllowance"
+	}
+	out, err := c.call(ctx, c.SubAccounts, c.a.subAccounts, method, c.AccountID, owner, asset, c.Book)
+	if err != nil {
+		return nil, err
+	}
+	return out[0].(*big.Int), nil
+}
+
+// ---------------------------------------------------------------------------------------------
+// writes: one transaction at a time, signed through exchange.Signer (local key or KMS)
+// ---------------------------------------------------------------------------------------------
+
+// splineUpdate matches OnchainBook.SplineUpdate field for field (go-ethereum maps by camel-cased name).
+type splineUpdate struct {
+	MarketId            *big.Int
+	AccountId           *big.Int
+	OffsetTicks         int32
+	HalfSpreadTicks     uint32
+	BidCurve            uint16
+	AskCurve            uint16
+	SkewTicksPerLot     uint32
+	MaxSkewTicks        uint32
+	RefillLotsPerSecond uint32
+	Ttl                 uint32
+	Seq                 uint64
+}
+
+func (c *Chain) UpdateCalldata(s Spline) ([]byte, error) {
+	return c.a.book.Pack("updateSplines", []splineUpdate{{
+		MarketId: c.MarketID, AccountId: c.AccountID, OffsetTicks: s.OffsetTicks, HalfSpreadTicks: s.HalfSpreadTicks,
+		BidCurve: s.BidCurve, AskCurve: s.AskCurve, SkewTicksPerLot: s.SkewTicksPerLot, MaxSkewTicks: s.MaxSkewTicks,
+		RefillLotsPerSecond: s.RefillLotsPerSecond, Ttl: s.TTL, Seq: s.Seq,
+	}})
+}
+
+func (c *Chain) Update(ctx context.Context, s Spline) (common.Hash, error) {
+	data, err := c.UpdateCalldata(s)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return c.send(ctx, data)
+}
+
+func (c *Chain) Cancel(ctx context.Context) (common.Hash, error) {
+	data, err := c.a.book.Pack("cancelSpline", c.MarketID, c.AccountID)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return c.send(ctx, data)
+}
+
+func (c *Chain) SetCurve(ctx context.Context, id uint16, regions []Region) (common.Hash, error) {
+	data, err := c.a.book.Pack("setCurve", id, regions)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return c.send(ctx, data)
+}
+
+func (c *Chain) Register(ctx context.Context) (common.Hash, error) {
+	data, err := c.a.book.Pack("registerMaker", c.MarketID, c.AccountID)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return c.send(ctx, data)
+}
+
+func (c *Chain) send(ctx context.Context, data []byte) (common.Hash, error) {
+	from := c.signer.Address()
+	msg := ethereum.CallMsg{From: from, To: &c.Book, Data: data}
+	// The estimate runs the call: a revert is reported here, by name, before anything is signed.
+	gas, err := c.eth.EstimateGas(ctx, msg)
+	if err != nil {
+		return common.Hash{}, c.revertError(err)
+	}
+	nonce, err := c.eth.PendingNonceAt(ctx, from)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("nonce: %w", err)
+	}
+	tip, err := c.eth.SuggestGasTipCap(ctx)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("tip: %w", err)
+	}
+	head, err := c.eth.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("head: %w", err)
+	}
+	feeCap := new(big.Int).Add(new(big.Int).Mul(head.BaseFee, big.NewInt(2)), tip)
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID: c.chainID, Nonce: nonce, GasTipCap: tip, GasFeeCap: feeCap,
+		Gas: gas*12/10 + 10_000, To: &c.Book, Data: data,
+	})
+	txSigner := types.LatestSignerForChainID(c.chainID)
+	sig, err := c.signer.SignHash(ctx, txSigner.Hash(tx).Bytes())
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("sign: %w", err)
+	}
+	signed, err := tx.WithSignature(txSigner, sig)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if sender, err := types.Sender(txSigner, signed); err != nil || sender != from {
+		return common.Hash{}, fmt.Errorf("signed by %s, not the signer %s (%v)", sender.Hex(), from.Hex(), err)
+	}
+	if err := c.eth.SendTransaction(ctx, signed); err != nil {
+		return signed.Hash(), fmt.Errorf("send: %w", err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, c.ReceiptTimeout)
+	defer cancel()
+	receipt, err := c.waitMined(waitCtx, signed.Hash())
+	if err != nil {
+		return signed.Hash(), fmt.Errorf("receipt: %w", err)
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return signed.Hash(), fmt.Errorf("reverted on chain in block %s", receipt.BlockNumber)
+	}
+	return signed.Hash(), nil
+}
+
+func (c *Chain) waitMined(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		receipt, err := c.eth.TransactionReceipt(ctx, hash)
+		if err == nil {
+			return receipt, nil
+		}
+		if !errors.Is(err, ethereum.NotFound) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// errors
+// ---------------------------------------------------------------------------------------------
+
+// RevertError is a call or estimate that reverted, with the custom error's name when the ABIs know it.
+type RevertError struct {
+	Name string
+	Data []byte
+	err  error
+}
+
+func (e *RevertError) Error() string {
+	if e.Name != "" {
+		return "reverted: " + e.Name
+	}
+	return fmt.Sprintf("reverted: %v (data %x)", e.err, e.Data)
+}
+
+func (e *RevertError) Unwrap() error { return e.err }
+
+// IsRevert reports whether err is a revert named `name` (an OnchainBook error such as "OB_StaleSeq").
+func IsRevert(err error, name string) bool {
+	var r *RevertError
+	return errors.As(err, &r) && r.Name == name
+}
+
+func (c *Chain) revertError(err error) error {
+	var de rpc.DataError
+	if !errors.As(err, &de) {
+		return err
+	}
+	data := hexData(de.ErrorData())
+	return &RevertError{Name: c.errorName(data), Data: data, err: err}
+}
+
+func (c *Chain) errorName(data []byte) string {
+	if len(data) < 4 {
+		return ""
+	}
+	for _, a := range []abi.ABI{c.a.book, c.a.subAccounts, c.a.future, c.a.engine, c.a.forward, c.a.spot} {
+		for name, e := range a.Errors {
+			if bytes.Equal(e.ID[:4], data[:4]) {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func hexData(v any) []byte {
+	s, ok := v.(string)
+	if !ok {
+		return nil
+	}
+	b, err := hexDecode(s)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func hexDecode(s string) ([]byte, error) {
+	return hexutil.Decode(s)
+}

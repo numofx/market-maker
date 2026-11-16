@@ -1,0 +1,272 @@
+[
+  {
+    "type": "function",
+    "name": "assetMap",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "assetType",
+        "type": "uint8",
+        "internalType": "enum IMarginEngine.AssetType"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IAsset"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "cashAsset",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ICashAsset"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getMarketFeeds",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ISpotFeed"
+      },
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IForwardFeed"
+      },
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IVolFeed"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "error",
+    "name": "BM_AccountUnderLiquidation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_AdjustmentsPaused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_AssetCapExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_GuardianOnly",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_InvalidBidPortion",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_InvalidLiquidation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_InvalidMaxAccountSize",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_MinOIFeeTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_NotImplemented",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_OnlyAccounts",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_OnlyLiquidationModule",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BM_UnauthorizedCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidInitialization",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ME_NotFuture",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ME_NotSettled",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ME_PoolCannotBid",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotInitializing",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OwnableInvalidOwner",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OwnableUnauthorizedAccount",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_InvalidBaseDiscountFactor",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_InvalidDepegParams",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_InvalidOptionMarginParams",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_InvalidOracleContingencyParams",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_InvalidPerpMarginParams",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_MarketNotCreated",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_NoForwardPrice",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_NoNegativeCash",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_NotAccounts",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_NotWhitelistManager",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_PortfolioBelowMargin",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_TooManyAssets",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SRM_UnsupportedAsset",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SafeCastOverflowedUintDowncast",
+    "inputs": [
+      {
+        "name": "bits",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "value",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SafeCastOverflowedUintToInt",
+    "inputs": [
+      {
+        "name": "value",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  }
+]

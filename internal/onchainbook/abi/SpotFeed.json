@@ -1,0 +1,46 @@
+[
+  {
+    "type": "function",
+    "name": "getSpot",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "spotPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "confidence",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "error",
+    "name": "EIF_InvalidConfig",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "EIF_NoReport",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "EIF_Stale",
+    "inputs": [
+      {
+        "name": "feedId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "observedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  }
+]
