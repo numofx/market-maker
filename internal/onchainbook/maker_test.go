@@ -19,6 +19,12 @@ type fakeBook struct {
 	index, forward, reference   *big.Int
 	updates, cancels, priceRead int
 	failUpdate                  error
+	position                    int64
+	positionErr                 error
+}
+
+func (f *fakeBook) PositionLots(context.Context, Market) (int64, error) {
+	return f.position, f.positionErr
 }
 
 func (f *fakeBook) Prices(context.Context, Feeds, uint64) (*big.Int, *big.Int, *big.Int, []error) {

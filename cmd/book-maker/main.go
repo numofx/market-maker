@@ -77,7 +77,8 @@ func run(log *slog.Logger) int {
 	log.Info("book-maker starting", "book", cfg.book.Hex(), "market", cfg.marketID, "account", cfg.accountID,
 		"owner", signer.Address().Hex(), "chain_id", chain.ChainID(), "dry_run", cfg.dryRun, "curve", cfg.curve,
 		"half_spread_ticks", cfg.params.HalfSpreadTicks, "ttl", cfg.params.TTL, "book_v2", chain.V2,
-		"self_priced", cfg.params.SelfPriced)
+		"self_priced", cfg.params.SelfPriced, "max_position_lots", cfg.params.MaxPositionLots,
+		"skew_ticks_per_lot", cfg.params.SkewTicksPerLot, "max_skew_ticks", cfg.params.MaxSkewTicks)
 
 	market, feeds, err := onchainbook.Preflight(ctx, chain, signer.Address(), cfg.params, cfg.curveID, cfg.curve,
 		cfg.referenceMarketID, cfg.dryRun, log)
@@ -202,6 +203,11 @@ func load() (config, error) {
 		CutoffBeforeLastTrade: time.Duration(num("MM_BOOK_CUTOFF_SECONDS", 3600)) * time.Second,
 		MaxDivergenceBPS:      divergence,
 		SelfPriced:            selfPriced,
+		MaxPositionLots:       num("MM_BOOK_MAX_POSITION_LOTS", 0),
+		ParkCurve:             uint16(num("MM_BOOK_PARK_CURVE_ID", uint64(cfg.curveID)+1)),
+	}
+	for _, r := range cfg.curve {
+		cfg.params.CurveLots += uint64(r.Lots)
 	}
 	if err := cfg.params.Validate(); err != nil {
 		problems = append(problems, err.Error())

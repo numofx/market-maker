@@ -123,20 +123,36 @@ func Preflight(ctx context.Context, c *Chain, owner common.Address, p Params, cu
 		return m, Feeds{}, err
 	}
 
-	stored, err := c.Curve(ctx, owner, curveID)
-	if err != nil {
-		return m, feeds, err
-	}
-	if !sameCurve(stored, curve) {
-		if dryRun {
-			log.Warn("curve differs: would setCurve (dry run)", "curve_id", curveID, "stored", stored, "configured", curve)
-		} else {
-			hash, err := c.SetCurve(ctx, curveID, curve)
-			if err != nil {
-				return m, feeds, fmt.Errorf("setCurve: %w", err)
-			}
-			log.Info("curve set", "curve_id", curveID, "regions", curve, "tx", hash.Hex())
+	curves := []struct {
+		id      uint16
+		regions []Region
+	}{{curveID, curve}}
+	if p.MaxPositionLots > 0 {
+		if err := checkParkOutsideBand(ctx, c, m, feeds, p); err != nil {
+			return m, feeds, err
 		}
+		curves = append(curves, struct {
+			id      uint16
+			regions []Region
+		}{p.ParkCurve, ParkCurveRegions()})
+	}
+	for _, want := range curves {
+		stored, err := c.Curve(ctx, owner, want.id)
+		if err != nil {
+			return m, feeds, err
+		}
+		if sameCurve(stored, want.regions) {
+			continue
+		}
+		if dryRun {
+			log.Warn("curve differs: would setCurve (dry run)", "curve_id", want.id, "stored", stored, "configured", want.regions)
+			continue
+		}
+		hash, err := c.SetCurve(ctx, want.id, want.regions)
+		if err != nil {
+			return m, feeds, fmt.Errorf("setCurve(%d): %w", want.id, err)
+		}
+		log.Info("curve set", "curve_id", want.id, "regions", want.regions, "tx", hash.Hex())
 	}
 	registered, err := c.IsRegistered(ctx)
 	if err != nil {
@@ -157,6 +173,36 @@ func Preflight(ctx context.Context, c *Chain, owner common.Address, p Params, cu
 		"last_trade", m.LastTradeTime.UTC(), "tick", m.TickSize, "lot", m.LotSize, "index", feeds.Index.Hex(),
 		"forward", feeds.Forward.Hex(), "reference", feeds.Reference.Hex())
 	return m, feeds, nil
+}
+
+// checkParkOutsideBand refuses a cap whose park curve the book could fill: the parked level, ParkOffsetTicks plus the
+// half-spread from the mid, must be at least twice the index band away. A market with no band (0) fills anywhere.
+func checkParkOutsideBand(ctx context.Context, c *Chain, m Market, feeds Feeds, p Params) error {
+	band, err := c.IndexBand(ctx, m)
+	if err != nil {
+		return err
+	}
+	if band.Sign() == 0 {
+		return errors.New("position cap: the series has no index band, so a parked side could fill")
+	}
+	index, _, _, errs := c.Prices(ctx, feeds, m.Expiry)
+	if index == nil || index.Sign() <= 0 {
+		return fmt.Errorf("position cap: index unreadable to check the park curve against the band %v", errs)
+	}
+	if !parkOutsideBand(band, index, m.TickSize, p.HalfSpreadTicks) {
+		return fmt.Errorf("position cap: the park curve (%d ticks out) is inside twice the index band %s at index %s",
+			ParkOffsetTicks, band, index)
+	}
+	return nil
+}
+
+// parkOutsideBand: (ParkOffsetTicks + halfSpread) * tick >= 2 * band * index / 1e18.
+func parkOutsideBand(band, index, tick *big.Int, halfSpread uint32) bool {
+	dist := new(big.Int).Mul(big.NewInt(int64(ParkOffsetTicks)+int64(halfSpread)), tick)
+	dist.Mul(dist, big.NewInt(1e18))
+	need := new(big.Int).Mul(band, index)
+	need.Mul(need, big.NewInt(2))
+	return dist.Cmp(need) >= 0
 }
 
 func sameCurve(a, b []Region) bool {

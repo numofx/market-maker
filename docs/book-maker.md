@@ -53,6 +53,15 @@ update. A failure other than a plain revert is an error, not "v1".
     spec B14a.
 
   A spline that is already down costs nothing. The reason is logged at info whenever it changes.
+- **Inventory cap (`MM_BOOK_MAX_POSITION_LOTS`).** The book has no position limit per maker, and every update
+  resets what was taken from each side: a curve is a size per update, not a total. With a cap, each cycle reads the
+  account's position. A side whose whole curve, filled, would take the position past the cap is quoted on the park
+  curve (`MM_BOOK_PARK_CURVE_ID`, one lot 500,000 ticks out), far outside the index band, which the book never fills;
+  the other side keeps quoting and brings the position back. Parking and unparking send at once. A position that
+  cannot be read takes the spline down. Fills that land between a cycle's read and its update can pass the cap by
+  at most one curve: size margin for cap + one curve. Preflight sets the park curve and refuses a series whose band
+  is not well inside it (or has none). Skew (`MM_BOOK_SKEW_TICKS_PER_LOT`) leans the mid against the position before
+  the cap is reached.
 - **Hand-off between processes.** `seq` is the wall clock in milliseconds (and always above the stored one). A new
   process claims the spline with one update on its first cycle. An older process that sees a seq it did not write
   stops (`superseded`, exit 0) and does not cancel. At SIGTERM a process cancels the spline only if the stored seq
@@ -103,6 +112,8 @@ SIGTERM time to cancel the spline.
 | `MM_BOOK_REFERENCE_MARKET_ID` | 2 | the engine market whose spot feed is the reference |
 | `MM_BOOK_SKEW_TICKS_PER_LOT`, `MM_BOOK_MAX_SKEW_TICKS` | 0 | on-chain inventory skew (B7) |
 | `MM_BOOK_REFILL_LOTS_PER_SECOND` | 0 | 0: a consumed level returns at the next update |
+| `MM_BOOK_MAX_POSITION_LOTS` | 0 (off) | the inventory cap above, long or short, in lots; at least one side's curve |
+| `MM_BOOK_PARK_CURVE_ID` | curve id + 1 | the park curve's id; preflight sets it |
 | `MM_BOOK_SELF_PRICED` | `false` | v2 books only; see above |
 | `MM_BOOK_TTL_SECONDS` | 3600; self-priced 30 | at most the market's `maxTtl`; self-priced, at most `maxSelfPricedTtl` |
 | `MM_BOOK_REFRESH_SECONDS` | 1800; self-priced 22 | under the ttl; self-priced, `refresh + poll + 3` at most the ttl |
@@ -114,6 +125,12 @@ SIGTERM time to cancel the spline.
 | `MM_BOOK_HEARTBEAT_URL` | unset | a dead-man check (healthchecks.io), pinged at most once a minute while the book is quoted: an update landed, a live spline needed nothing, or the deliberate stop before last trade. An error, dry run, or a spline held down by an unreadable or diverging feed sends no ping, so the check alerts when that lasts. A secret; never logged |
 
 ## Rehearsed
+
+On 2026-11-17, the inventory cap, on an anvil fork of Base (block 58,757,103) against the live v2 book and account
+#58: cap 100 lots, curve `20@0,40@50` (60 a side), skew 1 tick a lot to 2,750. Preflight set the park curve (id 2).
+#57 bought 60: #58 short 60, the bot parked the ask (−60 − 60 < −100) and kept the bid; a further 10-lot buy quoted 0
+and filled 0. #57 sold 30: short 30, the ask came back. Decide's edges and the cycle's read are unit-tested, and six
+mutants of the rule (each edge, each side, the unreadable case) fail them.
 
 On 2026-11-16, on an anvil fork of Base (block ~58.25M), against the book deployed by `deploy-onchain-book.s.sol`
 with both vault batches landed:

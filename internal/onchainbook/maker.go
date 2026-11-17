@@ -17,6 +17,7 @@ type Book interface {
 	Spline(ctx context.Context) (Spline, error)
 	Update(ctx context.Context, s Spline) (common.Hash, error)
 	Cancel(ctx context.Context) (common.Hash, error)
+	PositionLots(ctx context.Context, m Market) (int64, error)
 }
 
 // ErrSuperseded is returned once another process has written the spline after this one: the stored seq is
@@ -71,6 +72,13 @@ func (m *Maker) Cycle(ctx context.Context) (Decision, error) {
 		Now: m.now(), Index: index, Forward: forward, Reference: reference,
 		TickSize: m.Market.TickSize, LastTradeTime: m.Market.LastTradeTime,
 	}
+	if m.Params.MaxPositionLots > 0 {
+		if pos, err := m.Book.PositionLots(ctx, m.Market); err != nil {
+			m.Log.Warn("position read failed", "error", err)
+		} else {
+			in.PositionLots = &pos
+		}
+	}
 	d := Decide(m.Params, in, cur)
 	// Claim: a process that has not written yet sends once even when the stored spline needs no change, so the
 	// seq it stores marks it as the owner. Otherwise its predecessor keeps the spline and cancels it on its way
@@ -82,7 +90,11 @@ func (m *Maker) Cycle(ctx context.Context) (Decision, error) {
 	attrs := []any{"action", d.Action.String(), "reason", d.Reason, "stored_seq", cur.Seq, "stored_offset", cur.OffsetTicks,
 		"stored_live", cur.Live(m.now())}
 	if d.Action == ActionUpdate {
-		attrs = append(attrs, "offset_ticks", d.Target.OffsetTicks, "half_spread_ticks", d.Target.HalfSpreadTicks, "seq", d.Target.Seq)
+		attrs = append(attrs, "offset_ticks", d.Target.OffsetTicks, "half_spread_ticks", d.Target.HalfSpreadTicks, "seq", d.Target.Seq,
+			"bid_curve", d.Target.BidCurve, "ask_curve", d.Target.AskCurve)
+	}
+	if in.PositionLots != nil {
+		attrs = append(attrs, "position_lots", *in.PositionLots)
 	}
 	changed := d.Reason != m.lastReason
 	m.lastReason = d.Reason

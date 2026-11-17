@@ -59,6 +59,7 @@ func loadABIs() (abis, error) {
 type Market struct {
 	Future        common.Address
 	Engine        common.Address
+	SubID         *big.Int
 	Expiry        uint64
 	LastTradeTime time.Time
 	TickSize      *big.Int
@@ -198,6 +199,7 @@ func (c *Chain) Market(ctx context.Context) (Market, error) {
 	m := Market{
 		Future:        out[0].(common.Address),
 		Engine:        out[1].(common.Address),
+		SubID:         out[2].(*big.Int),
 		Expiry:        out[3].(uint64),
 		LastTradeTime: time.Unix(int64(out[4].(uint64)), 0),
 		TickSize:      out[6].(*big.Int),
@@ -335,6 +337,32 @@ func (c *Chain) Cash(ctx context.Context, engine common.Address) (common.Address
 		return common.Address{}, err
 	}
 	return out[0].(common.Address), nil
+}
+
+// PositionLots is the account's position in the market's series, in lots (negative short), rounded toward zero.
+func (c *Chain) PositionLots(ctx context.Context, m Market) (int64, error) {
+	out, err := c.call(ctx, c.SubAccounts, c.a.subAccounts, "getBalance", c.AccountID, m.Future, m.SubID)
+	if err != nil {
+		return 0, fmt.Errorf("getBalance(%s): %w", c.AccountID, err)
+	}
+	if m.LotSize == nil || m.LotSize.Sign() <= 0 {
+		return 0, errors.New("lot size unset")
+	}
+	lots := new(big.Int).Quo(out[0].(*big.Int), m.LotSize)
+	if !lots.IsInt64() {
+		return 0, fmt.Errorf("position %s lots out of range", lots)
+	}
+	return lots.Int64(), nil
+}
+
+// IndexBand is the future's mark-to-index band for the series, 18 dp (FutureAsset.markIndexBand): fills further from
+// the index revert, and the book's walk stops there.
+func (c *Chain) IndexBand(ctx context.Context, m Market) (*big.Int, error) {
+	out, err := c.call(ctx, m.Future, c.a.future, "markIndexBand", m.Expiry)
+	if err != nil {
+		return nil, fmt.Errorf("markIndexBand(%d): %w", m.Expiry, err)
+	}
+	return out[0].(*big.Int), nil
 }
 
 // Allowance is the account's asset allowance to the book, positive or negative direction.

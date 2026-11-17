@@ -38,11 +38,12 @@ func TestSelectorsMatchCastSig(t *testing.T) {
 		{"forward", "getForwardPrice", "b34f2e36"}, {"spot", "getSpot", "2b37269c"},
 		{"engine", "getMarketFeeds", "a95371a4"}, {"subAccounts", "ownerOf", "6352211e"},
 		{"subAccounts", "manager", "52981457"}, {"subAccounts", "positiveAssetAllowance", "4997e514"},
-		{"subAccounts", "negativeAssetAllowance", "5d13e0eb"},
+		{"subAccounts", "negativeAssetAllowance", "5d13e0eb"}, {"subAccounts", "getBalance", "0806e640"},
+		{"future", "markIndexBand", "968564c5"},
 	}
 	byABI := map[string]map[string][]byte{
 		"book": ids(a.book.Methods), "bookV1": ids(a.bookV1.Methods), "forward": ids(a.forward.Methods), "spot": ids(a.spot.Methods),
-		"engine": ids(a.engine.Methods), "subAccounts": ids(a.subAccounts.Methods),
+		"engine": ids(a.engine.Methods), "subAccounts": ids(a.subAccounts.Methods), "future": ids(a.future.Methods),
 	}
 	for _, p := range pinned {
 		m, ok := byABI[p.abi][p.method]

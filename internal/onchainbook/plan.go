@@ -12,6 +12,12 @@
 // maker then carries the staleness: a short ttl, refreshed every cycle. The book still band-checks every fill
 // against the index, so a stale index stops self-priced quotes too.
 //
+// Inventory cap (Params.MaxPositionLots): the book has no per-maker position limit, and every spline update resets
+// what was taken from each side, so a curve is a size per update, not a total. Each cycle reads the account's
+// position; a side whose whole curve, filled, would take the position past the cap is quoted on the park curve
+// instead: one lot ParkOffsetTicks out, far outside the index band, which the book never fills (its walk stops there).
+// The position can still pass the cap by fills landing between a cycle's read and its update: at most one curve.
+//
 // This file is the decision, with no chain access: given what was read, what should the spline be and
 // is a transaction worth sending.
 package onchainbook
@@ -78,7 +84,19 @@ type Params struct {
 	// SelfPriced sends the forward itself as the mid (round(forward / tick) ticks) rather than its offset from the
 	// index. The quote is then only as fresh as the last update: keep TTL short and RefreshAfter under the poll.
 	SelfPriced bool
+	// MaxPositionLots caps the account's position, long or short, in lots; 0 is no cap. CurveLots is one side's
+	// whole curve in lots, and ParkCurve the curve id a side is moved to at the cap (ParkCurveRegions).
+	MaxPositionLots uint64
+	CurveLots       uint64
+	ParkCurve       uint16
 }
+
+// ParkOffsetTicks is the park curve's one region: 500,000 ticks behind the best level, 0.5 USDC at a 1e-6 tick, about
+// 45% of a 1.10 price. Preflight refuses a market whose index band is not well inside it.
+const ParkOffsetTicks = 500_000
+
+// ParkCurveRegions is the curve a side quotes at the cap: one lot nobody can take.
+func ParkCurveRegions() []Region { return []Region{{Lots: 1, OffsetTicks: ParkOffsetTicks}} }
 
 func (p Params) Validate() error {
 	switch {
@@ -94,6 +112,16 @@ func (p Params) Validate() error {
 		return fmt.Errorf("cutoff %s must not be negative", p.CutoffBeforeLastTrade)
 	case p.BidCurve == 0 || p.AskCurve == 0:
 		return fmt.Errorf("curve ids must be set")
+	}
+	if p.MaxPositionLots > 0 {
+		switch {
+		case p.ParkCurve == 0 || p.ParkCurve == p.BidCurve || p.ParkCurve == p.AskCurve:
+			return fmt.Errorf("park curve id %d must be set and differ from the quoting curves", p.ParkCurve)
+		case p.CurveLots == 0:
+			return fmt.Errorf("curve lots must be set with a position cap")
+		case p.CurveLots > p.MaxPositionLots:
+			return fmt.Errorf("one side's curve (%d lots) is over the position cap (%d): a flat account could not quote it", p.CurveLots, p.MaxPositionLots)
+		}
 	}
 	return nil
 }
@@ -125,6 +153,9 @@ type Inputs struct {
 	Reference     *big.Int // market 2's Chainlink push feed, USD per EURC, 18 dp
 	TickSize      *big.Int // the book market's tick, 18 dp
 	LastTradeTime time.Time
+	// PositionLots is the account's position in the series, in lots (negative short); nil when it could not be read.
+	// Read only with a cap.
+	PositionLots *int64
 }
 
 type Action int
@@ -181,12 +212,25 @@ func Decide(p Params, in Inputs, cur Spline) Decision {
 	if !ok {
 		return down("offset_out_of_range")
 	}
+	bidCurve, askCurve := p.BidCurve, p.AskCurve
+	if p.MaxPositionLots > 0 {
+		if in.PositionLots == nil {
+			return down("position_unreadable")
+		}
+		pos, side, limit := *in.PositionLots, int64(p.CurveLots), int64(p.MaxPositionLots)
+		if pos+side > limit { // the bid buys: filled, it adds to a long
+			bidCurve = p.ParkCurve
+		}
+		if pos-side < -limit { // the ask sells: filled, it adds to a short
+			askCurve = p.ParkCurve
+		}
+	}
 
 	target := Spline{
 		OffsetTicks:         offset,
 		HalfSpreadTicks:     p.HalfSpreadTicks,
-		BidCurve:            p.BidCurve,
-		AskCurve:            p.AskCurve,
+		BidCurve:            bidCurve,
+		AskCurve:            askCurve,
 		SkewTicksPerLot:     p.SkewTicksPerLot,
 		MaxSkewTicks:        p.MaxSkewTicks,
 		RefillLotsPerSecond: p.RefillLotsPerSecond,
