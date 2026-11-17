@@ -16,7 +16,8 @@ func ids(methods map[string]abi.Method) map[string][]byte {
 	return out
 }
 
-// Every selector this package sends or reads, pinned to `cast sig` (2026-11-16, exchange 01b7459). A wrong one
+// Every selector this package sends or reads, pinned to `cast sig` (2026-11-16, exchange 01b7459; v2 entries
+// 2026-11-17, exchange 6313ed0). A wrong one
 // fails silently on chain -- the call reverts or reads empty space -- so the ABI copies are checked here.
 func TestSelectorsMatchCastSig(t *testing.T) {
 	a, err := loadABIs()
@@ -28,7 +29,9 @@ func TestSelectorsMatchCastSig(t *testing.T) {
 		method string
 		want   string
 	}{
-		{"book", "updateSplines", "df20ee06"}, {"book", "cancelSpline", "28dfa398"}, {"book", "setCurve", "3d3fc497"},
+		{"bookV1", "updateSplines", "df20ee06"}, {"book", "updateSplines", "5c06631f"},
+		{"book", "isSelfPriced", "664b3f89"}, {"book", "maxSelfPricedTtl", "3a1359b6"},
+		{"bookV1", "splines", "e5dd8989"}, {"bookV1", "markets", "b1283e77"}, {"book", "cancelSpline", "28dfa398"}, {"book", "setCurve", "3d3fc497"},
 		{"book", "registerMaker", "733dad44"}, {"book", "splines", "e5dd8989"}, {"book", "curve", "b19f714d"},
 		{"book", "isRegistered", "a5ff2665"}, {"book", "markets", "b1283e77"}, {"book", "makerAllowed", "4b3df9c5"},
 		{"book", "subAccounts", "779e5012"},
@@ -38,7 +41,7 @@ func TestSelectorsMatchCastSig(t *testing.T) {
 		{"subAccounts", "negativeAssetAllowance", "5d13e0eb"},
 	}
 	byABI := map[string]map[string][]byte{
-		"book": ids(a.book.Methods), "forward": ids(a.forward.Methods), "spot": ids(a.spot.Methods),
+		"book": ids(a.book.Methods), "bookV1": ids(a.bookV1.Methods), "forward": ids(a.forward.Methods), "spot": ids(a.spot.Methods),
 		"engine": ids(a.engine.Methods), "subAccounts": ids(a.subAccounts.Methods),
 	}
 	for _, p := range pinned {

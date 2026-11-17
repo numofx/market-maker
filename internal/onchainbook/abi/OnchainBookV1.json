@@ -1,0 +1,547 @@
+[
+  {
+    "type": "function",
+    "name": "cancelSpline",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "accountId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "curve",
+    "inputs": [
+      {
+        "name": "owner_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "curveId",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple[]",
+        "internalType": "struct OnchainBook.Region[]",
+        "components": [
+          {
+            "name": "lots",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "offsetTicks",
+            "type": "uint32",
+            "internalType": "uint32"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "isRegistered",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "accountId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "makerAllowed",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "markets",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "future",
+        "type": "address",
+        "internalType": "contract IFutureAssetV3"
+      },
+      {
+        "name": "engine",
+        "type": "address",
+        "internalType": "contract IOnchainBookManager"
+      },
+      {
+        "name": "subId",
+        "type": "uint96",
+        "internalType": "uint96"
+      },
+      {
+        "name": "expiry",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "lastTradeTime",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "adapter",
+        "type": "address",
+        "internalType": "contract StreamsIndexAdapter"
+      },
+      {
+        "name": "tickSize",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "lotSize",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "takerFeeRate",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "takeMaxAge",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "maxTtl",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "maxMakers",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "enabled",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "registerMaker",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "accountId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setCurve",
+    "inputs": [
+      {
+        "name": "curveId",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "regions",
+        "type": "tuple[]",
+        "internalType": "struct OnchainBook.Region[]",
+        "components": [
+          {
+            "name": "lots",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "offsetTicks",
+            "type": "uint32",
+            "internalType": "uint32"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "splines",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "accountId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "offsetTicks",
+        "type": "int32",
+        "internalType": "int32"
+      },
+      {
+        "name": "halfSpreadTicks",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "bidCurve",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "askCurve",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "skewTicksPerLot",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "maxSkewTicks",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "refillLotsPerSecond",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "updatedAt",
+        "type": "uint40",
+        "internalType": "uint40"
+      },
+      {
+        "name": "ttl",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "seq",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "active",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "subAccounts",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ISubAccounts"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "updateSplines",
+    "inputs": [
+      {
+        "name": "updates",
+        "type": "tuple[]",
+        "internalType": "struct OnchainBook.SplineUpdate[]",
+        "components": [
+          {
+            "name": "marketId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "accountId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "offsetTicks",
+            "type": "int32",
+            "internalType": "int32"
+          },
+          {
+            "name": "halfSpreadTicks",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "bidCurve",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "askCurve",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "skewTicksPerLot",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "maxSkewTicks",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "refillLotsPerSecond",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "ttl",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "seq",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "error",
+    "name": "OB_AlreadyRegistered",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_BatchOutOfGas",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_BelowMinFill",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_CrossedSpline",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_Expired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_FeeTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_GasFloor",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_InvalidCurve",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_InvalidMarket",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_InvalidParams",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_InvalidTtl",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_MakerNotAllowed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_MarketDisabled",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_NotAuthorized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_NotRegistered",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_SelfTrade",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_StaleSeq",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_TakerAllowanceTooLow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_TooManyMakers",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_TradingClosed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_WrongManager",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OwnableInvalidOwner",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OwnableUnauthorizedAccount",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SafeCastOverflowedUintDowncast",
+    "inputs": [
+      {
+        "name": "bits",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "value",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SafeCastOverflowedUintToInt",
+    "inputs": [
+      {
+        "name": "value",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  }
+]

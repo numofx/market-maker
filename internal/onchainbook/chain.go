@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -24,17 +25,21 @@ import (
 // functions this package calls plus every custom error, so a revert is reported by name. Regenerate with
 // jq from the artifacts; chain_test.go pins each selector to `cast sig`.
 //
+// Two book versions: OnchainBookV1.json is the book deployed 2026-11-16 (EURC-30NOV26, pegged splines only);
+// OnchainBook.json is v2 (spec C4: quote, self-priced splines), whose SplineUpdate gains `selfPriced` and so whose
+// updateSplines selector differs. NewChain detects the version, so the same image runs against either.
+//
 //go:embed abi/*.json
 var abiFiles embed.FS
 
 type abis struct {
-	book, subAccounts, future, engine, forward, spot abi.ABI
+	book, bookV1, subAccounts, future, engine, forward, spot abi.ABI
 }
 
 func loadABIs() (abis, error) {
 	var a abis
 	for name, dst := range map[string]*abi.ABI{
-		"OnchainBook": &a.book, "SubAccounts": &a.subAccounts, "FutureAsset": &a.future,
+		"OnchainBook": &a.book, "OnchainBookV1": &a.bookV1, "SubAccounts": &a.subAccounts, "FutureAsset": &a.future,
 		"MarginEngine": &a.engine, "ForwardFeed": &a.forward, "SpotFeed": &a.spot,
 	} {
 		raw, err := abiFiles.ReadFile("abi/" + name + ".json")
@@ -80,6 +85,8 @@ type Chain struct {
 	AccountID   *big.Int
 	// ReceiptTimeout bounds the wait for each transaction.
 	ReceiptTimeout time.Duration
+	// V2 is a book with self-priced splines (detected by NewChain); false: v1, pegged only.
+	V2 bool
 }
 
 func NewChain(ctx context.Context, url string, signer exchange.Signer, book, subAccounts common.Address, marketID, accountID uint64) (*Chain, error) {
@@ -95,9 +102,48 @@ func NewChain(ctx context.Context, url string, signer exchange.Signer, book, sub
 	if err != nil {
 		return nil, fmt.Errorf("chain id: %w", err)
 	}
-	return &Chain{eth: eth, chainID: chainID, signer: signer, a: a, Book: book, SubAccounts: subAccounts,
+	c := &Chain{eth: eth, chainID: chainID, signer: signer, a: a, Book: book, SubAccounts: subAccounts,
 		MarketID: new(big.Int).SetUint64(marketID), AccountID: new(big.Int).SetUint64(accountID),
-		ReceiptTimeout: 60 * time.Second}, nil
+		ReceiptTimeout: 60 * time.Second}
+	if c.V2, err = c.detectV2(ctx); err != nil {
+		eth.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// detectV2 calls maxSelfPricedTtl, which only v2 has: v1 reverts with no data (no such function, no fallback).
+// Any other failure is an error, not a guess: sending v1 calldata to v2, or v2 to v1, reverts every update.
+func (c *Chain) detectV2(ctx context.Context) (bool, error) {
+	data, err := c.a.book.Pack("maxSelfPricedTtl", c.MarketID)
+	if err != nil {
+		return false, err
+	}
+	out, err := c.eth.CallContract(ctx, ethereum.CallMsg{To: &c.Book, Data: data}, nil)
+	if err == nil {
+		if len(out) != 32 {
+			return false, fmt.Errorf("book.maxSelfPricedTtl returned %d bytes, not one word", len(out))
+		}
+		return true, nil
+	}
+	// Only a revert says v1: every JSON-RPC error carries ErrorData, so an empty one alone could be a rate limit.
+	var de rpc.DataError
+	if strings.Contains(err.Error(), "execution reverted") && (!errors.As(err, &de) || len(hexData(de.ErrorData())) == 0) {
+		return false, nil
+	}
+	return false, fmt.Errorf("book version (maxSelfPricedTtl): %w", c.revertError(err))
+}
+
+// SelfPricedTTLCap is the market's maxSelfPricedTtl in seconds: 0 means self-priced splines are off. v1 has none.
+func (c *Chain) SelfPricedTTLCap(ctx context.Context) (uint32, error) {
+	if !c.V2 {
+		return 0, nil
+	}
+	out, err := c.call(ctx, c.Book, c.a.book, "maxSelfPricedTtl", c.MarketID)
+	if err != nil {
+		return 0, fmt.Errorf("maxSelfPricedTtl: %w", err)
+	}
+	return out[0].(uint32), nil
 }
 
 func (c *Chain) ChainID() *big.Int { return c.chainID }
@@ -144,7 +190,8 @@ func (c *Chain) call(ctx context.Context, to common.Address, a abi.ABI, method s
 // ---------------------------------------------------------------------------------------------
 
 func (c *Chain) Market(ctx context.Context) (Market, error) {
-	out, err := c.call(ctx, c.Book, c.a.book, "markets", c.MarketID)
+	// v1's ABI for both versions: v2's markets getter is the same auto getter, 13 words.
+	out, err := c.call(ctx, c.Book, c.a.bookV1, "markets", c.MarketID)
 	if err != nil {
 		return Market{}, fmt.Errorf("markets(%s): %w", c.MarketID, err)
 	}
@@ -211,9 +258,19 @@ func (c *Chain) Prices(ctx context.Context, f Feeds, expiry uint64) (index, forw
 }
 
 func (c *Chain) Spline(ctx context.Context) (Spline, error) {
-	out, err := c.call(ctx, c.Book, c.a.book, "splines", c.MarketID, c.AccountID)
+	// v1's flat outputs for both versions: v2 returns a struct of the same 12 static fields, so the same bytes
+	// (chain_test.go asserts the types agree); selfPriced is read separately.
+	out, err := c.call(ctx, c.Book, c.a.bookV1, "splines", c.MarketID, c.AccountID)
 	if err != nil {
 		return Spline{}, fmt.Errorf("splines: %w", err)
+	}
+	selfPriced := false
+	if c.V2 {
+		sp, err := c.call(ctx, c.Book, c.a.book, "isSelfPriced", c.MarketID, c.AccountID)
+		if err != nil {
+			return Spline{}, fmt.Errorf("isSelfPriced: %w", err)
+		}
+		selfPriced = sp[0].(bool)
 	}
 	return Spline{
 		OffsetTicks:         out[0].(int32),
@@ -228,6 +285,7 @@ func (c *Chain) Spline(ctx context.Context) (Spline, error) {
 		Seq:                 out[9].(uint64),
 		Active:              out[10].(bool),
 		Owner:               out[11].(common.Address),
+		SelfPriced:          selfPriced,
 	}, nil
 }
 
@@ -296,8 +354,24 @@ func (c *Chain) Allowance(ctx context.Context, owner, asset common.Address, posi
 // writes: one transaction at a time, signed through exchange.Signer (local key or KMS)
 // ---------------------------------------------------------------------------------------------
 
-// splineUpdate matches OnchainBook.SplineUpdate field for field (go-ethereum maps by camel-cased name).
+// splineUpdate matches OnchainBook.SplineUpdate field for field (go-ethereum maps by camel-cased name); v1's has no
+// SelfPriced (splineUpdateV1).
 type splineUpdate struct {
+	MarketId            *big.Int
+	AccountId           *big.Int
+	OffsetTicks         int32
+	HalfSpreadTicks     uint32
+	BidCurve            uint16
+	AskCurve            uint16
+	SkewTicksPerLot     uint32
+	MaxSkewTicks        uint32
+	RefillLotsPerSecond uint32
+	Ttl                 uint32
+	Seq                 uint64
+	SelfPriced          bool
+}
+
+type splineUpdateV1 struct {
 	MarketId            *big.Int
 	AccountId           *big.Int
 	OffsetTicks         int32
@@ -311,11 +385,24 @@ type splineUpdate struct {
 	Seq                 uint64
 }
 
+// ErrSelfPricedOnV1 is a self-priced spline for a v1 book, which has none: its offset would be read as a peg.
+var ErrSelfPricedOnV1 = errors.New("a self-priced spline needs a v2 book; this book is v1")
+
 func (c *Chain) UpdateCalldata(s Spline) ([]byte, error) {
+	if !c.V2 {
+		if s.SelfPriced {
+			return nil, ErrSelfPricedOnV1
+		}
+		return c.a.bookV1.Pack("updateSplines", []splineUpdateV1{{
+			MarketId: c.MarketID, AccountId: c.AccountID, OffsetTicks: s.OffsetTicks, HalfSpreadTicks: s.HalfSpreadTicks,
+			BidCurve: s.BidCurve, AskCurve: s.AskCurve, SkewTicksPerLot: s.SkewTicksPerLot, MaxSkewTicks: s.MaxSkewTicks,
+			RefillLotsPerSecond: s.RefillLotsPerSecond, Ttl: s.TTL, Seq: s.Seq,
+		}})
+	}
 	return c.a.book.Pack("updateSplines", []splineUpdate{{
 		MarketId: c.MarketID, AccountId: c.AccountID, OffsetTicks: s.OffsetTicks, HalfSpreadTicks: s.HalfSpreadTicks,
 		BidCurve: s.BidCurve, AskCurve: s.AskCurve, SkewTicksPerLot: s.SkewTicksPerLot, MaxSkewTicks: s.MaxSkewTicks,
-		RefillLotsPerSecond: s.RefillLotsPerSecond, Ttl: s.TTL, Seq: s.Seq,
+		RefillLotsPerSecond: s.RefillLotsPerSecond, Ttl: s.TTL, Seq: s.Seq, SelfPriced: s.SelfPriced,
 	}})
 }
 
@@ -461,7 +548,7 @@ func (c *Chain) errorName(data []byte) string {
 	if len(data) < 4 {
 		return ""
 	}
-	for _, a := range []abi.ABI{c.a.book, c.a.subAccounts, c.a.future, c.a.engine, c.a.forward, c.a.spot} {
+	for _, a := range []abi.ABI{c.a.book, c.a.bookV1, c.a.subAccounts, c.a.future, c.a.engine, c.a.forward, c.a.spot} {
 		for name, e := range a.Errors {
 			if bytes.Equal(e.ID[:4], data[:4]) {
 				return name

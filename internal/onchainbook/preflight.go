@@ -63,6 +63,21 @@ func Preflight(ctx context.Context, c *Chain, owner common.Address, p Params, cu
 	if uint32(p.TTL.Seconds()) > m.MaxTTL {
 		return m, Feeds{}, fmt.Errorf("ttl %s over the market's cap of %ds", p.TTL, m.MaxTTL)
 	}
+	if p.SelfPriced {
+		if !c.V2 {
+			return m, Feeds{}, ErrSelfPricedOnV1
+		}
+		cap, err := c.SelfPricedTTLCap(ctx)
+		if err != nil {
+			return m, Feeds{}, err
+		}
+		if cap == 0 {
+			return m, Feeds{}, errors.New("self-priced splines are off on this market (maxSelfPricedTtl 0: the vault's setSelfPricedTtlCap)")
+		}
+		if uint32(p.TTL.Seconds()) > cap {
+			return m, Feeds{}, fmt.Errorf("ttl %s over the market's self-priced cap of %ds", p.TTL, cap)
+		}
+	}
 	if p.BidCurve != curveID || p.AskCurve != curveID {
 		return m, Feeds{}, errors.New("both sides quote the configured curve id")
 	}
@@ -138,7 +153,7 @@ func Preflight(ctx context.Context, c *Chain, owner common.Address, p Params, cu
 			log.Info("maker registered", "account", c.AccountID, "tx", hash.Hex())
 		}
 	}
-	log.Info("preflight ok", "market_enabled", m.Enabled, "future", m.Future.Hex(), "expiry", m.Expiry,
+	log.Info("preflight ok", "book_v2", c.V2, "self_priced", p.SelfPriced, "market_enabled", m.Enabled, "future", m.Future.Hex(), "expiry", m.Expiry,
 		"last_trade", m.LastTradeTime.UTC(), "tick", m.TickSize, "lot", m.LotSize, "index", feeds.Index.Hex(),
 		"forward", feeds.Forward.Hex(), "reference", feeds.Reference.Hex())
 	return m, feeds, nil

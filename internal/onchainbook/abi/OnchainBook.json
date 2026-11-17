@@ -79,6 +79,30 @@
   },
   {
     "type": "function",
+    "name": "isSelfPriced",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "accountId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "makerAllowed",
     "inputs": [
       {
@@ -177,6 +201,25 @@
   },
   {
     "type": "function",
+    "name": "maxSelfPricedTtl",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "registerMaker",
     "inputs": [
       {
@@ -240,64 +283,71 @@
     ],
     "outputs": [
       {
-        "name": "offsetTicks",
-        "type": "int32",
-        "internalType": "int32"
-      },
-      {
-        "name": "halfSpreadTicks",
-        "type": "uint32",
-        "internalType": "uint32"
-      },
-      {
-        "name": "bidCurve",
-        "type": "uint16",
-        "internalType": "uint16"
-      },
-      {
-        "name": "askCurve",
-        "type": "uint16",
-        "internalType": "uint16"
-      },
-      {
-        "name": "skewTicksPerLot",
-        "type": "uint32",
-        "internalType": "uint32"
-      },
-      {
-        "name": "maxSkewTicks",
-        "type": "uint32",
-        "internalType": "uint32"
-      },
-      {
-        "name": "refillLotsPerSecond",
-        "type": "uint32",
-        "internalType": "uint32"
-      },
-      {
-        "name": "updatedAt",
-        "type": "uint40",
-        "internalType": "uint40"
-      },
-      {
-        "name": "ttl",
-        "type": "uint32",
-        "internalType": "uint32"
-      },
-      {
-        "name": "seq",
-        "type": "uint64",
-        "internalType": "uint64"
-      },
-      {
-        "name": "active",
-        "type": "bool",
-        "internalType": "bool"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
+        "name": "v",
+        "type": "tuple",
+        "internalType": "struct OnchainBook.SplineView",
+        "components": [
+          {
+            "name": "offsetTicks",
+            "type": "int32",
+            "internalType": "int32"
+          },
+          {
+            "name": "halfSpreadTicks",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "bidCurve",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "askCurve",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "skewTicksPerLot",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "maxSkewTicks",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "refillLotsPerSecond",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "updatedAt",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "ttl",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "seq",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "active",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "owner",
+            "type": "address",
+            "internalType": "address"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -378,6 +428,11 @@
             "name": "seq",
             "type": "uint64",
             "internalType": "uint64"
+          },
+          {
+            "name": "selfPriced",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }
@@ -428,6 +483,11 @@
   {
     "type": "error",
     "name": "OB_InvalidMarket",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OB_InvalidMid",
     "inputs": []
   },
   {

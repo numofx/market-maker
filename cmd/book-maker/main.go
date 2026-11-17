@@ -1,5 +1,6 @@
-// book-maker quotes one market of risk-core's OnchainBook (EURC-30NOV26, Stage 2) from an account outside
-// Matching: one oracle-pegged spline, repriced by updateSplines when the forward's basis to the index moves.
+// book-maker quotes one market of risk-core's OnchainBook (Stage 2) from an account outside Matching: one spline,
+// either oracle-pegged (repriced by updateSplines when the forward's basis to the index moves) or, on a v2 book,
+// self-priced (MM_BOOK_SELF_PRICED: the forward itself, on a short ttl refreshed every cycle).
 // See internal/onchainbook and docs/book-maker.md.
 //
 // It starts in dry run (MM_BOOK_DRY_RUN=true by default): it reads, decides and logs, and sends nothing.
@@ -75,7 +76,8 @@ func run(log *slog.Logger) int {
 	defer chain.Close()
 	log.Info("book-maker starting", "book", cfg.book.Hex(), "market", cfg.marketID, "account", cfg.accountID,
 		"owner", signer.Address().Hex(), "chain_id", chain.ChainID(), "dry_run", cfg.dryRun, "curve", cfg.curve,
-		"half_spread_ticks", cfg.params.HalfSpreadTicks, "ttl", cfg.params.TTL)
+		"half_spread_ticks", cfg.params.HalfSpreadTicks, "ttl", cfg.params.TTL, "book_v2", chain.V2,
+		"self_priced", cfg.params.SelfPriced)
 
 	market, feeds, err := onchainbook.Preflight(ctx, chain, signer.Address(), cfg.params, cfg.curveID, cfg.curve,
 		cfg.referenceMarketID, cfg.dryRun, log)
@@ -169,6 +171,19 @@ func load() (config, error) {
 		}
 		cfg.curve = curve
 	}
+	selfPriced := false
+	switch strings.ToLower(envOr("MM_BOOK_SELF_PRICED", "false")) {
+	case "true", "1":
+		selfPriced = true
+	case "false", "0":
+	default:
+		problems = append(problems, "MM_BOOK_SELF_PRICED must be true or false")
+	}
+	// Self-priced defaults: a 10s quote refreshed every 5s cycle (decision C6); pegged: an hour, refreshed at 30m.
+	ttlDefault, refreshDefault := uint64(3600), uint64(1800)
+	if selfPriced {
+		ttlDefault, refreshDefault = 10, 2
+	}
 	divergence, err := strconv.ParseFloat(envOr("MM_BOOK_MAX_DIVERGENCE_BPS", "50"), 64)
 	if err != nil {
 		problems = append(problems, "MM_BOOK_MAX_DIVERGENCE_BPS is not a number")
@@ -180,11 +195,12 @@ func load() (config, error) {
 		SkewTicksPerLot:       uint32(num("MM_BOOK_SKEW_TICKS_PER_LOT", 0)),
 		MaxSkewTicks:          uint32(num("MM_BOOK_MAX_SKEW_TICKS", 0)),
 		RefillLotsPerSecond:   uint32(num("MM_BOOK_REFILL_LOTS_PER_SECOND", 0)),
-		TTL:                   time.Duration(num("MM_BOOK_TTL_SECONDS", 3600)) * time.Second,
-		RefreshAfter:          time.Duration(num("MM_BOOK_REFRESH_SECONDS", 1800)) * time.Second,
+		TTL:                   time.Duration(num("MM_BOOK_TTL_SECONDS", ttlDefault)) * time.Second,
+		RefreshAfter:          time.Duration(num("MM_BOOK_REFRESH_SECONDS", refreshDefault)) * time.Second,
 		RepriceTicks:          int64(num("MM_BOOK_REPRICE_TICKS", 20)),
 		CutoffBeforeLastTrade: time.Duration(num("MM_BOOK_CUTOFF_SECONDS", 3600)) * time.Second,
 		MaxDivergenceBPS:      divergence,
+		SelfPriced:            selfPriced,
 	}
 	if err := cfg.params.Validate(); err != nil {
 		problems = append(problems, err.Error())
@@ -192,6 +208,8 @@ func load() (config, error) {
 	cfg.poll = time.Duration(num("MM_BOOK_POLL_SECONDS", 5)) * time.Second
 	if cfg.poll <= 0 {
 		problems = append(problems, "MM_BOOK_POLL_SECONDS must be positive")
+	} else if err := onchainbook.CheckCadence(cfg.params, cfg.poll); err != nil {
+		problems = append(problems, err.Error())
 	}
 	cfg.heartbeatURL = strings.TrimSpace(os.Getenv("MM_BOOK_HEARTBEAT_URL"))
 	switch strings.ToLower(envOr("MM_BOOK_DRY_RUN", "true")) {

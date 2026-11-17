@@ -7,6 +7,11 @@
 // updateSplines transaction that moves the offset; the book prices every take against the index of that
 // moment, so the offset only has to track the forward's basis to the index, which moves slowly.
 //
+// Self-priced (v2 books, spec C4.2, Params.SelfPriced): the spline's mid is an absolute price in ticks, which the book
+// quotes as sent, with no index read, until the spline's ttl (capped by the market's maxSelfPricedTtl) lapses. The
+// maker then carries the staleness: a short ttl, refreshed every cycle. The book still band-checks every fill
+// against the index, so a stale index stops self-priced quotes too.
+//
 // This file is the decision, with no chain access: given what was read, what should the spline be and
 // is a transaction worth sending.
 package onchainbook
@@ -41,6 +46,8 @@ type Spline struct {
 	Active              bool
 	// Owner is the account owner that wrote it: after a transfer of the account the book stops quoting it.
 	Owner common.Address
+	// SelfPriced: OffsetTicks is the mid itself in ticks, not an offset from the index (v2 books only).
+	SelfPriced bool
 }
 
 // Live is whether the book would quote it at now: active and within its ttl. The book also requires the account's
@@ -68,6 +75,9 @@ type Params struct {
 	// MaxDivergenceBPS cancels when the Data Streams index and the Chainlink push reference disagree by
 	// more: the index is DEX-weighted and the book cannot tell a pool skew from a move (spec B6, B14a).
 	MaxDivergenceBPS float64
+	// SelfPriced sends the forward itself as the mid (round(forward / tick) ticks) rather than its offset from the
+	// index. The quote is then only as fresh as the last update: keep TTL short and RefreshAfter under the poll.
+	SelfPriced bool
 }
 
 func (p Params) Validate() error {
@@ -84,6 +94,25 @@ func (p Params) Validate() error {
 		return fmt.Errorf("cutoff %s must not be negative", p.CutoffBeforeLastTrade)
 	case p.BidCurve == 0 || p.AskCurve == 0:
 		return fmt.Errorf("curve ids must be set")
+	}
+	return nil
+}
+
+// SendLatency is the budget for an update to land after the cycle that decided it: a Base block is 2s, plus the
+// estimate and the receipt poll.
+const SendLatency = 3 * time.Second
+
+// CheckCadence refuses a self-priced configuration whose quote can lapse between cycles. A cycle that finds the
+// spline just under RefreshAfter old sends nothing; the next comes a poll later and its update lands SendLatency
+// after that, so RefreshAfter + poll + SendLatency must fit in the ttl. (Pegged splines live for an hour and are not
+// held to it.)
+func CheckCadence(p Params, poll time.Duration) error {
+	if !p.SelfPriced {
+		return nil
+	}
+	if worst := p.RefreshAfter + poll + SendLatency; worst > p.TTL {
+		return fmt.Errorf("self-priced: refresh %s + poll %s + send %s = %s, over the ttl %s: the quote would lapse between cycles",
+			p.RefreshAfter, poll, SendLatency, worst, p.TTL)
 	}
 	return nil
 }
@@ -142,7 +171,13 @@ func Decide(p Params, in Inputs, cur Spline) Decision {
 	if divergenceBPS(in.Index, in.Reference) > p.MaxDivergenceBPS {
 		return down("index_reference_divergence")
 	}
-	offset, ok := OffsetTicks(in.Forward, in.Index, in.TickSize)
+	var offset int32
+	var ok bool
+	if p.SelfPriced {
+		offset, ok = MidTicks(in.Forward, in.TickSize)
+	} else {
+		offset, ok = OffsetTicks(in.Forward, in.Index, in.TickSize)
+	}
 	if !ok {
 		return down("offset_out_of_range")
 	}
@@ -158,6 +193,7 @@ func Decide(p Params, in Inputs, cur Spline) Decision {
 		TTL:                 uint32(p.TTL / time.Second),
 		Seq:                 NextSeq(cur.Seq, in.Now),
 		Active:              true,
+		SelfPriced:          p.SelfPriced,
 	}
 	reason := ""
 	switch {
@@ -166,7 +202,7 @@ func Decide(p Params, in Inputs, cur Spline) Decision {
 	case cur.HalfSpreadTicks != target.HalfSpreadTicks || cur.BidCurve != target.BidCurve ||
 		cur.AskCurve != target.AskCurve || cur.SkewTicksPerLot != target.SkewTicksPerLot ||
 		cur.MaxSkewTicks != target.MaxSkewTicks || cur.RefillLotsPerSecond != target.RefillLotsPerSecond ||
-		cur.TTL != target.TTL:
+		cur.TTL != target.TTL || cur.SelfPriced != target.SelfPriced:
 		reason = "config_changed"
 	case abs64(int64(target.OffsetTicks)-int64(cur.OffsetTicks)) >= p.RepriceTicks:
 		reason = "repriced"
@@ -197,6 +233,13 @@ func OffsetTicks(forward, index, tick *big.Int) (int32, bool) {
 		return 0, false
 	}
 	return int32(q.Int64()), true
+}
+
+// MidTicks is round(forward / tick), a self-priced mid, if it is positive and fits an int32 (the book refuses a
+// self-priced mid at or below 0: OB_InvalidMid).
+func MidTicks(forward, tick *big.Int) (int32, bool) {
+	q, ok := OffsetTicks(forward, big.NewInt(0), tick)
+	return q, ok && q > 0
 }
 
 // NextSeq is strictly above the stored seq and at least the wall clock in milliseconds, so a newer
