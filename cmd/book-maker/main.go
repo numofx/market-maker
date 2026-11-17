@@ -179,10 +179,11 @@ func load() (config, error) {
 	default:
 		problems = append(problems, "MM_BOOK_SELF_PRICED must be true or false")
 	}
-	// Self-priced defaults: a 10s quote refreshed every 5s cycle (decision C6); pegged: an hour, refreshed at 30m.
+	// Self-priced defaults: a 30s quote refreshed once 22s old (owner, 2026-11-17: 30s rather than C6's ~10s, for
+	// gas; 22 + 5 + 3 = 30, CheckCadence), a reprice sending at once; pegged: an hour, refreshed at 30m.
 	ttlDefault, refreshDefault := uint64(3600), uint64(1800)
 	if selfPriced {
-		ttlDefault, refreshDefault = 10, 2
+		ttlDefault, refreshDefault = 30, 22
 	}
 	divergence, err := strconv.ParseFloat(envOr("MM_BOOK_MAX_DIVERGENCE_BPS", "50"), 64)
 	if err != nil {

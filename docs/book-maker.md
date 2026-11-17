@@ -21,7 +21,8 @@ update. A failure other than a plain revert is an error, not "v1".
 - **Self-priced** (decision C6). The mid is the forward itself, sent as `round(forward / tick)` ticks. The book
   quotes it as sent, with no report freshness needed, until its ttl lapses. The ttl is capped by the market's
   `maxSelfPricedTtl` (vault-set, 60 s), and 0 means self-priced is off. The maker carries the staleness, so the
-  quote is short-lived and refreshed every cycle: ttl 10 s, poll 5 s, refresh after 2 s. Startup refuses a
+  quote is short-lived: ttl 30 s, poll 5 s, refresh once 22 s old (the owner's choice on 2026-11-17, over C6's
+  ~10 s, for gas). A reprice of `MM_BOOK_REPRICE_TICKS` still sends at once. Startup refuses a
   configuration where `refresh + poll + 3 s` (send latency) exceeds the ttl, because the quote could lapse between
   cycles. Every fill is still band-checked against the index, so the bot keeps all its guards: an unreadable or
   diverging index cancels, as in pegged mode.
@@ -57,7 +58,7 @@ update. A failure other than a plain revert is an error, not "v1".
   stops (`superseded`, exit 0) and does not cancel. At SIGTERM a process cancels the spline only if the stored seq
   is still its own. A draining container therefore never quotes over, or takes down, its successor.
 - **Shutdown.** It cancels its spline. If the cancel fails, the spline lapses at its ttl (`MM_BOOK_TTL_SECONDS`):
-  10 s when self-priced. If the process dies, a self-priced quote stops filling within its ttl.
+  30 s when self-priced. If the process dies, a self-priced quote stops filling within its ttl.
 - **Preflight, self-priced.** It also refuses a v1 book, a market whose `maxSelfPricedTtl` is 0, and a ttl over
   that cap. If the vault lowers the cap below the ttl later, every update reverts (`OB_InvalidTtl`). The cap also
   applies to quotes already posted, so the quote lapses rather than standing.
@@ -69,7 +70,7 @@ The owner of the maker account signs and pays gas for every update.
 | Mode | Gas per update | Rate | Cost |
 |---|---|---|---|
 | Pegged | about 40k | a refresh every 30 minutes, plus repricing | a small fraction of the EURC v3 relayer's spend |
-| Self-priced | 73,061 (v2, measured on the fork; 127k for the first write) | every 5 s cycle: 17,280 updates a day | ~1.26B gas a day, about 0.0076 ETH a day at 0.006 gwei (Base, 2026-11-17) |
+| Self-priced | 73,061 (v2, measured on the fork; 127k for the first write) | at 30 s ttl: a refresh about every 25 s plus reprices, ~3,500 a day (10 s ttl: 17,280) | ~0.26B gas a day, about 0.0016 ETH a day at 0.006 gwei (Base, 2026-11-17) |
 
 Size the owner's ETH and its `GAS_WATCH` threshold for self-priced before switching.
 
@@ -103,8 +104,8 @@ SIGTERM time to cancel the spline.
 | `MM_BOOK_SKEW_TICKS_PER_LOT`, `MM_BOOK_MAX_SKEW_TICKS` | 0 | on-chain inventory skew (B7) |
 | `MM_BOOK_REFILL_LOTS_PER_SECOND` | 0 | 0: a consumed level returns at the next update |
 | `MM_BOOK_SELF_PRICED` | `false` | v2 books only; see above |
-| `MM_BOOK_TTL_SECONDS` | 3600; self-priced 10 | at most the market's `maxTtl`; self-priced, at most `maxSelfPricedTtl` |
-| `MM_BOOK_REFRESH_SECONDS` | 1800; self-priced 2 | under the ttl; self-priced, `refresh + poll + 3` at most the ttl |
+| `MM_BOOK_TTL_SECONDS` | 3600; self-priced 30 | at most the market's `maxTtl`; self-priced, at most `maxSelfPricedTtl` |
+| `MM_BOOK_REFRESH_SECONDS` | 1800; self-priced 22 | under the ttl; self-priced, `refresh + poll + 3` at most the ttl |
 | `MM_BOOK_REPRICE_TICKS` | 20 | |
 | `MM_BOOK_CUTOFF_SECONDS` | 3600 | before the series' last trade |
 | `MM_BOOK_MAX_DIVERGENCE_BPS` | 50 | |
