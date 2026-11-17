@@ -37,6 +37,8 @@ type config struct {
 	params            onchainbook.Params
 	poll              time.Duration
 	dryRun            bool
+	// heartbeatURL (MM_BOOK_HEARTBEAT_URL, optional, a secret) is pinged while the book is quoted: a dead-man check.
+	heartbeatURL string
 }
 
 func main() {
@@ -84,10 +86,19 @@ func run(log *slog.Logger) int {
 	maker := &onchainbook.Maker{Book: chain, Params: cfg.params, Feeds: feeds, Market: market, Owner: signer.Address(),
 		DryRun: cfg.dryRun, Log: log}
 
+	beat := &onchainbook.Heartbeat{URL: cfg.heartbeatURL, Every: time.Minute}
+	log.Info("heartbeat", "configured", cfg.heartbeatURL != "")
+
 	ticker := time.NewTicker(cfg.poll)
 	defer ticker.Stop()
 	for {
-		if _, err := maker.Cycle(ctx); err != nil {
+		d, err := maker.Cycle(ctx)
+		if onchainbook.ShouldBeat(d, err, cfg.dryRun) {
+			if berr := beat.Beat(ctx); berr != nil {
+				log.Warn("heartbeat", "error", berr)
+			}
+		}
+		if err != nil {
 			if errors.Is(err, onchainbook.ErrSuperseded) {
 				// Another process owns the spline: stop without cancelling it.
 				log.Warn("superseded", "error", err)
@@ -182,6 +193,7 @@ func load() (config, error) {
 	if cfg.poll <= 0 {
 		problems = append(problems, "MM_BOOK_POLL_SECONDS must be positive")
 	}
+	cfg.heartbeatURL = strings.TrimSpace(os.Getenv("MM_BOOK_HEARTBEAT_URL"))
 	switch strings.ToLower(envOr("MM_BOOK_DRY_RUN", "true")) {
 	case "true", "1":
 		cfg.dryRun = true

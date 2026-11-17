@@ -76,6 +76,7 @@ SIGTERM time to cancel the spline.
 | `MM_BOOK_MAX_DIVERGENCE_BPS` | 50 | |
 | `MM_BOOK_POLL_SECONDS` | 5 | |
 | `MM_SIGNER_BACKEND` | `local` | `kms` with `MM_KMS_KEY_ID`, or `local` with `MM_OWNER_PRIVATE_KEY` |
+| `MM_BOOK_HEARTBEAT_URL` | unset | a dead-man check (healthchecks.io), pinged at most once a minute while the book is quoted: an update landed, a live spline needed nothing, or the deliberate stop before last trade. An error, dry run, or a spline held down by an unreadable or diverging feed sends no ping, so the check alerts when that lasts. A secret; never logged |
 
 ## Rehearsed
 
