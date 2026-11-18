@@ -88,6 +88,9 @@ type Chain struct {
 	ReceiptTimeout time.Duration
 	// V2 is a book with self-priced splines (detected by NewChain); false: v1, pegged only.
 	V2 bool
+	// HTTPReference, when set, is the divergence guard's reference instead of an engine market's feed: for a market
+	// whose engine has no price independent of the index (cNGN). Set by main from MM_BOOK_REFERENCE_URL.
+	HTTPReference *HTTPReference
 }
 
 func NewChain(ctx context.Context, url string, signer exchange.Signer, book, subAccounts common.Address, marketID, accountID uint64) (*Chain, error) {
@@ -224,6 +227,12 @@ func (c *Chain) ResolveFeeds(ctx context.Context, m Market, referenceMarketID ui
 		return f, fmt.Errorf("future.forwardFeed: %w", err)
 	}
 	f.Forward = out[0].(common.Address)
+	if c.HTTPReference != nil {
+		if f.Index == (common.Address{}) || f.Forward == (common.Address{}) {
+			return f, fmt.Errorf("a feed is unset: %+v", f)
+		}
+		return f, nil // the reference is the rate service, read in Prices
+	}
 	if out, err = c.call(ctx, m.Engine, c.a.engine, "getMarketFeeds", new(big.Int).SetUint64(referenceMarketID)); err != nil {
 		return f, fmt.Errorf("engine.getMarketFeeds(%d): %w", referenceMarketID, err)
 	}
@@ -249,7 +258,15 @@ func (c *Chain) Prices(ctx context.Context, f Feeds, expiry uint64) (index, forw
 		return out[0].(*big.Int)
 	}
 	index = spot(f.Index, "index")
-	reference = spot(f.Reference, "reference")
+	if c.HTTPReference != nil {
+		var err error
+		if reference, err = c.HTTPReference.Price(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("reference (%s): %w", c.HTTPReference.URL, err))
+			reference = nil
+		}
+	} else {
+		reference = spot(f.Reference, "reference")
+	}
 	out, err := c.call(ctx, f.Forward, c.a.forward, "getForwardPrice", expiry)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("forward: %w", err))

@@ -33,6 +33,8 @@ type config struct {
 	marketID          uint64
 	accountID         uint64
 	referenceMarketID uint64
+	referenceURL      string
+	referenceMaxAge   time.Duration
 	curveID           uint16
 	curve             []onchainbook.Region
 	params            onchainbook.Params
@@ -74,6 +76,10 @@ func run(log *slog.Logger) int {
 		return 1
 	}
 	defer chain.Close()
+	if cfg.referenceURL != "" {
+		chain.HTTPReference = &onchainbook.HTTPReference{URL: cfg.referenceURL, MaxAge: cfg.referenceMaxAge}
+		log.Info("reference from the rate service, not an engine feed", "url", cfg.referenceURL, "max_age", cfg.referenceMaxAge)
+	}
 	log.Info("book-maker starting", "book", cfg.book.Hex(), "market", cfg.marketID, "account", cfg.accountID,
 		"owner", signer.Address().Hex(), "chain_id", chain.ChainID(), "dry_run", cfg.dryRun, "curve", cfg.curve,
 		"half_spread_ticks", cfg.params.HalfSpreadTicks, "ttl", cfg.params.TTL, "book_v2", chain.V2,
@@ -164,6 +170,12 @@ func load() (config, error) {
 	cfg.marketID = num("MM_BOOK_MARKET_ID", 1)
 	cfg.accountID = required("MM_BOOK_ACCOUNT_ID")
 	cfg.referenceMarketID = num("MM_BOOK_REFERENCE_MARKET_ID", 2)
+	// cNGN: the engine's only cNGN price is the index itself, so the reference is the rate service (cngn-rate-picker).
+	cfg.referenceURL = envOr("MM_BOOK_REFERENCE_URL", "")
+	cfg.referenceMaxAge = time.Duration(num("MM_BOOK_REFERENCE_MAX_AGE_SECONDS", 300)) * time.Second
+	if cfg.referenceURL != "" && !strings.HasPrefix(cfg.referenceURL, "http://") && !strings.HasPrefix(cfg.referenceURL, "https://") {
+		problems = append(problems, "MM_BOOK_REFERENCE_URL must be an http(s) URL")
+	}
 	cfg.curveID = uint16(num("MM_BOOK_CURVE_ID", 1))
 	if spec := need("MM_BOOK_CURVE"); spec != "" {
 		curve, err := onchainbook.ParseCurve(spec)
